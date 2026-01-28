@@ -5,7 +5,7 @@ module.exports = {
       cwd: '/root/Bharat-Mock-Backend',
       script: 'npm',
       args: 'run start',
-      interpreter: '/bin/bash',
+      interpreter: 'none',
       env: {
         NODE_ENV: 'production'
       },
