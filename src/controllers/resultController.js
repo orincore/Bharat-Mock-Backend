@@ -10,6 +10,7 @@ const getResults = async (req, res) => {
       .from('results')
       .select(`
         id,
+        attempt_id,
         score,
         total_marks,
         percentage,
@@ -21,6 +22,9 @@ const getResults = async (req, res) => {
         total_participants,
         status,
         created_at,
+        exam_attempts!inner (
+          language
+        ),
         exams (
           id,
           title,
@@ -41,9 +45,15 @@ const getResults = async (req, res) => {
       });
     }
 
+    const formattedResults = results.map(r => ({
+      ...r,
+      language: r.exam_attempts?.language || 'en',
+      examTitle: r.exams?.title
+    }));
+
     res.json({
       success: true,
-      data: results,
+      data: formattedResults,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -128,6 +138,9 @@ const getResultByAttemptId = async (req, res) => {
         created_at,
         attempt_id,
         exam_id,
+        exam_attempts!inner (
+          language
+        ),
         exams (
           id,
           title,
@@ -150,6 +163,8 @@ const getResultByAttemptId = async (req, res) => {
       });
     }
 
+    const attemptLanguage = result.exam_attempts?.language || 'en';
+
     const { data: sectionAnalysis } = await supabase
       .from('section_analysis')
       .select(`
@@ -163,14 +178,17 @@ const getResultByAttemptId = async (req, res) => {
         time_taken,
         exam_sections (
           id,
-          name
+          name,
+          name_hi
         )
       `)
       .eq('result_id', result.id);
 
     result.sectionWiseAnalysis = sectionAnalysis?.map(sa => ({
       sectionId: sa.exam_sections.id,
-      sectionName: sa.exam_sections.name,
+      sectionName: attemptLanguage === 'hi' && sa.exam_sections.name_hi 
+        ? sa.exam_sections.name_hi 
+        : sa.exam_sections.name,
       score: sa.score,
       totalMarks: sa.total_marks,
       correctAnswers: sa.correct_answers,
@@ -187,7 +205,9 @@ const getResultByAttemptId = async (req, res) => {
       pass_percentage: result.exams.pass_percentage,
       total_questions: result.exams.total_questions
     };
+    result.language = attemptLanguage;
     delete result.exams;
+    delete result.exam_attempts;
 
     res.json({
       success: true,
@@ -298,7 +318,14 @@ const getAnswerReview = async (req, res) => {
 
     const { data: result } = await supabase
       .from('results')
-      .select('attempt_id, exam_id, user_id')
+      .select(`
+        attempt_id,
+        exam_id,
+        user_id,
+        exam_attempts!inner (
+          language
+        )
+      `)
       .eq('id', resultId)
       .eq('user_id', req.user.id)
       .single();
@@ -310,6 +337,8 @@ const getAnswerReview = async (req, res) => {
       });
     }
 
+    const attemptLanguage = result.exam_attempts?.language || 'en';
+
     const { data: questions } = await supabase
       .from('questions')
       .select(`
@@ -317,18 +346,22 @@ const getAnswerReview = async (req, res) => {
         section_id,
         type,
         text,
+        text_hi,
         marks,
         negative_marks,
         explanation,
+        explanation_hi,
         image_url,
         question_order,
         exam_sections!inner (
           id,
-          name
+          name,
+          name_hi
         ),
         question_options (
           id,
           option_text,
+          option_text_hi,
           is_correct,
           option_order,
           image_url
@@ -337,12 +370,20 @@ const getAnswerReview = async (req, res) => {
       .eq('exam_id', result.exam_id)
       .order('question_order');
 
+    const filteredQuestions = questions.filter(q => {
+      if (attemptLanguage === 'hi') {
+        return (q.text_hi && q.text_hi.trim()) || 
+               (q.question_options && q.question_options.some(opt => opt.option_text_hi && opt.option_text_hi.trim()));
+      }
+      return q.text && q.text.trim();
+    });
+
     const { data: userAnswers } = await supabase
       .from('user_answers')
       .select('question_id, answer, is_correct, marks_obtained, time_taken')
       .eq('attempt_id', result.attempt_id);
 
-    const reviewData = questions.map(q => {
+    const reviewData = filteredQuestions.map(q => {
       const userAnswer = userAnswers.find(ua => ua.question_id === q.id);
       const correctOptions = q.question_options
         .filter(opt => opt.is_correct)
@@ -351,18 +392,20 @@ const getAnswerReview = async (req, res) => {
       return {
         id: q.id,
         sectionId: q.section_id,
-        sectionName: q.exam_sections?.name || 'Section',
+        sectionName: attemptLanguage === 'hi' && q.exam_sections?.name_hi 
+          ? q.exam_sections.name_hi 
+          : q.exam_sections?.name || 'Section',
         type: q.type,
-        text: q.text,
+        text: attemptLanguage === 'hi' && q.text_hi ? q.text_hi : q.text,
         marks: q.marks,
         negativeMarks: q.negative_marks,
-        explanation: q.explanation,
+        explanation: attemptLanguage === 'hi' && q.explanation_hi ? q.explanation_hi : q.explanation,
         imageUrl: q.image_url,
         options: q.question_options
           .sort((a, b) => a.option_order - b.option_order)
           .map(opt => ({
             id: opt.id,
-            option_text: opt.option_text,
+            option_text: attemptLanguage === 'hi' && opt.option_text_hi ? opt.option_text_hi : opt.option_text,
             is_correct: opt.is_correct,
             option_order: opt.option_order,
             image_url: opt.image_url

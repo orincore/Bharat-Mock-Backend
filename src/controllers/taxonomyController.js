@@ -523,7 +523,8 @@ const getExamsByCategory = async (req, res) => {
         thumbnail_url,
         slug,
         url_path,
-        subcategory
+        subcategory,
+        supports_hindi
       `, { count: 'exact' })
       .or(`category_id.eq.${category.id},category.ilike.%${slug}%`)
       .eq('is_published', true)
@@ -644,7 +645,8 @@ const getExamsBySubcategory = async (req, res) => {
         thumbnail_url,
         slug,
         url_path,
-        subcategory
+        subcategory,
+        supports_hindi
       `, { count: 'exact' })
       .eq('subcategory_id', subcategory.id)
       .eq('is_published', true)

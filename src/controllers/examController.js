@@ -38,6 +38,7 @@ const getExams = async (req, res) => {
         negative_marking,
         negative_mark_value,
         allow_anytime,
+        supports_hindi,
         exam_type,
         show_in_mock_tests,
         slug,
@@ -167,6 +168,7 @@ const buildExamQuery = () => {
       negative_marking,
       negative_mark_value,
       allow_anytime,
+      supports_hindi,
       slug,
       url_path
     `)
@@ -392,10 +394,11 @@ const getExamCategories = async (req, res) => {
 const startExam = async (req, res) => {
   try {
     const { examId } = req.params;
+    const { language = 'en' } = req.body;
 
     const { data: exam, error: examError } = await supabase
       .from('exams')
-      .select('id, status, start_date, end_date, is_free, price, allow_anytime')
+      .select('id, status, start_date, end_date, is_free, price, allow_anytime, supports_hindi')
       .eq('id', examId)
       .eq('is_published', true)
       .is('deleted_at', null)
@@ -427,6 +430,20 @@ const startExam = async (req, res) => {
       }
     }
 
+    if (language !== 'en' && language !== 'hi') {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid language. Must be "en" or "hi"'
+      });
+    }
+
+    if (language === 'hi' && !exam.supports_hindi) {
+      return res.status(400).json({
+        success: false,
+        message: 'Hindi language not supported for this exam'
+      });
+    }
+
     if (!exam.is_free) {
       const { data: payment } = await supabase
         .from('transactions')
@@ -449,10 +466,11 @@ const startExam = async (req, res) => {
       .insert({
         exam_id: examId,
         user_id: req.user.id,
+        language: language,
         ip_address: req.ip,
         user_agent: req.headers['user-agent']
       })
-      .select('id, started_at')
+      .select('id, started_at, language')
       .single();
 
     if (attemptError) {
@@ -468,7 +486,8 @@ const startExam = async (req, res) => {
       message: 'Exam started successfully',
       data: {
         attemptId: attempt.id,
-        startedAt: attempt.started_at
+        startedAt: attempt.started_at,
+        language: attempt.language
       }
     });
   } catch (error) {
@@ -486,7 +505,7 @@ const getExamQuestions = async (req, res) => {
 
     const { data: attempt, error: attemptError } = await supabase
       .from('exam_attempts')
-      .select('id, exam_id, user_id, is_submitted')
+      .select('id, exam_id, user_id, is_submitted, language')
       .eq('id', attemptId)
       .eq('exam_id', examId)
       .eq('user_id', req.user.id)
@@ -568,6 +587,7 @@ const getExamQuestions = async (req, res) => {
     const sectionsWithQuestions = sections.map(section => ({
       id: section.id,
       name: section.name,
+      name_hi: section.name_hi || null,
       totalQuestions: section.total_questions,
       marksPerQuestion: section.marks_per_question,
       duration: section.duration,
@@ -716,20 +736,40 @@ const submitExam = async (req, res) => {
 
 const evaluateExam = async (attemptId, examId, userId) => {
   try {
+    const { data: attemptData } = await supabase
+      .from('exam_attempts')
+      .select('language')
+      .eq('id', attemptId)
+      .single();
+
+    const attemptLanguage = attemptData?.language || 'en';
+
     const { data: questions } = await supabase
       .from('questions')
       .select(`
         id,
         section_id,
         type,
+        text,
+        text_hi,
         marks,
         negative_marks,
         question_options!inner (
           id,
-          is_correct
+          is_correct,
+          option_text,
+          option_text_hi
         )
       `)
       .eq('exam_id', examId);
+
+    const filteredQuestions = questions.filter(q => {
+      if (attemptLanguage === 'hi') {
+        return (q.text_hi && q.text_hi.trim()) || 
+               (q.question_options && q.question_options.some(opt => opt.option_text_hi && opt.option_text_hi.trim()));
+      }
+      return q.text && q.text.trim();
+    });
 
     const { data: userAnswers } = await supabase
       .from('user_answers')
@@ -743,7 +783,7 @@ const evaluateExam = async (attemptId, examId, userId) => {
 
     const sectionScores = {};
 
-    for (const question of questions) {
+    for (const question of filteredQuestions) {
       const userAnswer = userAnswers.find(ua => ua.question_id === question.id);
       
       if (!userAnswer || !userAnswer.answer) {
@@ -816,7 +856,7 @@ const evaluateExam = async (attemptId, examId, userId) => {
     const percentage = (totalScore / exam.total_marks) * 100;
     const status = percentage >= exam.pass_percentage ? 'pass' : 'fail';
 
-    const { data: attempt } = await supabase
+    const { data: attemptRecord } = await supabase
       .from('exam_attempts')
       .select('time_taken')
       .eq('id', attemptId)
@@ -834,7 +874,7 @@ const evaluateExam = async (attemptId, examId, userId) => {
         correct_answers: correctAnswers,
         wrong_answers: wrongAnswers,
         unattempted: unattempted,
-        time_taken: attempt.time_taken,
+        time_taken: attemptRecord.time_taken,
         status: status,
         is_published: true
       })
