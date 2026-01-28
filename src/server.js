@@ -21,6 +21,9 @@ const adminRoutes = require('./routes/adminRoutes');
 
 const app = express();
 
+// Trust first proxy (Nginx) so rate limiting & logging use the real client IP.
+app.set('trust proxy', 1);
+
 app.use(helmet());
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'];
