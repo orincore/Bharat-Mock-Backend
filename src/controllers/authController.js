@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { v4: uuidv4 } = require('uuid');
+const { sendWelcomeEmail, sendPasswordOtpEmail } = require('../utils/emailService');
 
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET, {
@@ -155,6 +156,8 @@ const getProfile = async (req, res) => {
         date_of_birth,
         role,
         is_verified,
+        auth_provider,
+        is_onboarded,
         created_at,
         user_education (
           level,
@@ -254,13 +257,15 @@ const updateProfile = async (req, res) => {
   }
 };
 
+const generateNumericOtp = () => Math.floor(100000 + Math.random() * 900000).toString();
+
 const forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
 
     const { data: user } = await supabase
       .from('users')
-      .select('id, email')
+      .select('id, email, name')
       .eq('email', email)
       .is('deleted_at', null)
       .single();
@@ -268,26 +273,37 @@ const forgotPassword = async (req, res) => {
     if (!user) {
       return res.json({
         success: true,
-        message: 'If the email exists, a reset link has been sent'
+        message: 'If the email exists, a reset code has been sent'
       });
     }
 
-    const resetToken = uuidv4();
-    const expiresAt = new Date(Date.now() + 3600000);
+    const otp = generateNumericOtp();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+    await supabase
+      .from('password_reset_tokens')
+      .update({ is_used: true })
+      .eq('user_id', user.id)
+      .eq('is_used', false);
 
     await supabase
       .from('password_reset_tokens')
       .insert({
         user_id: user.id,
-        token: resetToken,
-        expires_at: expiresAt.toISOString()
+        token: otp,
+        expires_at: expiresAt.toISOString(),
+        is_used: false
       });
 
-    logger.info(`Password reset token generated for user: ${user.email}`);
+    try {
+      await sendPasswordOtpEmail(user.email, user.name, otp);
+    } catch (emailError) {
+      logger.error('Failed to send password OTP email:', emailError);
+    }
 
     res.json({
       success: true,
-      message: 'If the email exists, a reset link has been sent'
+      message: 'If the email exists, a reset code has been sent'
     });
   } catch (error) {
     logger.error('Forgot password error:', error);
@@ -311,14 +327,28 @@ const resetPassword = async (req, res) => {
     if (tokenError || !resetToken || resetToken.is_used) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid or expired reset token'
+        message: 'Invalid or expired reset code'
       });
     }
 
     if (new Date(resetToken.expires_at) < new Date()) {
       return res.status(400).json({
         success: false,
-        message: 'Reset token has expired'
+        message: 'Reset code has expired'
+      });
+    }
+
+    const { data: user } = await supabase
+      .from('users')
+      .select('password_hash')
+      .eq('id', resetToken.user_id)
+      .single();
+
+    const isSamePassword = await bcrypt.compare(newPassword, user.password_hash);
+    if (isSamePassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from the current password'
       });
     }
 
@@ -366,6 +396,14 @@ const changePassword = async (req, res) => {
       });
     }
 
+    const isSamePassword = await bcrypt.compare(newPassword, user.password_hash);
+    if (isSamePassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be different from the current password'
+      });
+    }
+
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
     await supabase
@@ -386,6 +424,113 @@ const changePassword = async (req, res) => {
   }
 };
 
+const googleCallback = async (req, res) => {
+  try {
+    const user = req.user;
+    
+    const token = generateToken(user.id);
+    const refreshToken = generateRefreshToken(user.id);
+
+    const redirectUrl = user.is_onboarded 
+      ? `${process.env.FRONTEND_URL}/auth/callback?token=${token}&refresh=${refreshToken}`
+      : `${process.env.FRONTEND_URL}/onboarding?token=${token}&refresh=${refreshToken}`;
+
+    res.redirect(redirectUrl);
+  } catch (error) {
+    logger.error('Google callback error:', error);
+    res.redirect(`${process.env.FRONTEND_URL}/login?error=oauth_failed`);
+  }
+};
+
+const completeOnboarding = async (req, res) => {
+  try {
+    const { phone, date_of_birth, interested_categories, password } = req.body;
+    const userId = req.user.id;
+    const alreadyOnboarded = req.user.is_onboarded;
+    const isGoogleUser = req.user.auth_provider === 'google';
+
+    if (isGoogleUser && !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please set a password to finish onboarding'
+      });
+    }
+
+    const updatePayload = {
+      phone,
+      date_of_birth,
+      is_onboarded: true
+    };
+
+    if (password) {
+      updatePayload.password_hash = await bcrypt.hash(password, 10);
+    }
+
+    const { error: updateError } = await supabase
+      .from('users')
+      .update(updatePayload)
+      .eq('id', userId);
+
+    if (updateError) {
+      logger.error('Onboarding update error:', updateError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update profile'
+      });
+    }
+
+    const categoryInserts = interested_categories.map(categoryId => ({
+      user_id: userId,
+      category_id: categoryId
+    }));
+
+    const { error: categoryError } = await supabase
+      .from('user_interested_categories')
+      .insert(categoryInserts);
+
+    if (categoryError) {
+      logger.error('Category insert error:', categoryError);
+    }
+
+    const { data: updatedUser } = await supabase
+      .from('users')
+      .select(`
+        id,
+        email,
+        name,
+        phone,
+        avatar_url,
+        date_of_birth,
+        role,
+        is_verified,
+        is_onboarded,
+        created_at
+      `)
+      .eq('id', userId)
+      .single();
+
+    if (!alreadyOnboarded) {
+      try {
+        await sendWelcomeEmail(updatedUser.email, updatedUser.name);
+      } catch (emailError) {
+        logger.error('Failed to send welcome email:', emailError);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Onboarding completed successfully',
+      data: updatedUser
+    });
+  } catch (error) {
+    logger.error('Complete onboarding error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to complete onboarding'
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -393,5 +538,7 @@ module.exports = {
   updateProfile,
   forgotPassword,
   resetPassword,
-  changePassword
+  changePassword,
+  googleCallback,
+  completeOnboarding
 };

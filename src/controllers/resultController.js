@@ -60,6 +60,53 @@ const getResults = async (req, res) => {
   }
 };
 
+const getUserStats = async (req, res) => {
+  try {
+    const { data: results, error } = await supabase
+      .from('results')
+      .select('percentage, created_at')
+      .eq('user_id', req.user.id)
+      .eq('is_published', true)
+      .order('created_at', { ascending: true });
+
+    if (error) {
+      logger.error('Get user stats error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch stats'
+      });
+    }
+
+    const examsTaken = results.length;
+
+    const daysActive = results.reduce((set, result) => {
+      if (result.created_at) {
+        set.add(new Date(result.created_at).toDateString());
+      }
+      return set;
+    }, new Set()).size;
+
+    const avgScore = examsTaken > 0
+      ? parseFloat((results.reduce((sum, result) => sum + (result.percentage || 0), 0) / examsTaken).toFixed(1))
+      : 0;
+
+    res.json({
+      success: true,
+      data: {
+        examsTaken,
+        daysActive,
+        avgScore
+      }
+    });
+  } catch (error) {
+    logger.error('Get user stats error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch stats'
+    });
+  }
+};
+
 const getResultByAttemptId = async (req, res) => {
   try {
     const { attemptId } = req.params;
@@ -343,7 +390,8 @@ const getAnswerReview = async (req, res) => {
 
 module.exports = {
   getResults,
-  getResultById,
+  getUserStats,
   getResultByAttemptId,
+  getResultById,
   getAnswerReview
 };

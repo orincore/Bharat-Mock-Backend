@@ -9,7 +9,8 @@ const getExams = async (req, res) => {
       search, 
       category, 
       status, 
-      difficulty 
+      difficulty,
+      exam_type
     } = req.query;
 
     const offset = (page - 1) * limit;
@@ -37,6 +38,8 @@ const getExams = async (req, res) => {
         negative_marking,
         negative_mark_value,
         allow_anytime,
+        exam_type,
+        show_in_mock_tests,
         slug,
         url_path
       `, { count: 'exact' })
@@ -58,6 +61,18 @@ const getExams = async (req, res) => {
 
     if (difficulty) {
       query = query.eq('difficulty', difficulty);
+    }
+
+    if (exam_type) {
+      if (exam_type === 'mock_test') {
+        query = query.or('exam_type.eq.mock_test,and(exam_type.eq.past_paper,show_in_mock_tests.eq.true)');
+      } else if (exam_type === 'all') {
+        // no-op to include every type
+      } else {
+        query = query.eq('exam_type', exam_type);
+      }
+    } else {
+      query = query.or('exam_type.eq.mock_test,and(exam_type.eq.past_paper,show_in_mock_tests.eq.true)');
     }
 
     query = query.range(offset, offset + parseInt(limit) - 1);
@@ -100,48 +115,11 @@ const getExams = async (req, res) => {
   }
 };
 
-const getExamById = async (req, res) => {
+const getExamByPath = async (req, res) => {
   try {
-    const { id } = req.params;
-
-    let query = supabase
-      .from('exams')
-      .select(`
-        id,
-        title,
-        description,
-        duration,
-        total_marks,
-        total_questions,
-        category,
-        difficulty,
-        status,
-        start_date,
-        end_date,
-        pass_percentage,
-        is_free,
-        price,
-        image_url,
-        logo_url,
-        thumbnail_url,
-        negative_marking,
-        negative_mark_value,
-        allow_anytime,
-        slug,
-        url_path
-      `)
-      .eq('is_published', true)
-      .is('deleted_at', null);
-
-    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-    
-    if (isUUID) {
-      query = query.eq('id', id);
-    } else {
-      query = query.eq('slug', id);
-    }
-
-    const { data: exam, error } = await query.single();
+    const { category, subcategory, examSlug } = req.params;
+    const path = `/${category}/${subcategory}/${examSlug}`;
+    const { exam, error } = await fetchExamByIdentifier(path);
 
     if (error || !exam) {
       return res.status(404).json({
@@ -150,33 +128,222 @@ const getExamById = async (req, res) => {
       });
     }
 
-    const { data: syllabus } = await supabase
-      .from('exam_syllabus')
-      .select('topic')
-      .eq('exam_id', id);
+    await enrichExamDetails(exam, req.user);
 
-    const { data: sections } = await supabase
-      .from('exam_sections')
-      .select('id, name, total_questions, marks_per_question, duration, section_order')
-      .eq('exam_id', id)
-      .order('section_order');
+    res.json({
+      success: true,
+      data: exam
+    });
+  } catch (error) {
+    logger.error('Get exam by path error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch exam details'
+    });
+  }
+};
 
-    exam.syllabus = syllabus?.map(s => s.topic) || [];
-    exam.pattern = {
-      sections: sections || [],
-      negativeMarking: exam.negative_marking,
-      negativeMarkValue: exam.negative_mark_value
-    };
+const buildExamQuery = () => {
+  return supabase
+    .from('exams')
+    .select(`
+      id,
+      title,
+      description,
+      duration,
+      total_marks,
+      total_questions,
+      category,
+      difficulty,
+      status,
+      start_date,
+      end_date,
+      pass_percentage,
+      is_free,
+      price,
+      image_url,
+      logo_url,
+      thumbnail_url,
+      negative_marking,
+      negative_mark_value,
+      allow_anytime,
+      slug,
+      url_path
+    `)
+    .eq('is_published', true)
+    .is('deleted_at', null);
+};
 
-    if (req.user) {
-      const { count: attempts } = await supabase
-        .from('exam_attempts')
-        .select('id', { count: 'exact', head: true })
-        .eq('exam_id', id)
-        .eq('user_id', req.user.id);
+const fetchExamByIdentifier = async (identifier) => {
+  const normalizedId = identifier?.trim() || '';
+  const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(normalizedId);
+  const isUrlPath = normalizedId.includes('/') && normalizedId.length > 0;
 
-      exam.attempts = attempts || 0;
+  const slugFallback = normalizedId
+    .split('/')
+    .filter(Boolean)
+    .pop();
+
+  const runQuery = async (filter) => buildExamQuery().match(filter).single();
+
+  if (isUUID) {
+    return runQuery({ id: normalizedId });
+  }
+
+  if (isUrlPath) {
+    const path = normalizedId.startsWith('/') ? normalizedId : `/${normalizedId}`;
+    let { data: exam, error } = await buildExamQuery().eq('url_path', path).single();
+
+    if (!exam && slugFallback) {
+      ({ data: exam, error } = await buildExamQuery().eq('slug', slugFallback).single());
     }
+
+    return { exam, error };
+  }
+
+  return runQuery({ slug: normalizedId });
+};
+
+const enrichExamDetails = async (exam, user) => {
+  const { data: syllabus } = await supabase
+    .from('exam_syllabus')
+    .select('topic')
+    .eq('exam_id', exam.id);
+
+  const { data: sections } = await supabase
+    .from('exam_sections')
+    .select('id, name, total_questions, marks_per_question, duration, section_order')
+    .eq('exam_id', exam.id)
+    .order('section_order');
+
+  exam.syllabus = syllabus?.map(s => s.topic) || [];
+  exam.pattern = {
+    sections: sections || [],
+    negativeMarking: exam.negative_marking,
+    negativeMarkValue: exam.negative_mark_value
+  };
+
+  if (user) {
+    const { count: attempts } = await supabase
+      .from('exam_attempts')
+      .select('id', { count: 'exact', head: true })
+      .eq('exam_id', exam.id)
+      .eq('user_id', user.id);
+
+    exam.attempts = attempts || 0;
+  }
+
+  return exam;
+};
+
+const getExamById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { attemptId } = req.query || {};
+
+    let { exam, error } = await fetchExamByIdentifier(id);
+
+    if ((error || !exam) && req.user) {
+      const { data: unpublishedExam, error: unpublishedError } = await supabase
+        .from('exams')
+        .select(`
+          id,
+          title,
+          description,
+          duration,
+          total_marks,
+          total_questions,
+          category,
+          difficulty,
+          status,
+          start_date,
+          end_date,
+          pass_percentage,
+          is_free,
+          price,
+          image_url,
+          logo_url,
+          thumbnail_url,
+          negative_marking,
+          negative_mark_value,
+          allow_anytime,
+          slug,
+          url_path
+        `)
+        .eq('id', id)
+        .is('deleted_at', null)
+        .single();
+
+      if (!unpublishedError && unpublishedExam) {
+        const { data: userAttempts, error: attemptsError } = await supabase
+          .from('exam_attempts')
+          .select('id')
+          .eq('exam_id', id)
+          .eq('user_id', req.user.id)
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (!attemptsError && userAttempts && userAttempts.length > 0) {
+          exam = unpublishedExam;
+          error = null;
+        }
+      }
+    }
+
+    if ((error || !exam) && attemptId) {
+      const { data: attempt, error: attemptError } = await supabase
+        .from('exam_attempts')
+        .select('id, user_id')
+        .eq('id', attemptId)
+        .eq('exam_id', id)
+        .single();
+
+      if (!attemptError && attempt) {
+        const { data: unpublishedExamByAttempt, error: attemptExamError } = await supabase
+          .from('exams')
+          .select(`
+            id,
+            title,
+            description,
+            duration,
+            total_marks,
+            total_questions,
+            category,
+            difficulty,
+            status,
+            start_date,
+            end_date,
+            pass_percentage,
+            is_free,
+            price,
+            image_url,
+            logo_url,
+            thumbnail_url,
+            negative_marking,
+            negative_mark_value,
+            allow_anytime,
+            slug,
+            url_path
+          `)
+          .eq('id', id)
+          .is('deleted_at', null)
+          .single();
+
+        if (!attemptExamError && unpublishedExamByAttempt) {
+          exam = unpublishedExamByAttempt;
+          error = null;
+        }
+      }
+    }
+
+    if (error || !exam) {
+      return res.status(404).json({
+        success: false,
+        message: 'Exam not found'
+      });
+    }
+
+    await enrichExamDetails(exam, req.user);
 
     res.json({
       success: true,
@@ -341,7 +508,7 @@ const getExamQuestions = async (req, res) => {
 
     const { data: sections, error: sectionsError } = await supabase
       .from('exam_sections')
-      .select('id, name, total_questions, marks_per_question, duration, section_order')
+      .select('id, name, name_hi, total_questions, marks_per_question, duration, section_order')
       .eq('exam_id', examId)
       .order('section_order');
 
@@ -360,13 +527,17 @@ const getExamQuestions = async (req, res) => {
         section_id,
         type,
         text,
+        text_hi,
         marks,
         negative_marks,
+        explanation,
+        explanation_hi,
         image_url,
         question_order,
         question_options (
           id,
           option_text,
+          option_text_hi,
           option_order,
           image_url
         )
@@ -704,12 +875,91 @@ const evaluateExam = async (attemptId, examId, userId) => {
   }
 };
 
+const getExamForPDF = async (req, res) => {
+  try {
+    const { examId } = req.params;
+
+    const { data: exam, error: examError } = await supabase
+      .from('exams')
+      .select(`
+        *,
+        exam_categories(name, slug),
+        exam_subcategories(name, slug),
+        exam_difficulties(name)
+      `)
+      .eq('id', examId)
+      .eq('is_published', true)
+      .is('deleted_at', null)
+      .single();
+
+    if (examError || !exam) {
+      return res.status(404).json({
+        success: false,
+        message: 'Exam not found'
+      });
+    }
+
+    const { data: sections, error: sectionsError } = await supabase
+      .from('exam_sections')
+      .select('*')
+      .eq('exam_id', examId)
+      .order('section_order', { ascending: true });
+
+    if (sectionsError) {
+      logger.error('Get sections error:', sectionsError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch exam sections'
+      });
+    }
+
+    const { data: questions, error: questionsError } = await supabase
+      .from('questions')
+      .select(`
+        *,
+        question_options(*)
+      `)
+      .eq('exam_id', examId)
+      .order('question_order', { ascending: true });
+
+    if (questionsError) {
+      logger.error('Get questions error:', questionsError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to fetch exam questions'
+      });
+    }
+
+    const questionsWithOptions = questions.map(q => ({
+      ...q,
+      options: (q.question_options || []).sort((a, b) => (a.option_order ?? 0) - (b.option_order ?? 0))
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        exam,
+        sections,
+        questions: questionsWithOptions
+      }
+    });
+  } catch (error) {
+    logger.error('Get exam for PDF error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch exam data for PDF'
+    });
+  }
+};
+
 module.exports = {
   getExams,
+  getExamByPath,
   getExamById,
   getExamCategories,
   startExam,
   getExamQuestions,
   saveAnswer,
-  submitExam
+  submitExam,
+  getExamForPDF
 };

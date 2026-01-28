@@ -9,7 +9,8 @@ const FOLDER_STRUCTURE = {
   EXAM_THUMBNAILS: 'exams/thumbnails',
   QUESTION_IMAGES: 'questions/images',
   OPTION_IMAGES: 'options/images',
-  USER_AVATARS: 'users/avatars'
+  USER_AVATARS: 'users/avatars',
+  CATEGORY_LOGOS: 'categories/logos'
 };
 
 const uploadFile = async (file, folder, customFileName = null) => {
@@ -81,6 +82,10 @@ const uploadUserAvatar = async (file) => {
   return uploadFile(file, FOLDER_STRUCTURE.USER_AVATARS);
 };
 
+const uploadCategoryLogo = async (file) => {
+  return uploadFile(file, FOLDER_STRUCTURE.CATEGORY_LOGOS);
+};
+
 const extractKeyFromUrl = (url) => {
   if (!url || !url.includes(R2_PUBLIC_URL)) return null;
   return url.replace(`${R2_PUBLIC_URL}/`, '');
@@ -94,6 +99,7 @@ module.exports = {
   uploadQuestionImage,
   uploadOptionImage,
   uploadUserAvatar,
+  uploadCategoryLogo,
   extractKeyFromUrl,
   FOLDER_STRUCTURE
 };

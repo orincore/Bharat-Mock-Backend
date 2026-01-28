@@ -6,6 +6,10 @@ CREATE TABLE IF NOT EXISTS exam_categories (
     name VARCHAR(150) NOT NULL,
     slug VARCHAR(160) NOT NULL UNIQUE,
     description TEXT,
+    logo_url TEXT,
+    icon VARCHAR(100),
+    display_order INTEGER DEFAULT 0,
+    is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

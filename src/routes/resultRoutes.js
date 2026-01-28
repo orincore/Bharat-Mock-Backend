@@ -7,6 +7,8 @@ const validate = require('../middleware/validation');
 
 router.get('/', authenticate, resultController.getResults);
 
+router.get('/stats', authenticate, resultController.getUserStats);
+
 router.get('/attempt/:attemptId',
   authenticate,
   [

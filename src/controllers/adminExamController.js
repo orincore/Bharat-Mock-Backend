@@ -3,6 +3,12 @@ const logger = require('../config/logger');
 const { uploadExamLogo, uploadExamThumbnail, uploadQuestionImage, uploadOptionImage, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 
+const safeAverage = (numbers = []) => {
+  const valid = numbers.filter((n) => typeof n === 'number' && !Number.isNaN(n));
+  if (valid.length === 0) return 0;
+  return parseFloat((valid.reduce((sum, value) => sum + value, 0) / valid.length).toFixed(1));
+};
+
 const getAdminExams = async (req, res) => {
   try {
     const {
@@ -11,7 +17,8 @@ const getAdminExams = async (req, res) => {
       search,
       status,
       category,
-      difficulty
+      difficulty,
+      exam_type
     } = req.query;
 
     const offset = (page - 1) * limit;
@@ -39,6 +46,8 @@ const getAdminExams = async (req, res) => {
         negative_marking,
         negative_mark_value,
         is_published,
+        exam_type,
+        show_in_mock_tests,
         created_at,
         updated_at
       `, { count: 'exact' })
@@ -59,6 +68,10 @@ const getAdminExams = async (req, res) => {
 
     if (difficulty) {
       query = query.eq('difficulty', difficulty);
+    }
+
+    if (exam_type) {
+      query = query.eq('exam_type', exam_type);
     }
 
     const { data: exams, error, count } = await query;
@@ -86,6 +99,133 @@ const getAdminExams = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error while fetching exams'
+    });
+  }
+};
+
+const getUserDetails = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select(`
+        id,
+        email,
+        name,
+        phone,
+        avatar_url,
+        role,
+        is_verified,
+        is_blocked,
+        is_onboarded,
+        auth_provider,
+        date_of_birth,
+        created_at
+      `)
+      .eq('id', id)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const { data: allResults, error: resultsError } = await supabase
+      .from('results')
+      .select('score, total_marks, percentage, created_at, exam_id')
+      .eq('user_id', id)
+      .eq('is_published', true)
+      .order('created_at', { ascending: false });
+
+    if (resultsError) {
+      logger.error('Admin fetch user results error:', resultsError);
+    }
+
+    const { data: recentResults } = await supabase
+      .from('results')
+      .select(`
+        id,
+        score,
+        total_marks,
+        percentage,
+        status,
+        created_at,
+        exam_id,
+        exams (
+          id,
+          title,
+          category,
+          difficulty
+        )
+      `)
+      .eq('user_id', id)
+      .eq('is_published', true)
+      .order('created_at', { ascending: false })
+      .limit(5);
+
+    const { data: recentAttempts } = await supabase
+      .from('exam_attempts')
+      .select(`
+        id,
+        exam_id,
+        started_at,
+        submitted_at,
+        time_taken,
+        is_submitted,
+        exams (
+          id,
+          title,
+          category,
+          difficulty
+        )
+      `)
+      .eq('user_id', id)
+      .order('started_at', { ascending: false })
+      .limit(5);
+
+    const scores = (allResults || []).map((result) => result.percentage || 0);
+    const stats = {
+      totalExamsTaken: allResults?.length || 0,
+      averageScore: safeAverage(scores),
+      bestScore: scores.length ? Math.max(...scores) : 0,
+      lastActive: allResults?.[0]?.created_at || user.created_at,
+      totalMarksEarned: (allResults || []).reduce((sum, r) => sum + (r.score || 0), 0),
+      totalMarksPossible: (allResults || []).reduce((sum, r) => sum + (r.total_marks || 0), 0)
+    };
+
+    res.json({
+      success: true,
+      data: {
+        user,
+        stats,
+        recentResults: (recentResults || []).map((result) => ({
+          ...result,
+          exam: result.exams ? {
+            id: result.exams.id,
+            title: result.exams.title,
+            category: result.exams.category,
+            difficulty: result.exams.difficulty
+          } : null
+        })),
+        recentAttempts: (recentAttempts || []).map((attempt) => ({
+          ...attempt,
+          exam: attempt.exams ? {
+            id: attempt.exams.id,
+            title: attempt.exams.title,
+            category: attempt.exams.category,
+            difficulty: attempt.exams.difficulty
+          } : null
+        }))
+      }
+    });
+  } catch (error) {
+    logger.error('Admin get user details error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch user details'
     });
   }
 };
@@ -290,7 +430,9 @@ const createExam = async (req, res) => {
       syllabus,
       slug: customSlug,
       is_published,
-      allow_anytime
+      allow_anytime,
+      exam_type,
+      show_in_mock_tests
     } = req.body;
 
     let logoUrl = null;
@@ -325,6 +467,10 @@ const createExam = async (req, res) => {
     const urlPath = `/${categorySlug}/${subcategorySlug}/${examSlug}`.replace(/\/+/g, '/');
 
     const parsedSyllabus = syllabus ? JSON.parse(syllabus) : [];
+    const allowAnytimeFlag = allow_anytime === 'true' || allow_anytime === true;
+    const normalizedStatus = allowAnytimeFlag ? 'anytime' : (status || 'upcoming');
+    const normalizedStartDate = allowAnytimeFlag ? null : (start_date || null);
+    const normalizedEndDate = allowAnytimeFlag ? null : (end_date || null);
 
     const { data: exam, error } = await supabase
       .from('exams')
@@ -340,16 +486,18 @@ const createExam = async (req, res) => {
         subcategory_id: subcategory_id || null,
         difficulty: difficulty || null,
         difficulty_id: difficulty_id || null,
-        status: status || 'upcoming',
-        start_date,
-        end_date,
+        status: normalizedStatus,
+        start_date: normalizedStartDate,
+        end_date: normalizedEndDate,
         pass_percentage: parseFloat(pass_percentage),
         is_free: is_free === 'true' || is_free === true,
         price: parseFloat(price) || 0,
         negative_marking: negative_marking === 'true' || negative_marking === true,
         negative_mark_value: parseFloat(negative_mark_value) || 0,
         is_published: is_published === 'true' || is_published === true,
-        allow_anytime: allow_anytime === 'true' || allow_anytime === true,
+        allow_anytime: allowAnytimeFlag,
+        exam_type: exam_type || 'mock_test',
+        show_in_mock_tests: show_in_mock_tests === 'true' || show_in_mock_tests === true,
         logo_url: logoUrl,
         thumbnail_url: thumbnailUrl,
         slug: examSlug,
@@ -435,6 +583,12 @@ const updateExam = async (req, res) => {
     if (updateData.negative_marking !== undefined) updateData.negative_marking = updateData.negative_marking === 'true' || updateData.negative_marking === true;
     if (updateData.is_published !== undefined) updateData.is_published = updateData.is_published === 'true' || updateData.is_published === true;
     if (updateData.allow_anytime !== undefined) updateData.allow_anytime = updateData.allow_anytime === 'true' || updateData.allow_anytime === true;
+    if (updateData.allow_anytime) {
+      updateData.status = 'anytime';
+      updateData.start_date = null;
+      updateData.end_date = null;
+    }
+    if (updateData.show_in_mock_tests !== undefined) updateData.show_in_mock_tests = updateData.show_in_mock_tests === 'true' || updateData.show_in_mock_tests === true;
     let parsedSyllabus = undefined;
     if (updateData.syllabus) {
       if (typeof updateData.syllabus === 'string') {
@@ -843,7 +997,7 @@ const getAllUsers = async (req, res) => {
 
     let query = supabase
       .from('users')
-      .select('id, email, name, phone, role, is_verified, is_blocked, created_at', { count: 'exact' })
+      .select('id, email, name, phone, avatar_url, role, is_verified, is_blocked, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(offset, offset + parseInt(limit) - 1);
 
@@ -964,6 +1118,227 @@ const toggleUserBlock = async (req, res) => {
   }
 };
 
+const bulkCreateExamWithContent = async (req, res) => {
+  try {
+    const {
+      exam: rawExam,
+      sections: rawSections
+    } = req.body;
+
+    let exam;
+    let sections = [];
+
+    try {
+      exam = typeof rawExam === 'string' ? JSON.parse(rawExam) : rawExam;
+    } catch (parseError) {
+      logger.error('Failed to parse exam payload for bulk create:', parseError);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid exam payload. Ensure exam data is valid JSON.'
+      });
+    }
+
+    try {
+      if (rawSections) {
+        sections = typeof rawSections === 'string' ? JSON.parse(rawSections) : rawSections;
+      }
+      if (!Array.isArray(sections)) {
+        sections = [];
+      }
+    } catch (parseError) {
+      logger.error('Failed to parse sections payload for bulk create:', parseError);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid sections payload. Ensure sections data is valid JSON.'
+      });
+    }
+
+    if (!exam) {
+      return res.status(400).json({
+        success: false,
+        message: 'Exam data is required.'
+      });
+    }
+
+    let logoUrl = null;
+    let thumbnailUrl = null;
+
+    if (req.files) {
+      if (req.files.logo) {
+        const logoResult = await uploadExamLogo(req.files.logo[0]);
+        logoUrl = logoResult.url;
+      }
+      if (req.files.thumbnail) {
+        const thumbnailResult = await uploadExamThumbnail(req.files.thumbnail[0]);
+        thumbnailUrl = thumbnailResult.url;
+      }
+    }
+
+    const examSlug = await ensureUniqueSlug(supabase, 'exams', slugify(exam.slug || exam.title));
+    
+    let categorySlug = exam.category || '';
+    let subcategorySlug = exam.subcategory || '';
+    
+    if (exam.category_id) {
+      const { data: cat } = await supabase.from('exam_categories').select('slug').eq('id', exam.category_id).single();
+      if (cat) categorySlug = cat.slug;
+    }
+    
+    if (exam.subcategory_id) {
+      const { data: subcat } = await supabase.from('exam_subcategories').select('slug').eq('id', exam.subcategory_id).single();
+      if (subcat) subcategorySlug = subcat.slug;
+    }
+    
+    const urlPath = `/${categorySlug}/${subcategorySlug}/${examSlug}`.replace(/\/+/g, '/');
+
+    const parsedSyllabus = exam.syllabus || [];
+    const supportsHindi = sections.some(s => 
+      s.name_hi || s.questions?.some(q => q.text_hi || q.explanation_hi || q.options?.some(o => o.option_text_hi))
+    ) || false;
+
+    const { data: createdExam, error: examError } = await supabase
+      .from('exams')
+      .insert({
+        title: exam.title,
+        description: exam.description,
+        duration: parseInt(exam.duration),
+        total_marks: parseInt(exam.total_marks),
+        total_questions: parseInt(exam.total_questions),
+        category: exam.category || categorySlug,
+        category_id: exam.category_id || null,
+        subcategory: exam.subcategory || subcategorySlug,
+        subcategory_id: exam.subcategory_id || null,
+        difficulty: exam.difficulty || null,
+        difficulty_id: exam.difficulty_id || null,
+        status: exam.status || 'upcoming',
+        start_date: exam.start_date,
+        end_date: exam.end_date,
+        pass_percentage: parseFloat(exam.pass_percentage),
+        is_free: exam.is_free === 'true' || exam.is_free === true,
+        price: parseFloat(exam.price) || 0,
+        negative_marking: exam.negative_marking === 'true' || exam.negative_marking === true,
+        negative_mark_value: parseFloat(exam.negative_mark_value) || 0,
+        is_published: exam.is_published === 'true' || exam.is_published === true,
+        allow_anytime: exam.allow_anytime === 'true' || exam.allow_anytime === true,
+        exam_type: exam.exam_type || 'mock_test',
+        show_in_mock_tests: exam.show_in_mock_tests === 'true' || exam.show_in_mock_tests === true,
+        supports_hindi: supportsHindi,
+        logo_url: logoUrl,
+        thumbnail_url: thumbnailUrl,
+        slug: examSlug,
+        url_path: urlPath,
+        syllabus: parsedSyllabus
+      })
+      .select()
+      .single();
+
+    if (examError) {
+      logger.error('Bulk create exam error:', examError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to create exam'
+      });
+    }
+
+    if (parsedSyllabus?.length) {
+      const syllabusPayload = parsedSyllabus.map(topic => ({
+        exam_id: createdExam.id,
+        topic
+      }));
+      await supabase.from('exam_syllabus').insert(syllabusPayload);
+    }
+
+    const createdSections = [];
+    
+    if (sections.length > 0) {
+      for (const section of sections) {
+        const { data: createdSection, error: sectionError } = await supabase
+          .from('exam_sections')
+          .insert({
+            exam_id: createdExam.id,
+            name: section.name,
+            name_hi: section.name_hi || null,
+            total_questions: section.total_questions,
+            marks_per_question: section.marks_per_question,
+            duration: section.duration || null,
+            section_order: section.section_order
+          })
+          .select()
+          .single();
+
+        if (sectionError) {
+          logger.error('Bulk create section error:', sectionError);
+          continue;
+        }
+
+        createdSections.push(createdSection);
+
+        if (section.questions && section.questions.length > 0) {
+          for (const question of section.questions) {
+            const { data: createdQuestion, error: questionError } = await supabase
+              .from('questions')
+              .insert({
+                exam_id: createdExam.id,
+                section_id: createdSection.id,
+                type: question.type,
+                text: question.text,
+                text_hi: question.text_hi || null,
+                marks: question.marks,
+                negative_marks: question.negative_marks,
+                explanation: question.explanation || null,
+                explanation_hi: question.explanation_hi || null,
+                difficulty: question.difficulty,
+                image_url: question.image_url || null,
+                question_order: question.question_order || null
+              })
+              .select()
+              .single();
+
+            if (questionError) {
+              logger.error('Bulk create question error:', questionError);
+              continue;
+            }
+
+            if (question.options && question.options.length > 0) {
+              const optionsPayload = question.options.map(option => ({
+                question_id: createdQuestion.id,
+                option_text: option.option_text,
+                option_text_hi: option.option_text_hi || null,
+                is_correct: option.is_correct,
+                option_order: option.option_order,
+                image_url: option.image_url || null
+              }));
+
+              const { error: optionsError } = await supabase
+                .from('question_options')
+                .insert(optionsPayload);
+
+              if (optionsError) {
+                logger.error('Bulk create options error:', optionsError);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Exam created successfully with all content',
+      data: {
+        exam: createdExam,
+        sections: createdSections
+      }
+    });
+  } catch (error) {
+    logger.error('Bulk create exam with content error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while creating exam with content'
+    });
+  }
+};
+
 module.exports = {
   getAdminExams,
   getAdminExamById,
@@ -978,6 +1353,8 @@ module.exports = {
   updateQuestion,
   deleteQuestion,
   createOption,
+  bulkCreateExamWithContent,
+  getUserDetails,
   getAllUsers,
   updateUserRole,
   toggleUserBlock

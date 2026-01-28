@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const compression = require('compression');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const passport = require('./config/passport');
 const logger = require('./config/logger');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 
@@ -15,6 +16,7 @@ const collegeRoutes = require('./routes/collegeRoutes');
 const courseRoutes = require('./routes/courseRoutes');
 const articleRoutes = require('./routes/articleRoutes');
 const taxonomyRoutes = require('./routes/taxonomyRoutes');
+const subcategoryContentRoutes = require('./routes/subcategoryContentRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 
 const app = express();
@@ -37,6 +39,8 @@ app.use(compression());
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+app.use(passport.initialize());
 
 if (process.env.NODE_ENV !== 'production') {
   app.use(morgan('dev'));
@@ -71,6 +75,7 @@ app.use(`/api/${API_VERSION}/colleges`, collegeRoutes);
 app.use(`/api/${API_VERSION}/courses`, courseRoutes);
 app.use(`/api/${API_VERSION}/articles`, articleRoutes);
 app.use(`/api/${API_VERSION}/taxonomy`, taxonomyRoutes);
+app.use(`/api/${API_VERSION}/subcategories`, subcategoryContentRoutes);
 app.use(`/api/${API_VERSION}/admin`, adminRoutes);
 
 app.use(notFound);

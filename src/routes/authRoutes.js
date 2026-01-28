@@ -4,6 +4,7 @@ const { body } = require('express-validator');
 const authController = require('../controllers/authController');
 const { authenticate } = require('../middleware/auth');
 const validate = require('../middleware/validation');
+const passport = require('../config/passport');
 
 router.post('/register',
   [
@@ -48,8 +49,8 @@ router.post('/forgot-password',
 
 router.post('/reset-password',
   [
-    body('token').notEmpty().withMessage('Reset token is required'),
-    body('newPassword').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
+    body('token').isLength({ min: 6, max: 6 }).withMessage('A valid 6-digit code is required'),
+    body('newPassword').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
     validate
   ],
   authController.resetPassword
@@ -59,10 +60,33 @@ router.post('/change-password',
   authenticate,
   [
     body('currentPassword').notEmpty().withMessage('Current password is required'),
-    body('newPassword').isLength({ min: 6 }).withMessage('New password must be at least 6 characters'),
+    body('newPassword').isLength({ min: 8 }).withMessage('New password must be at least 8 characters'),
     validate
   ],
   authController.changePassword
+);
+
+router.get('/google',
+  passport.authenticate('google', { scope: ['profile', 'email'], session: false })
+);
+
+router.get('/google/callback',
+  passport.authenticate('google', { session: false, failureRedirect: `${process.env.FRONTEND_URL}/login?error=oauth_failed` }),
+  authController.googleCallback
+);
+
+router.post('/onboarding',
+  authenticate,
+  [
+    body('phone')
+      .matches(/^\+?[1-9]\d{7,14}$/)
+      .withMessage('Valid phone number required'),
+    body('date_of_birth').isISO8601().withMessage('Valid date required'),
+    body('interested_categories').isArray({ min: 1 }).withMessage('At least one category must be selected'),
+    body('password').optional().isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    validate
+  ],
+  authController.completeOnboarding
 );
 
 module.exports = router;

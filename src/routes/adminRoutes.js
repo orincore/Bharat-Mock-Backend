@@ -17,7 +17,9 @@ const {
   updateQuestion,
   deleteQuestion,
   createOption,
+  bulkCreateExamWithContent,
   getAllUsers,
+  getUserDetails,
   updateUserRole,
   toggleUserBlock
 } = require('../controllers/adminExamController');
@@ -49,6 +51,11 @@ router.post('/exams', upload.fields([
   { name: 'thumbnail', maxCount: 1 }
 ]), createExam);
 
+router.post('/exams/bulk', upload.fields([
+  { name: 'logo', maxCount: 1 },
+  { name: 'thumbnail', maxCount: 1 }
+]), bulkCreateExamWithContent);
+
 router.put('/exams/:id', upload.fields([
   { name: 'logo', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 }
@@ -67,6 +74,7 @@ router.delete('/questions/:id', deleteQuestion);
 router.post('/options', upload.single('image'), createOption);
 
 router.get('/users', getAllUsers);
+router.get('/users/:id', getUserDetails);
 router.put('/users/:id/role', updateUserRole);
 router.put('/users/:id/toggle-block', toggleUserBlock);
 

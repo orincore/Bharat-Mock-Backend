@@ -9,6 +9,11 @@ router.get('/', optionalAuth, examController.getExams);
 
 router.get('/categories', examController.getExamCategories);
 
+router.get('/path/:category/:subcategory/:examSlug',
+  optionalAuth,
+  examController.getExamByPath
+);
+
 router.get('/:id', 
   optionalAuth, 
   examController.getExamById
@@ -16,10 +21,6 @@ router.get('/:id',
 
 router.post('/:examId/start',
   authenticate,
-  [
-    param('examId').isUUID().withMessage('Valid exam ID required'),
-    validate
-  ],
   examController.startExam
 );
 
@@ -53,6 +54,11 @@ router.post('/:attemptId/submit',
     validate
   ],
   examController.submitExam
+);
+
+router.get('/:examId/download-pdf',
+  optionalAuth,
+  examController.getExamForPDF
 );
 
 module.exports = router;

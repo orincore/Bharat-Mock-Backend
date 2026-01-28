@@ -7,9 +7,23 @@ const path = require('path');
 
 const storage = multer.memoryStorage();
 
+let warnedAboutAllowedTypes = false;
+
+const getAllowedFileTypes = () => {
+  const envValue = process.env.ALLOWED_FILE_TYPES;
+  if (!envValue) {
+    if (!warnedAboutAllowedTypes) {
+      console.warn('ALLOWED_FILE_TYPES env var missing. Falling back to default image/pdf types.');
+      warnedAboutAllowedTypes = true;
+    }
+    return ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+  }
+  return envValue.split(',');
+};
+
 const fileFilter = (req, file, cb) => {
-  const allowedTypes = process.env.ALLOWED_FILE_TYPES.split(',');
-  
+  const allowedTypes = getAllowedFileTypes();
+
   if (allowedTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {

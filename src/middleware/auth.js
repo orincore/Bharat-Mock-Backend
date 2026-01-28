@@ -19,7 +19,7 @@ const authenticate = async (req, res, next) => {
     
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, email, name, avatar_url, is_blocked, is_verified')
+      .select('id, email, name, avatar_url, is_blocked, is_verified, is_onboarded, auth_provider')
       .eq('id', decoded.userId)
       .is('deleted_at', null)
       .single();
