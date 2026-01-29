@@ -9,6 +9,7 @@ const {
   getExamSectionsWithQuestions,
   createExam,
   updateExam,
+  updateExamWithContent,
   deleteExam,
   createSection,
   updateSection,
@@ -17,6 +18,7 @@ const {
   updateQuestion,
   deleteQuestion,
   createOption,
+  updateOption,
   bulkCreateExamWithContent,
   getAllUsers,
   getUserDetails,
@@ -56,6 +58,11 @@ router.post('/exams/bulk', upload.fields([
   { name: 'thumbnail', maxCount: 1 }
 ]), bulkCreateExamWithContent);
 
+router.put('/exams/:id/content', upload.fields([
+  { name: 'logo', maxCount: 1 },
+  { name: 'thumbnail', maxCount: 1 }
+]), updateExamWithContent);
+
 router.put('/exams/:id', upload.fields([
   { name: 'logo', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 }
@@ -72,6 +79,7 @@ router.put('/questions/:id', upload.single('image'), updateQuestion);
 router.delete('/questions/:id', deleteQuestion);
 
 router.post('/options', upload.single('image'), createOption);
+router.put('/options/:id', upload.single('image'), updateOption);
 
 router.get('/users', getAllUsers);
 router.get('/users/:id', getUserDetails);

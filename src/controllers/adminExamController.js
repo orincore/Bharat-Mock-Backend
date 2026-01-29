@@ -250,7 +250,7 @@ const getExamSectionsWithQuestions = async (req, res) => {
 
     const { data: sections, error: sectionsError } = await supabase
       .from('exam_sections')
-      .select('id, name, total_questions, marks_per_question, duration, section_order')
+      .select('id, name, name_hi, total_questions, marks_per_question, duration, section_order')
       .eq('exam_id', id)
       .order('section_order');
 
@@ -269,15 +269,18 @@ const getExamSectionsWithQuestions = async (req, res) => {
         section_id,
         type,
         text,
+        text_hi,
         marks,
         negative_marks,
         explanation,
+        explanation_hi,
         difficulty,
         image_url,
         question_order,
         question_options (
           id,
           option_text,
+          option_text_hi,
           is_correct,
           option_order,
           image_url
@@ -298,6 +301,7 @@ const getExamSectionsWithQuestions = async (req, res) => {
     const sectionsWithQuestions = sections.map(section => ({
       id: section.id,
       name: section.name,
+      name_hi: section.name_hi,
       total_questions: section.total_questions,
       marks_per_question: section.marks_per_question,
       duration: section.duration,
@@ -308,9 +312,11 @@ const getExamSectionsWithQuestions = async (req, res) => {
           id: q.id,
           type: q.type,
           text: q.text,
+          text_hi: q.text_hi,
           marks: q.marks,
           negative_marks: q.negative_marks,
           explanation: q.explanation,
+          explanation_hi: q.explanation_hi,
           difficulty: q.difficulty,
           image_url: q.image_url,
           question_order: q.question_order,
@@ -319,6 +325,7 @@ const getExamSectionsWithQuestions = async (req, res) => {
             .map(opt => ({
               id: opt.id,
               option_text: opt.option_text,
+              option_text_hi: opt.option_text_hi,
               is_correct: opt.is_correct,
               option_order: opt.option_order,
               image_url: opt.image_url
@@ -364,6 +371,8 @@ const getAdminExamById = async (req, res) => {
         pass_percentage,
         is_free,
         price,
+        exam_type,
+        show_in_mock_tests,
         is_published,
         logo_url,
         thumbnail_url,
@@ -990,6 +999,63 @@ const createOption = async (req, res) => {
   }
 };
 
+const updateOption = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updateData = { ...req.body };
+
+    const { data: existingOption } = await supabase
+      .from('question_options')
+      .select('image_url')
+      .eq('id', id)
+      .single();
+
+    if (req.file) {
+      if (existingOption?.image_url) {
+        const oldKey = extractKeyFromUrl(existingOption.image_url);
+        if (oldKey) await deleteFile(oldKey);
+      }
+      const imageResult = await uploadOptionImage(req.file);
+      updateData.image_url = imageResult.url;
+    }
+
+    if (updateData.is_correct !== undefined) {
+      updateData.is_correct = updateData.is_correct === 'true' || updateData.is_correct === true;
+    }
+
+    if (updateData.option_order) {
+      updateData.option_order = parseInt(updateData.option_order);
+    }
+
+    const { data: option, error } = await supabase
+      .from('question_options')
+      .update(updateData)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) {
+      logger.error('Update option error:', error);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update option'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Option updated successfully',
+      data: option
+    });
+  } catch (error) {
+    logger.error('Update option error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while updating option'
+    });
+  }
+};
+
 const getAllUsers = async (req, res) => {
   try {
     const { page = 1, limit = 20, search = '', role = '' } = req.query;
@@ -1339,6 +1405,302 @@ const bulkCreateExamWithContent = async (req, res) => {
   }
 };
 
+const updateExamWithContent = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { exam: rawExam, sections: rawSections } = req.body;
+
+    const { data: existingExam, error: existingError } = await supabase
+      .from('exams')
+      .select('id, logo_url, thumbnail_url')
+      .eq('id', id)
+      .single();
+
+    if (existingError || !existingExam) {
+      return res.status(404).json({
+        success: false,
+        message: 'Exam not found'
+      });
+    }
+
+    let examPayload;
+    let sectionsPayload = [];
+
+    try {
+      examPayload = typeof rawExam === 'string' ? JSON.parse(rawExam) : rawExam;
+    } catch (parseError) {
+      logger.error('Failed to parse exam payload for update:', parseError);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid exam payload. Ensure exam data is valid JSON.'
+      });
+    }
+
+    try {
+      if (rawSections) {
+        sectionsPayload = typeof rawSections === 'string' ? JSON.parse(rawSections) : rawSections;
+      }
+      if (!Array.isArray(sectionsPayload)) {
+        sectionsPayload = [];
+      }
+    } catch (parseError) {
+      logger.error('Failed to parse sections payload for update:', parseError);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid sections payload. Ensure sections data is valid JSON.'
+      });
+    }
+
+    const bool = (value) => value === true || value === 'true';
+    const numberOrNull = (value, fallback = null) => {
+      if (value === undefined || value === null || value === '') return fallback;
+      const parsed = Number(value);
+      return Number.isNaN(parsed) ? fallback : parsed;
+    };
+
+    let logoUrl = existingExam.logo_url || null;
+    let thumbnailUrl = existingExam.thumbnail_url || null;
+
+    if (req.files) {
+      if (req.files.logo && req.files.logo[0]) {
+        if (existingExam.logo_url) {
+          const oldLogoKey = extractKeyFromUrl(existingExam.logo_url);
+          if (oldLogoKey) await deleteFile(oldLogoKey);
+        }
+        const logoResult = await uploadExamLogo(req.files.logo[0]);
+        logoUrl = logoResult.url;
+      }
+
+      if (req.files.thumbnail && req.files.thumbnail[0]) {
+        if (existingExam.thumbnail_url) {
+          const oldThumbKey = extractKeyFromUrl(existingExam.thumbnail_url);
+          if (oldThumbKey) await deleteFile(oldThumbKey);
+        }
+        const thumbnailResult = await uploadExamThumbnail(req.files.thumbnail[0]);
+        thumbnailUrl = thumbnailResult.url;
+      }
+    }
+
+    const baseSlug = slugify(examPayload.slug || examPayload.title || 'exam');
+    const examSlug = await ensureUniqueSlug(supabase, 'exams', baseSlug, { excludeId: id });
+
+    let categorySlug = examPayload.category || '';
+    let subcategorySlug = examPayload.subcategory || '';
+
+    if (examPayload.category_id) {
+      const { data: cat } = await supabase
+        .from('exam_categories')
+        .select('slug')
+        .eq('id', examPayload.category_id)
+        .single();
+      if (cat) categorySlug = cat.slug;
+    }
+
+    if (examPayload.subcategory_id) {
+      const { data: subcat } = await supabase
+        .from('exam_subcategories')
+        .select('slug')
+        .eq('id', examPayload.subcategory_id)
+        .single();
+      if (subcat) subcategorySlug = subcat.slug;
+    }
+
+    const urlPath = `/${categorySlug}/${subcategorySlug}/${examSlug}`.replace(/\/+/g, '/');
+
+    let parsedSyllabus = [];
+    if (Array.isArray(examPayload.syllabus)) {
+      parsedSyllabus = examPayload.syllabus;
+    } else if (typeof examPayload.syllabus === 'string') {
+      try {
+        parsedSyllabus = JSON.parse(examPayload.syllabus);
+      } catch (e) {
+        parsedSyllabus = [];
+      }
+    }
+
+    const allowAnytimeFlag = bool(examPayload.allow_anytime);
+    const normalizedStatus = allowAnytimeFlag ? 'anytime' : (examPayload.status || 'upcoming');
+    const normalizedStartDate = allowAnytimeFlag ? null : (examPayload.start_date || null);
+    const normalizedEndDate = allowAnytimeFlag ? null : (examPayload.end_date || null);
+    const supportsHindi = sectionsPayload.some(section =>
+      section.name_hi || section.questions?.some(q => q.text_hi || q.explanation_hi || q.options?.some(o => o.option_text_hi))
+    );
+
+    const updatePayload = {
+      title: examPayload.title,
+      description: examPayload.description,
+      duration: numberOrNull(examPayload.duration, 0),
+      total_marks: numberOrNull(examPayload.total_marks, 0),
+      total_questions: numberOrNull(examPayload.total_questions, 0),
+      category: examPayload.category || categorySlug,
+      category_id: examPayload.category_id || null,
+      subcategory: examPayload.subcategory || subcategorySlug,
+      subcategory_id: examPayload.subcategory_id || null,
+      difficulty: examPayload.difficulty || null,
+      difficulty_id: examPayload.difficulty_id || null,
+      status: normalizedStatus,
+      start_date: normalizedStartDate,
+      end_date: normalizedEndDate,
+      pass_percentage: numberOrNull(examPayload.pass_percentage, 0),
+      is_free: bool(examPayload.is_free),
+      price: numberOrNull(examPayload.price, 0),
+      negative_marking: bool(examPayload.negative_marking),
+      negative_mark_value: numberOrNull(examPayload.negative_mark_value, 0),
+      is_published: bool(examPayload.is_published),
+      allow_anytime: allowAnytimeFlag,
+      exam_type: examPayload.exam_type || 'mock_test',
+      show_in_mock_tests: bool(examPayload.show_in_mock_tests),
+      supports_hindi: supportsHindi,
+      logo_url: logoUrl,
+      thumbnail_url: thumbnailUrl,
+      slug: examSlug,
+      url_path: urlPath,
+      syllabus: parsedSyllabus
+    };
+
+    const { data: updatedExam, error: updateError } = await supabase
+      .from('exams')
+      .update(updatePayload)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) {
+      logger.error('Update exam with content error:', updateError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update exam'
+      });
+    }
+
+    const { error: deleteSyllabusError } = await supabase
+      .from('exam_syllabus')
+      .delete()
+      .eq('exam_id', id);
+
+    if (deleteSyllabusError) {
+      logger.error('Delete syllabus error:', deleteSyllabusError);
+    } else if (parsedSyllabus.length) {
+      const syllabusPayload = parsedSyllabus.map(topic => ({ exam_id: id, topic }));
+      const { error: insertSyllabusError } = await supabase
+        .from('exam_syllabus')
+        .insert(syllabusPayload);
+      if (insertSyllabusError) {
+        logger.error('Insert syllabus error:', insertSyllabusError);
+      }
+    }
+
+    const { data: existingQuestions } = await supabase
+      .from('questions')
+      .select('id')
+      .eq('exam_id', id);
+
+    if (existingQuestions?.length) {
+      const questionIds = existingQuestions.map(q => q.id);
+      await supabase
+        .from('question_options')
+        .delete()
+        .in('question_id', questionIds);
+    }
+
+    await supabase.from('questions').delete().eq('exam_id', id);
+    await supabase.from('exam_sections').delete().eq('exam_id', id);
+
+    const createdSections = [];
+
+    for (const section of sectionsPayload) {
+      const sectionInsert = {
+        exam_id: id,
+        name: section.name || '',
+        name_hi: section.name_hi || null,
+        total_questions: numberOrNull(section.total_questions, section.questions?.length || 0),
+        marks_per_question: numberOrNull(section.marks_per_question, 1),
+        duration: numberOrNull(section.duration),
+        section_order: numberOrNull(section.section_order, createdSections.length + 1)
+      };
+
+      const { data: createdSection, error: sectionError } = await supabase
+        .from('exam_sections')
+        .insert(sectionInsert)
+        .select()
+        .single();
+
+      if (sectionError) {
+        logger.error('Update exam section insert error:', sectionError);
+        continue;
+      }
+
+      createdSections.push(createdSection);
+
+      if (!section.questions || section.questions.length === 0) {
+        continue;
+      }
+
+      for (const question of section.questions) {
+        const questionInsert = {
+          exam_id: id,
+          section_id: createdSection.id,
+          type: question.type,
+          text: question.text,
+          text_hi: question.text_hi || null,
+          marks: numberOrNull(question.marks, 0),
+          negative_marks: numberOrNull(question.negative_marks, 0),
+          explanation: question.explanation || null,
+          explanation_hi: question.explanation_hi || null,
+          difficulty: question.difficulty,
+          image_url: question.image_url || null,
+          question_order: question.question_order || null
+        };
+
+        const { data: createdQuestion, error: questionError } = await supabase
+          .from('questions')
+          .insert(questionInsert)
+          .select()
+          .single();
+
+        if (questionError) {
+          logger.error('Update exam question insert error:', questionError);
+          continue;
+        }
+
+        if (question.options && question.options.length > 0) {
+          const optionsPayload = question.options.map(option => ({
+            question_id: createdQuestion.id,
+            option_text: option.option_text,
+            option_text_hi: option.option_text_hi || null,
+            is_correct: bool(option.is_correct),
+            option_order: numberOrNull(option.option_order),
+            image_url: option.image_url || null
+          }));
+
+          const { error: optionsError } = await supabase
+            .from('question_options')
+            .insert(optionsPayload);
+
+          if (optionsError) {
+            logger.error('Update exam option insert error:', optionsError);
+          }
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Exam updated successfully with all content',
+      data: {
+        exam: updatedExam,
+        sections: createdSections
+      }
+    });
+  } catch (error) {
+    logger.error('Update exam with content error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while updating exam with content'
+    });
+  }
+};
+
 module.exports = {
   getAdminExams,
   getAdminExamById,
@@ -1353,7 +1715,9 @@ module.exports = {
   updateQuestion,
   deleteQuestion,
   createOption,
+  updateOption,
   bulkCreateExamWithContent,
+  updateExamWithContent,
   getUserDetails,
   getAllUsers,
   updateUserRole,

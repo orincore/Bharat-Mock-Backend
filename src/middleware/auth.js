@@ -115,6 +115,10 @@ const adminAuth = async (req, res, next) => {
       .single();
 
     if (error || !adminUser) {
+      console.warn('[adminAuth] adminUser lookup failed', {
+        userId: req.user.id,
+        error
+      });
       return res.status(403).json({ 
         success: false, 
         message: 'Admin access required' 

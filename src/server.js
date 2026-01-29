@@ -17,6 +17,7 @@ const courseRoutes = require('./routes/courseRoutes');
 const articleRoutes = require('./routes/articleRoutes');
 const taxonomyRoutes = require('./routes/taxonomyRoutes');
 const subcategoryContentRoutes = require('./routes/subcategoryContentRoutes');
+const pageContentRoutes = require('./routes/pageContent');
 const adminRoutes = require('./routes/adminRoutes');
 
 const app = express();
@@ -91,6 +92,7 @@ app.use(`/api/${API_VERSION}/courses`, courseRoutes);
 app.use(`/api/${API_VERSION}/articles`, articleRoutes);
 app.use(`/api/${API_VERSION}/taxonomy`, taxonomyRoutes);
 app.use(`/api/${API_VERSION}/subcategories`, subcategoryContentRoutes);
+app.use(`/api/${API_VERSION}/page-content`, pageContentRoutes);
 app.use(`/api/${API_VERSION}/admin`, adminRoutes);
 
 app.use(notFound);
