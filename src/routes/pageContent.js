@@ -3,6 +3,7 @@ const router = express.Router();
 const pageContentController = require('../controllers/pageContentController');
 const { authenticate } = require('../middleware/auth');
 const { requireAdmin } = require('../middleware/adminAuth');
+const { upload } = require('../utils/fileUpload');
 
 router.get('/:subcategoryId', pageContentController.getPageContent);
 
@@ -16,7 +17,7 @@ router.delete('/blocks/:blockId', authenticate, requireAdmin, pageContentControl
 router.post('/blocks/reorder', authenticate, requireAdmin, pageContentController.reorderBlocks);
 router.post('/:subcategoryId/bulk-sync', authenticate, requireAdmin, pageContentController.bulkSyncPageContent);
 
-router.post('/:subcategoryId/media', authenticate, requireAdmin, pageContentController.uploadMedia);
+router.post('/:subcategoryId/media', authenticate, requireAdmin, upload.single('file'), pageContentController.uploadMedia);
 router.get('/:subcategoryId/media', pageContentController.getMedia);
 
 router.put('/:subcategoryId/seo', authenticate, requireAdmin, pageContentController.updateSEO);

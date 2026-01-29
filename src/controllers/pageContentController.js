@@ -1,4 +1,5 @@
 const supabase = require('../config/database');
+const { uploadToR2 } = require('../utils/fileUpload');
 
 const buildErrorResponse = (res, message, error) => {
   console.error(message, error);
@@ -82,6 +83,7 @@ const pageContentController = {
         display_order,
         is_collapsible,
         is_expanded,
+        is_sidebar,
         settings
       } = req.body;
 
@@ -99,6 +101,7 @@ const pageContentController = {
             display_order: display_order || 0,
             is_collapsible: is_collapsible || false,
             is_expanded: is_expanded ?? true,
+            is_sidebar: is_sidebar || false,
             settings: settings || {},
             created_by: req.user?.id || null,
             updated_by: req.user?.id || null
@@ -131,6 +134,7 @@ const pageContentController = {
         is_collapsible,
         is_expanded,
         is_active,
+        is_sidebar,
         settings
       } = req.body;
 
@@ -146,6 +150,7 @@ const pageContentController = {
           is_collapsible: is_collapsible ?? undefined,
           is_expanded: is_expanded ?? undefined,
           is_active: is_active ?? undefined,
+          is_sidebar: is_sidebar ?? undefined,
           settings: settings ?? undefined,
           updated_by: req.user?.id || null
         })
@@ -347,6 +352,7 @@ const pageContentController = {
   uploadMedia: async (req, res) => {
     try {
       const { subcategoryId } = req.params;
+      const file = req.file;
       const {
         file_name,
         file_url,
@@ -357,24 +363,70 @@ const pageContentController = {
         caption,
         width,
         height,
-        metadata
-      } = req.body;
+        metadata,
+        folder
+      } = req.body || {};
+
+      const parseMetadata = (raw) => {
+        if (!raw) return {};
+        if (typeof raw === 'object') return raw;
+        try {
+          return JSON.parse(raw);
+        } catch (err) {
+          return {};
+        }
+      };
+
+      const detectFileType = (mime) => {
+        if (!mime) return 'file';
+        if (mime.startsWith('image/')) return 'image';
+        if (mime.startsWith('video/')) return 'video';
+        return 'file';
+      };
+
+      let finalFileUrl = file_url;
+      let finalFileName = file_name;
+      let finalFileType = file_type;
+      let finalMimeType = mime_type;
+      let finalFileSize = file_size;
+      let finalWidth = width;
+      let finalHeight = height;
+
+      if (file) {
+        const uploadFolder = folder || `page-content/${subcategoryId}`;
+        const uploadResult = await uploadToR2(file, uploadFolder);
+        if (!uploadResult?.url) {
+          return res.status(500).json({ error: 'Failed to upload file to storage' });
+        }
+
+        finalFileUrl = uploadResult.url;
+        finalFileName = uploadResult.fileName || file.originalname;
+        finalMimeType = file.mimetype;
+        finalFileSize = file.size;
+        finalFileType = detectFileType(file.mimetype);
+        finalWidth = width || null;
+        finalHeight = height || null;
+      }
+
+      if (!finalFileUrl) {
+        return res.status(400).json({ error: 'file_url is required when no file is uploaded' });
+      }
 
       const { data, error } = await supabase
         .from('page_media')
         .insert([
           {
             subcategory_id: subcategoryId,
-            file_name,
-            file_url,
-            file_type,
-            file_size: file_size || null,
-            mime_type: mime_type || null,
+            file_name: finalFileName,
+            file_url: finalFileUrl,
+            file_type: finalFileType || detectFileType(finalMimeType),
+            file_size: finalFileSize || null,
+            mime_type: finalMimeType || null,
             alt_text: alt_text || null,
             caption: caption || null,
-            width: width || null,
-            height: height || null,
-            metadata: metadata || {},
+            width: finalWidth || null,
+            height: finalHeight || null,
+            metadata: parseMetadata(metadata),
             created_by: req.user?.id || null
           }
         ])
@@ -677,6 +729,7 @@ const pageContentController = {
         display_order: section.display_order ?? 0,
         is_collapsible: section.is_collapsible ?? false,
         is_expanded: section.is_expanded ?? true,
+        is_sidebar: section.is_sidebar ?? false,
         settings: section.settings || {}
       });
 
