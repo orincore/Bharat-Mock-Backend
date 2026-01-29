@@ -14,6 +14,7 @@ router.post('/:subcategoryId/blocks', authenticate, requireAdmin, pageContentCon
 router.put('/blocks/:blockId', authenticate, requireAdmin, pageContentController.updateBlock);
 router.delete('/blocks/:blockId', authenticate, requireAdmin, pageContentController.deleteBlock);
 router.post('/blocks/reorder', authenticate, requireAdmin, pageContentController.reorderBlocks);
+router.post('/:subcategoryId/bulk-sync', authenticate, requireAdmin, pageContentController.bulkSyncPageContent);
 
 router.post('/:subcategoryId/media', authenticate, requireAdmin, pageContentController.uploadMedia);
 router.get('/:subcategoryId/media', pageContentController.getMedia);

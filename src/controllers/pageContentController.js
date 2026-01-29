@@ -625,6 +625,215 @@ const pageContentController = {
     } catch (error) {
       return buildErrorResponse(res, 'Failed to restore revision', error);
     }
+  },
+
+  bulkSyncPageContent: async (req, res) => {
+    try {
+      const { subcategoryId } = req.params;
+      const { sections = [] } = req.body;
+
+      if (!Array.isArray(sections)) {
+        return res.status(400).json({ error: 'Sections payload must be an array.' });
+      }
+
+      const { data: existingSections, error: sectionsError } = await supabase
+        .from('page_sections')
+        .select('*')
+        .eq('subcategory_id', subcategoryId);
+
+      if (sectionsError) {
+        return buildErrorResponse(res, 'Failed to fetch existing sections', sectionsError);
+      }
+
+      const { data: existingBlocks, error: blocksError } = await supabase
+        .from('page_content_blocks')
+        .select('*')
+        .eq('subcategory_id', subcategoryId);
+
+      if (blocksError) {
+        return buildErrorResponse(res, 'Failed to fetch existing blocks', blocksError);
+      }
+
+      const existingSectionMap = new Map((existingSections || []).map((section) => [section.id, section]));
+      const existingBlockMap = new Map((existingBlocks || []).map((block) => [block.id, block]));
+      const sectionIdAliasMap = new Map();
+
+      const operations = {
+        sectionsCreated: 0,
+        sectionsUpdated: 0,
+        sectionsSkipped: 0,
+        blocksCreated: 0,
+        blocksUpdated: 0,
+        blocksSkipped: 0
+      };
+
+      const normalizeSectionPayload = (section = {}) => ({
+        section_key: section.section_key || section.title?.toLowerCase().replace(/\s+/g, '-') || null,
+        title: section.title || null,
+        subtitle: section.subtitle || null,
+        icon: section.icon || null,
+        background_color: section.background_color || null,
+        text_color: section.text_color || null,
+        display_order: section.display_order ?? 0,
+        is_collapsible: section.is_collapsible ?? false,
+        is_expanded: section.is_expanded ?? true,
+        settings: section.settings || {}
+      });
+
+      const normalizeBlockPayload = (block = {}, sectionId) => ({
+        subcategory_id: subcategoryId,
+        section_id: sectionId || block.section_id || null,
+        block_type: block.block_type,
+        content: block.content,
+        settings: block.settings || {},
+        display_order: block.display_order ?? 0,
+        parent_block_id: block.parent_block_id || null
+      });
+
+      const hasChanged = (incoming, existing) => {
+        try {
+          return JSON.stringify(incoming) !== JSON.stringify(existing);
+        } catch (err) {
+          debugLog('[bulkSyncPageContent.compare-error]', err);
+          return true;
+        }
+      };
+
+      for (const section of sections) {
+        const sectionAlias = section.id || section.section_key || `temp-${Math.random().toString(36).slice(2)}`;
+        const sectionPayload = normalizeSectionPayload(section);
+        let sectionId = section.id;
+        const existingSection = section.id ? existingSectionMap.get(section.id) : null;
+
+        if (existingSection) {
+          const existingComparable = normalizeSectionPayload(existingSection);
+
+          if (hasChanged(sectionPayload, existingComparable)) {
+            const { error } = await supabase
+              .from('page_sections')
+              .update({
+                ...sectionPayload,
+                updated_by: req.user?.id || null
+              })
+              .eq('id', section.id);
+
+            if (error) {
+              return buildErrorResponse(res, 'Failed to update section during bulk sync', error);
+            }
+
+            operations.sectionsUpdated += 1;
+          } else {
+            operations.sectionsSkipped += 1;
+          }
+        } else {
+          const insertPayload = {
+            ...sectionPayload,
+            subcategory_id: subcategoryId,
+            created_by: req.user?.id || null,
+            updated_by: req.user?.id || null
+          };
+
+          const { data, error } = await supabase
+            .from('page_sections')
+            .insert([insertPayload])
+            .select('*')
+            .single();
+
+          if (error) {
+            return buildErrorResponse(res, 'Failed to create section during bulk sync', error);
+          }
+
+          sectionId = data.id;
+          operations.sectionsCreated += 1;
+        }
+
+        sectionIdAliasMap.set(sectionAlias, sectionId || section.id);
+
+        const blocks = Array.isArray(section.blocks) ? section.blocks : [];
+        const blockMapForSection = new Map(
+          (existingBlocks || [])
+            .filter((block) => block.section_id === (section.id || null))
+            .map((block) => [block.id, block])
+        );
+
+        for (const block of blocks) {
+          const resolvedSectionId = sectionIdAliasMap.get(sectionAlias);
+          const blockPayload = normalizeBlockPayload(block, resolvedSectionId);
+
+          if (block.id && existingBlockMap.has(block.id)) {
+            const existingBlock = existingBlockMap.get(block.id);
+            const comparableExisting = normalizeBlockPayload(existingBlock, existingBlock.section_id);
+
+            if (hasChanged(blockPayload, comparableExisting)) {
+              const { error } = await supabase
+                .from('page_content_blocks')
+                .update({
+                  ...blockPayload,
+                  updated_by: req.user?.id || null
+                })
+                .eq('id', block.id);
+
+              if (error) {
+                return buildErrorResponse(res, 'Failed to update block during bulk sync', error);
+              }
+
+              operations.blocksUpdated += 1;
+            } else {
+              operations.blocksSkipped += 1;
+            }
+          } else {
+            const insertPayload = {
+              ...blockPayload,
+              created_by: req.user?.id || null,
+              updated_by: req.user?.id || null
+            };
+
+            const { error } = await supabase
+              .from('page_content_blocks')
+              .insert([insertPayload]);
+
+            if (error) {
+              return buildErrorResponse(res, 'Failed to create block during bulk sync', error);
+            }
+
+            operations.blocksCreated += 1;
+          }
+        }
+      }
+
+      const { data: refreshedSections, error: refreshedSectionsError } = await supabase
+        .from('page_sections')
+        .select('*')
+        .eq('subcategory_id', subcategoryId)
+        .order('display_order', { ascending: true });
+
+      if (refreshedSectionsError) {
+        return buildErrorResponse(res, 'Failed to fetch refreshed sections', refreshedSectionsError);
+      }
+
+      const { data: refreshedBlocks, error: refreshedBlocksError } = await supabase
+        .from('page_content_blocks')
+        .select('*')
+        .eq('subcategory_id', subcategoryId)
+        .order('display_order', { ascending: true });
+
+      if (refreshedBlocksError) {
+        return buildErrorResponse(res, 'Failed to fetch refreshed blocks', refreshedBlocksError);
+      }
+
+      const grouped = (refreshedSections || []).map((section) => ({
+        ...section,
+        blocks: (refreshedBlocks || []).filter((block) => block.section_id === section.id)
+      }));
+
+      res.json({
+        success: true,
+        summary: operations,
+        sections: grouped
+      });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to bulk sync page content', error);
+    }
   }
 };
 

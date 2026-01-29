@@ -467,6 +467,7 @@ const getSubcategoryById = async (req, res) => {
     }
 
     let category = null;
+    let categorySlug = null;
     if (data.category_id) {
       const { data: categoryData, error: categoryError } = await supabase
         .from('exam_categories')
@@ -476,10 +477,11 @@ const getSubcategoryById = async (req, res) => {
 
       if (categoryData && !categoryError) {
         category = categoryData;
+        categorySlug = categoryData.slug;
       }
     }
 
-    return res.json({ success: true, data: { ...data, category } });
+    return res.json({ success: true, data: { ...data, category, category_slug: categorySlug } });
   } catch (error) {
     logger.error('Get subcategory by id error:', error);
     return res.status(500).json({ success: false, message: 'Server error while fetching subcategory' });
