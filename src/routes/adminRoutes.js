@@ -20,6 +20,7 @@ const {
   createOption,
   updateOption,
   bulkCreateExamWithContent,
+  saveDraftExam,
   getAllUsers,
   getUserDetails,
   updateUserRole,
@@ -57,6 +58,11 @@ router.post('/exams/bulk', upload.fields([
   { name: 'logo', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 }
 ]), bulkCreateExamWithContent);
+
+router.post('/exams/draft', upload.fields([
+  { name: 'logo', maxCount: 1 },
+  { name: 'thumbnail', maxCount: 1 }
+]), saveDraftExam);
 
 router.put('/exams/:id/content', upload.fields([
   { name: 'logo', maxCount: 1 },

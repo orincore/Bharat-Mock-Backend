@@ -1184,6 +1184,40 @@ const toggleUserBlock = async (req, res) => {
   }
 };
 
+const saveDraftExam = async (req, res) => {
+  try {
+    let examPayload;
+
+    try {
+      examPayload = typeof req.body.exam === 'string' ? JSON.parse(req.body.exam) : req.body.exam;
+    } catch (parseError) {
+      logger.error('Failed to parse exam payload for save draft:', parseError);
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid exam payload. Ensure exam data is valid JSON.'
+      });
+    }
+
+    if (!examPayload) {
+      return res.status(400).json({
+        success: false,
+        message: 'Exam data is required.'
+      });
+    }
+
+    examPayload.is_published = false;
+    req.body.exam = JSON.stringify(examPayload);
+
+    return bulkCreateExamWithContent(req, res);
+  } catch (error) {
+    logger.error('Save draft exam error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Server error while saving draft exam'
+    });
+  }
+};
+
 const bulkCreateExamWithContent = async (req, res) => {
   try {
     const {
@@ -1718,6 +1752,7 @@ module.exports = {
   updateOption,
   bulkCreateExamWithContent,
   updateExamWithContent,
+  saveDraftExam,
   getUserDetails,
   getAllUsers,
   updateUserRole,
