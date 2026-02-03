@@ -277,6 +277,7 @@ const getExamSectionsWithQuestions = async (req, res) => {
         difficulty,
         image_url,
         question_order,
+        question_number,
         question_options (
           id,
           option_text,
@@ -288,7 +289,7 @@ const getExamSectionsWithQuestions = async (req, res) => {
       `)
       .eq('exam_id', id)
       .is('deleted_at', null)
-      .order('question_order');
+      .order('question_number');
 
     if (questionsError) {
       logger.error('Get questions error:', questionsError);
@@ -320,6 +321,7 @@ const getExamSectionsWithQuestions = async (req, res) => {
           difficulty: q.difficulty,
           image_url: q.image_url,
           question_order: q.question_order,
+          question_number: q.question_number,
           options: (q.question_options || [])
             .sort((a, b) => a.option_order - b.option_order)
             .map(opt => ({
@@ -814,7 +816,7 @@ const deleteSection = async (req, res) => {
 
 const createQuestion = async (req, res) => {
   try {
-    const { exam_id, section_id, type, text, marks, negative_marks, explanation, difficulty, question_order } = req.body;
+    const { exam_id, section_id, type, text, marks, negative_marks, explanation, difficulty, question_order, question_number } = req.body;
 
     let imageUrl = null;
     if (req.file) {
@@ -834,7 +836,8 @@ const createQuestion = async (req, res) => {
         explanation,
         image_url: imageUrl,
         difficulty,
-        question_order: question_order ? parseInt(question_order) : null
+        question_order: question_order ? parseInt(question_order) : null,
+        question_number: question_number ? parseInt(question_number) : null
       })
       .select()
       .single();
@@ -884,6 +887,7 @@ const updateQuestion = async (req, res) => {
     if (updateData.marks) updateData.marks = parseFloat(updateData.marks);
     if (updateData.negative_marks) updateData.negative_marks = parseFloat(updateData.negative_marks);
     if (updateData.question_order) updateData.question_order = parseInt(updateData.question_order);
+    if (updateData.question_number) updateData.question_number = parseInt(updateData.question_number);
 
     const { data: question, error } = await supabase
       .from('questions')
@@ -1128,6 +1132,39 @@ const updateUserRole = async (req, res) => {
       return res.status(500).json({
         success: false,
         message: 'Failed to update user role'
+      });
+    }
+
+    try {
+      if (role === 'admin') {
+        const { data: adminRole, error: adminRoleError } = await supabase
+          .from('admin_roles')
+          .select('id')
+          .eq('name', 'admin')
+          .single();
+
+        if (adminRoleError || !adminRole) {
+          throw new Error('Admin role not found');
+        }
+
+        await supabase
+          .from('admin_users')
+          .upsert({
+            user_id: id,
+            role_id: adminRole.id,
+            is_active: true
+          }, { onConflict: 'user_id' });
+      } else {
+        await supabase
+          .from('admin_users')
+          .delete()
+          .eq('user_id', id);
+      }
+    } catch (adminSyncError) {
+      logger.error('Sync admin_users error:', adminSyncError);
+      return res.status(500).json({
+        success: false,
+        message: 'User role updated, but failed to synchronize admin access'
       });
     }
 

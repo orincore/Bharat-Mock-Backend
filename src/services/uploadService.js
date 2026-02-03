@@ -91,8 +91,32 @@ const extractKeyFromUrl = (url) => {
   return url.replace(`${R2_PUBLIC_URL}/`, '');
 };
 
+const uploadBuffer = async (buffer, filename, mimeType, folder = 'uploads') => {
+  try {
+    const key = `${folder}/${filename}`;
+    
+    const command = new PutObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: key,
+      Body: buffer,
+      ContentType: mimeType,
+    });
+
+    await r2Client.send(command);
+    
+    const publicUrl = `${R2_PUBLIC_URL}/${key}`;
+    logger.info(`Buffer uploaded successfully: ${publicUrl}`);
+    
+    return { url: publicUrl, key };
+  } catch (error) {
+    logger.error('Buffer upload error:', error);
+    throw new Error('Failed to upload buffer to R2');
+  }
+};
+
 module.exports = {
   uploadFile,
+  uploadBuffer,
   deleteFile,
   uploadExamLogo,
   uploadExamThumbnail,

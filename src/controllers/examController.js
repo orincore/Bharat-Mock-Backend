@@ -553,6 +553,7 @@ const getExamQuestions = async (req, res) => {
         explanation_hi,
         image_url,
         question_order,
+        question_number,
         question_options (
           id,
           option_text,
@@ -563,7 +564,7 @@ const getExamQuestions = async (req, res) => {
       `)
       .eq('exam_id', examId)
       .is('deleted_at', null)
-      .order('question_order');
+      .order('question_number');
 
     if (questionsError) {
       logger.error('Get questions error:', questionsError);
@@ -592,7 +593,9 @@ const getExamQuestions = async (req, res) => {
       marksPerQuestion: section.marks_per_question,
       duration: section.duration,
       sectionOrder: section.section_order,
-      questions: questionsWithAnswers.filter(q => q.section_id === section.id)
+      questions: questionsWithAnswers
+        .filter(q => q.section_id === section.id)
+        .sort((a, b) => (a.question_number || a.question_order || 0) - (b.question_number || b.question_order || 0))
     }));
 
     res.json({
@@ -960,7 +963,7 @@ const getExamForPDF = async (req, res) => {
         question_options(*)
       `)
       .eq('exam_id', examId)
-      .order('question_order', { ascending: true });
+      .order('question_number', { ascending: true });
 
     if (questionsError) {
       logger.error('Get questions error:', questionsError);

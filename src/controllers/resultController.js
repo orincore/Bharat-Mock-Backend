@@ -353,10 +353,12 @@ const getAnswerReview = async (req, res) => {
         explanation_hi,
         image_url,
         question_order,
+        question_number,
         exam_sections!inner (
           id,
           name,
-          name_hi
+          name_hi,
+          section_order
         ),
         question_options (
           id,
@@ -368,7 +370,7 @@ const getAnswerReview = async (req, res) => {
         )
       `)
       .eq('exam_id', result.exam_id)
-      .order('question_order');
+      .order('question_number');
 
     const filteredQuestions = questions.filter(q => {
       if (attemptLanguage === 'hi') {

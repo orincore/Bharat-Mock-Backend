@@ -5,9 +5,14 @@ const helmet = require('helmet');
 const compression = require('compression');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const { ApolloServer } = require('@apollo/server');
+const { graphqlUploadExpress } = require('graphql-upload-minimal');
 const passport = require('./config/passport');
 const logger = require('./config/logger');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
+const typeDefs = require('./graphql/typeDefs');
+const resolvers = require('./graphql/resolvers');
+const { buildContext } = require('./graphql/context');
 
 const authRoutes = require('./routes/authRoutes');
 const examRoutes = require('./routes/examRoutes');
@@ -97,27 +102,69 @@ app.use(`/api/${API_VERSION}/subcategories`, subcategoryContentRoutes);
 app.use(`/api/${API_VERSION}/page-content`, pageContentRoutes);
 app.use(`/api/${API_VERSION}/admin`, adminRoutes);
 
-app.use(notFound);
-app.use(errorHandler);
+const GRAPHQL_PATH = process.env.GRAPHQL_PATH || '/api/graphql';
+const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_FILE_SIZE, 10) || 5242880; // 5MB default
 
-const PORT = process.env.PORT || 5000;
+let server;
 
-const server = app.listen(PORT, () => {
-  logger.info(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`📚 API Documentation: http://localhost:${PORT}/api/${API_VERSION}`);
-});
+const startServer = async () => {
+  try {
+    const { expressMiddleware } = await import('@apollo/server/express4');
+
+    const apolloServer = new ApolloServer({
+      typeDefs,
+      resolvers,
+      formatError: (formattedError) => {
+        logger.error('GraphQL Error:', formattedError);
+        return formattedError;
+      }
+    });
+
+    await apolloServer.start();
+
+    app.use(
+      GRAPHQL_PATH,
+      graphqlUploadExpress({ maxFileSize: MAX_UPLOAD_SIZE, maxFiles: 10 }),
+      expressMiddleware(apolloServer, {
+        context: async ({ req }) => buildContext(req)
+      })
+    );
+
+    app.use(notFound);
+    app.use(errorHandler);
+
+    const PORT = process.env.PORT || 5000;
+
+    server = app.listen(PORT, () => {
+      logger.info(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
+      console.log(`📚 API Documentation: http://localhost:${PORT}/api/${API_VERSION}`);
+      console.log(`🔗 GraphQL Endpoint: http://localhost:${PORT}${GRAPHQL_PATH}`);
+    });
+  } catch (error) {
+    logger.error('Failed to start server', error);
+    process.exit(1);
+  }
+};
+
+startServer();
 
 process.on('unhandledRejection', (err) => {
   logger.error('Unhandled Promise Rejection:', err);
-  server.close(() => process.exit(1));
+  if (server) {
+    server.close(() => process.exit(1));
+  } else {
+    process.exit(1);
+  }
 });
 
 process.on('SIGTERM', () => {
   logger.info('SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    logger.info('Process terminated');
-  });
+  if (server) {
+    server.close(() => {
+      logger.info('Process terminated');
+    });
+  }
 });
 
 module.exports = app;
