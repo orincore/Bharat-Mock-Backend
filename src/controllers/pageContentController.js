@@ -803,11 +803,6 @@ const pageContentController = {
         sectionIdAliasMap.set(sectionAlias, sectionId || section.id);
 
         const blocks = Array.isArray(section.blocks) ? section.blocks : [];
-        const blockMapForSection = new Map(
-          (existingBlocks || [])
-            .filter((block) => block.section_id === (section.id || null))
-            .map((block) => [block.id, block])
-        );
 
         for (const block of blocks) {
           const resolvedSectionId = sectionIdAliasMap.get(sectionAlias);

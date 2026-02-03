@@ -2,7 +2,6 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const supabase = require('../config/database');
 const logger = require('../config/logger');
-const { v4: uuidv4 } = require('uuid');
 const { sendWelcomeEmail, sendPasswordOtpEmail } = require('../utils/emailService');
 
 const generateToken = (userId) => {

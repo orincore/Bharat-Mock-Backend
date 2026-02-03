@@ -2,7 +2,7 @@ const { GraphQLUpload } = require('graphql-upload-minimal');
 const GraphQLJSON = require('graphql-type-json');
 const supabase = require('../config/database');
 const logger = require('../config/logger');
-const { uploadExamLogo, uploadExamThumbnail, uploadQuestionImage, uploadOptionImage } = require('../services/uploadService');
+const { uploadExamLogo, uploadExamThumbnail } = require('../services/uploadService');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -123,8 +123,6 @@ const NUMERIC_FIELDS = new Set([
 
 const BOOLEAN_FIELDS = new Set(['is_correct']);
 
-const isTempId = (id) => !id || id.startsWith('section-') || id.startsWith('question-') || id.startsWith('option-') || id.startsWith('opt-');
-
 const normalizeAutosaveValue = (field, value) => {
   if (value === undefined) return null;
   if (NUMERIC_FIELDS.has(field)) {
@@ -137,7 +135,7 @@ const normalizeAutosaveValue = (field, value) => {
   return value;
 };
 
-const persistAutosaveChange = async ({ exam_id, field_path, payload }) => {
+const persistAutosaveChange = async ({ exam_id: _exam_id, field_path, payload }) => {
   if (!field_path || !field_path.startsWith('sections')) {
     return;
   }
@@ -799,30 +797,12 @@ const resolvers = {
       return true;
     },
 
-    uploadQuestionImage: async (_, args, context) => {
-      ensureAdminContext(context);
-      const file = await processUpload(args.file);
-      if (!file) {
-        throw new Error('File required');
-      }
-      const uploadResult = await uploadQuestionImage(file);
-
-      if (args.question_id) {
-        await supabase
-          .from('questions')
-          .update({ image_url: uploadResult.url })
-          .eq('id', args.question_id);
-      }
-
-      return { url: uploadResult.url };
-    },
-
     uploadQuestionImage: async (_, { questionId, file }, { user }) => {
       if (!user) throw new Error('Unauthorized');
       
       try {
         // Decode base64 file data
-        const matches = file.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+        const matches = file.match(/^data:([A-Za-z-+/]+);base64,(.+)$/);
         if (!matches || matches.length !== 3) {
           throw new Error('Invalid file format');
         }
@@ -871,7 +851,7 @@ const resolvers = {
       
       try {
         // Decode base64 file data
-        const matches = file.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+        const matches = file.match(/^data:([A-Za-z-+/]+);base64,(.+)$/);
         if (!matches || matches.length !== 3) {
           throw new Error('Invalid file format');
         }

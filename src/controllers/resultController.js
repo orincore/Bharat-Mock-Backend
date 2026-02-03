@@ -339,6 +339,56 @@ const getAnswerReview = async (req, res) => {
 
     const attemptLanguage = result.exam_attempts?.language || 'en';
 
+    // Get sections with language filtering (same logic as examController)
+    let sectionsSelect = 'id, name, name_hi, total_questions, marks_per_question, duration, section_order';
+    let sectionsData;
+    let sectionsError;
+    try {
+      ({ data: sectionsData, error: sectionsError } = await supabase
+        .from('exam_sections')
+        .select(`${sectionsSelect}, language`)
+        .eq('exam_id', result.exam_id));
+      if (sectionsError && sectionsError.code === '42703') {
+        ({ data: sectionsData, error: sectionsError } = await supabase
+          .from('exam_sections')
+          .select(sectionsSelect)
+          .eq('exam_id', result.exam_id));
+      }
+    } catch (err) {
+      sectionsData = null;
+      sectionsError = err;
+    }
+
+    if (sectionsError) {
+      throw sectionsError;
+    }
+
+    const sections = (sectionsData || []).map(section => ({
+      ...section,
+      language: section.language || attemptLanguage
+    }));
+
+    const allowedSectionIds = new Set(
+      sections
+        .filter(section => (section.language || attemptLanguage) === attemptLanguage)
+        .map(section => section.id)
+    );
+
+    const questionHasContent = (question, language) => {
+      if (language === 'hi') {
+        return Boolean(
+          (question.text_hi && question.text_hi.trim()) ||
+          (question.explanation_hi && question.explanation_hi.trim()) ||
+          (question.question_options && question.question_options.some(opt => opt.option_text_hi && opt.option_text_hi.trim()))
+        );
+      }
+      return Boolean(
+        (question.text && question.text.trim()) ||
+        (question.explanation && question.explanation.trim()) ||
+        (question.question_options && question.question_options.some(opt => opt.option_text && opt.option_text.trim()))
+      );
+    };
+
     const { data: questions } = await supabase
       .from('questions')
       .select(`
@@ -372,13 +422,9 @@ const getAnswerReview = async (req, res) => {
       .eq('exam_id', result.exam_id)
       .order('question_number');
 
-    const filteredQuestions = questions.filter(q => {
-      if (attemptLanguage === 'hi') {
-        return (q.text_hi && q.text_hi.trim()) || 
-               (q.question_options && q.question_options.some(opt => opt.option_text_hi && opt.option_text_hi.trim()));
-      }
-      return q.text && q.text.trim();
-    });
+    const filteredQuestions = questions.filter(q =>
+      allowedSectionIds.has(q.section_id) && questionHasContent(q, attemptLanguage)
+    );
 
     const { data: userAnswers } = await supabase
       .from('user_answers')

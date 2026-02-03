@@ -60,6 +60,7 @@ input QuestionInput {
   explanation_hi: String
   difficulty: String!
   question_order: Int
+  question_number: Int
   image_url: String
   options: [OptionInput!]
 }

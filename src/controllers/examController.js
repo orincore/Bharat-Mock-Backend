@@ -525,11 +525,33 @@ const getExamQuestions = async (req, res) => {
       });
     }
 
-    const { data: sections, error: sectionsError } = await supabase
-      .from('exam_sections')
-      .select('id, name, name_hi, total_questions, marks_per_question, duration, section_order')
-      .eq('exam_id', examId)
-      .order('section_order');
+    const attemptLanguage = attempt.language || 'en';
+
+    let sectionsSelect = 'id, name, name_hi, total_questions, marks_per_question, duration, section_order';
+    let sectionsData;
+    let sectionsError;
+    try {
+      ({ data: sectionsData, error: sectionsError } = await supabase
+        .from('exam_sections')
+        .select(`${sectionsSelect}, language`)
+        .eq('exam_id', examId)
+        .order('section_order'));
+      if (sectionsError && sectionsError.code === '42703') {
+        ({ data: sectionsData, error: sectionsError } = await supabase
+          .from('exam_sections')
+          .select(sectionsSelect)
+          .eq('exam_id', examId)
+          .order('section_order'));
+      }
+    } catch (err) {
+      sectionsData = null;
+      sectionsError = err;
+    }
+
+    let sections = (sectionsData || []).map(section => ({
+      ...section,
+      language: section.language || attemptLanguage
+    }));
 
     if (sectionsError) {
       logger.error('Get sections error:', sectionsError);
@@ -579,24 +601,85 @@ const getExamQuestions = async (req, res) => {
       .select('question_id, answer, marked_for_review, time_taken')
       .eq('attempt_id', attemptId);
 
-    const questionsWithAnswers = questions.map(q => ({
+    const questionHasContent = (question, language) => {
+      if (language === 'hi') {
+        return Boolean(
+          (question.text_hi && question.text_hi.trim()) ||
+          (question.explanation_hi && question.explanation_hi.trim()) ||
+          (question.question_options && question.question_options.some(opt => opt.option_text_hi && opt.option_text_hi.trim()))
+        );
+      }
+      return Boolean(
+        (question.text && question.text.trim()) ||
+        (question.explanation && question.explanation.trim()) ||
+        (question.question_options && question.question_options.some(opt => opt.option_text && opt.option_text.trim()))
+      );
+    };
+
+    const buildFilteredQuestions = (language) => {
+      const filtered = questions.filter(question => questionHasContent(question, language));
+      return filtered;
+    };
+
+    let languageUsed = attemptLanguage;
+    let filteredQuestions = buildFilteredQuestions(languageUsed);
+
+    if (filteredQuestions.length === 0 && attemptLanguage === 'hi') {
+      languageUsed = 'en';
+      filteredQuestions = buildFilteredQuestions(languageUsed);
+    }
+
+    if (filteredQuestions.length === 0) {
+      languageUsed = 'en';
+      filteredQuestions = questions;
+    }
+
+    const questionsWithAnswers = filteredQuestions.map(q => ({
       ...q,
       options: q.question_options?.sort((a, b) => a.option_order - b.option_order) || [],
       userAnswer: userAnswers?.find(ua => ua.question_id === q.id) || null
     }));
 
-    const sectionsWithQuestions = sections.map(section => ({
-      id: section.id,
-      name: section.name,
-      name_hi: section.name_hi || null,
-      totalQuestions: section.total_questions,
-      marksPerQuestion: section.marks_per_question,
-      duration: section.duration,
-      sectionOrder: section.section_order,
-      questions: questionsWithAnswers
-        .filter(q => q.section_id === section.id)
-        .sort((a, b) => (a.question_number || a.question_order || 0) - (b.question_number || b.question_order || 0))
-    }));
+    const sectionQuestionMap = new Map();
+    const sectionLanguageMap = new Map();
+    sections.forEach(section => {
+      sectionLanguageMap.set(section.id, section.language || 'en');
+    });
+
+    questionsWithAnswers.forEach(question => {
+      if (!sectionQuestionMap.has(question.section_id)) {
+        sectionQuestionMap.set(question.section_id, []);
+      }
+      sectionQuestionMap.get(question.section_id).push(question);
+    });
+
+    const sectionsWithQuestions = sections
+      .map(section => {
+        const derivedLanguage = sectionLanguageMap.get(section.id) || attemptLanguage;
+        if (derivedLanguage !== languageUsed) {
+          return null;
+        }
+
+        const sectionQuestions = (sectionQuestionMap.get(section.id) || [])
+          .sort((a, b) => (a.question_number || a.question_order || 0) - (b.question_number || b.question_order || 0));
+
+        if (sectionQuestions.length === 0) {
+          return null;
+        }
+
+        return {
+          id: section.id,
+          name: section.name,
+          name_hi: section.name_hi || null,
+          language: derivedLanguage,
+          totalQuestions: sectionQuestions.length,
+          marksPerQuestion: section.marks_per_question,
+          duration: section.duration,
+          sectionOrder: section.section_order,
+          questions: sectionQuestions
+        };
+      })
+      .filter(Boolean);
 
     res.json({
       success: true,
@@ -647,23 +730,47 @@ const saveAnswer = async (req, res) => {
       .eq('question_id', questionId)
       .single();
 
+    // Helper function to check if answer has actual value
+    const hasAnswerValue = (value) => {
+      if (Array.isArray(value)) {
+        return value.length > 0;
+      }
+      if (typeof value === 'string') {
+        return value.trim().length > 0;
+      }
+      return Boolean(value);
+    };
+
+    const hasAnswer = hasAnswerValue(answer);
+    const isMarked = markedForReview || false;
+
     if (existingAnswer) {
-      await supabase
-        .from('user_answers')
-        .update({
-          answer: answer || null,
-          marked_for_review: markedForReview || false,
-          time_taken: timeTaken || 0
-        })
-        .eq('id', existingAnswer.id);
-    } else {
+      if (!hasAnswer && !isMarked) {
+        // Delete the record if no answer and not marked
+        await supabase
+          .from('user_answers')
+          .delete()
+          .eq('id', existingAnswer.id);
+      } else {
+        // Update with answer or mark status
+        await supabase
+          .from('user_answers')
+          .update({
+            answer: hasAnswer ? answer : null,
+            marked_for_review: isMarked,
+            time_taken: timeTaken || 0
+          })
+          .eq('id', existingAnswer.id);
+      }
+    } else if (hasAnswer || isMarked) {
+      // Only insert if there's an answer or it's marked for review
       await supabase
         .from('user_answers')
         .insert({
           attempt_id: attemptId,
           question_id: questionId,
-          answer: answer || null,
-          marked_for_review: markedForReview || false,
+          answer: hasAnswer ? answer : null,
+          marked_for_review: isMarked,
           time_taken: timeTaken || 0
         });
     }
@@ -747,6 +854,55 @@ const evaluateExam = async (attemptId, examId, userId) => {
 
     const attemptLanguage = attemptData?.language || 'en';
 
+    let sectionsSelect = 'id, name, name_hi, total_questions, marks_per_question, duration, section_order';
+    let sectionsData;
+    let sectionsError;
+    try {
+      ({ data: sectionsData, error: sectionsError } = await supabase
+        .from('exam_sections')
+        .select(`${sectionsSelect}, language`)
+        .eq('exam_id', examId));
+      if (sectionsError && sectionsError.code === '42703') {
+        ({ data: sectionsData, error: sectionsError } = await supabase
+          .from('exam_sections')
+          .select(sectionsSelect)
+          .eq('exam_id', examId));
+      }
+    } catch (err) {
+      sectionsData = null;
+      sectionsError = err;
+    }
+
+    if (sectionsError) {
+      throw sectionsError;
+    }
+
+    const sections = (sectionsData || []).map(section => ({
+      ...section,
+      language: section.language || attemptLanguage
+    }));
+
+    const allowedSectionIds = new Set(
+      sections
+        .filter(section => (section.language || attemptLanguage) === attemptLanguage)
+        .map(section => section.id)
+    );
+
+    const questionHasContent = (question, language) => {
+      if (language === 'hi') {
+        return Boolean(
+          (question.text_hi && question.text_hi.trim()) ||
+          (question.explanation_hi && question.explanation_hi.trim()) ||
+          (question.question_options && question.question_options.some(opt => opt.option_text_hi && opt.option_text_hi.trim()))
+        );
+      }
+      return Boolean(
+        (question.text && question.text.trim()) ||
+        (question.explanation && question.explanation.trim()) ||
+        (question.question_options && question.question_options.some(opt => opt.option_text && opt.option_text.trim()))
+      );
+    };
+
     const { data: questions } = await supabase
       .from('questions')
       .select(`
@@ -766,13 +922,28 @@ const evaluateExam = async (attemptId, examId, userId) => {
       `)
       .eq('exam_id', examId);
 
-    const filteredQuestions = questions.filter(q => {
-      if (attemptLanguage === 'hi') {
-        return (q.text_hi && q.text_hi.trim()) || 
-               (q.question_options && q.question_options.some(opt => opt.option_text_hi && opt.option_text_hi.trim()));
+    const filteredQuestions = questions.filter(q =>
+      allowedSectionIds.has(q.section_id) && questionHasContent(q, attemptLanguage)
+    );
+
+    if (filteredQuestions.length === 0) {
+      throw new Error('No questions available for evaluation in selected language');
+    }
+
+    const sectionTotals = {};
+    filteredQuestions.forEach(question => {
+      if (!sectionTotals[question.section_id]) {
+        sectionTotals[question.section_id] = {
+          totalMarks: 0,
+          totalQuestions: 0
+        };
       }
-      return q.text && q.text.trim();
+      sectionTotals[question.section_id].totalMarks += question.marks || 0;
+      sectionTotals[question.section_id].totalQuestions += 1;
     });
+
+    const attemptTotalMarks = Object.values(sectionTotals)
+      .reduce((sum, section) => sum + section.totalMarks, 0) || 0;
 
     const { data: userAnswers } = await supabase
       .from('user_answers')
@@ -805,14 +976,38 @@ const evaluateExam = async (attemptId, examId, userId) => {
 
       let isCorrect = false;
 
+      // Debug logging for answer comparison
+      logger.info('Answer evaluation debug:', {
+        questionId: question.id,
+        questionType: question.type,
+        userAnswer: userAnswer.answer,
+        userAnswerType: typeof userAnswer.answer,
+        correctOptions: correctOptions,
+        correctOptionsTypes: correctOptions.map(opt => typeof opt)
+      });
+
       if (question.type === 'single' || question.type === 'truefalse') {
-        isCorrect = correctOptions.includes(userAnswer.answer);
+        // Ensure both are strings for comparison
+        const userAnswerStr = String(userAnswer.answer);
+        const correctOptionsStr = correctOptions.map(opt => String(opt));
+        isCorrect = correctOptionsStr.includes(userAnswerStr);
       } else if (question.type === 'multiple') {
-        const userAnswerArray = Array.isArray(userAnswer.answer) 
-          ? userAnswer.answer 
-          : JSON.parse(userAnswer.answer);
-        isCorrect = correctOptions.length === userAnswerArray.length &&
-          correctOptions.every(opt => userAnswerArray.includes(opt));
+        let userAnswerArray;
+        try {
+          userAnswerArray = Array.isArray(userAnswer.answer) 
+            ? userAnswer.answer 
+            : JSON.parse(userAnswer.answer);
+        } catch (e) {
+          // If JSON parse fails, treat as single answer
+          userAnswerArray = [userAnswer.answer];
+        }
+        
+        // Ensure all are strings for comparison
+        const userAnswerStrArray = userAnswerArray.map(ans => String(ans));
+        const correctOptionsStr = correctOptions.map(opt => String(opt));
+        
+        isCorrect = correctOptionsStr.length === userAnswerStrArray.length &&
+          correctOptionsStr.every(opt => userAnswerStrArray.includes(opt));
       } else if (question.type === 'numerical') {
         isCorrect = parseFloat(userAnswer.answer) === parseFloat(correctOptions[0]);
       }
@@ -850,13 +1045,27 @@ const evaluateExam = async (attemptId, examId, userId) => {
       sectionScores[question.section_id].timeTaken += userAnswer.time_taken || 0;
     }
 
+    // Add unattempted counts to section breakdown
+    filteredQuestions.forEach(question => {
+      if (!sectionScores[question.section_id]) {
+        sectionScores[question.section_id] = {
+          score: 0,
+          correct: 0,
+          wrong: 0,
+          unattempted: 0,
+          timeTaken: 0
+        };
+      }
+    });
+
     const { data: exam } = await supabase
       .from('exams')
       .select('total_marks, pass_percentage')
       .eq('id', examId)
       .single();
 
-    const percentage = (totalScore / exam.total_marks) * 100;
+    const denominator = attemptTotalMarks || exam.total_marks;
+    const percentage = denominator > 0 ? (totalScore / denominator) * 100 : 0;
     const status = percentage >= exam.pass_percentage ? 'pass' : 'fail';
 
     const { data: attemptRecord } = await supabase
@@ -872,7 +1081,7 @@ const evaluateExam = async (attemptId, examId, userId) => {
         exam_id: examId,
         user_id: userId,
         score: totalScore,
-        total_marks: exam.total_marks,
+        total_marks: denominator,
         percentage: percentage,
         correct_answers: correctAnswers,
         wrong_answers: wrongAnswers,
@@ -887,13 +1096,21 @@ const evaluateExam = async (attemptId, examId, userId) => {
     for (const [sectionId, scores] of Object.entries(sectionScores)) {
       const { data: section } = await supabase
         .from('exam_sections')
-        .select('name, total_questions, marks_per_question')
+        .select('name, total_questions, marks_per_question, language, name_hi')
         .eq('id', sectionId)
         .single();
 
-      const sectionTotalMarks = section.total_questions * section.marks_per_question;
-      const accuracy = scores.correct > 0 
-        ? (scores.correct / (scores.correct + scores.wrong)) * 100 
+      if (!section || (section.language || attemptLanguage) !== attemptLanguage) {
+        continue;
+      }
+
+      const sectionTotal = sectionTotals[sectionId]?.totalMarks || (section.total_questions * section.marks_per_question);
+      const sectionQuestionTotal = sectionTotals[sectionId]?.totalQuestions || section.total_questions;
+      const sectionUnattempted = sectionQuestionTotal - (scores.correct + scores.wrong);
+      scores.unattempted = Math.max(sectionUnattempted, 0);
+
+      const accuracy = scores.correct + scores.wrong > 0
+        ? (scores.correct / (scores.correct + scores.wrong)) * 100
         : 0;
 
       await supabase
@@ -902,7 +1119,7 @@ const evaluateExam = async (attemptId, examId, userId) => {
           result_id: result.id,
           section_id: sectionId,
           score: scores.score,
-          total_marks: sectionTotalMarks,
+          total_marks: sectionTotal,
           correct_answers: scores.correct,
           wrong_answers: scores.wrong,
           unattempted: scores.unattempted,
