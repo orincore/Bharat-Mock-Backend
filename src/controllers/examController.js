@@ -601,36 +601,18 @@ const getExamQuestions = async (req, res) => {
       .select('question_id, answer, marked_for_review, time_taken')
       .eq('attempt_id', attemptId);
 
-    const hasValue = (value) => typeof value === 'string' && value.trim().length > 0;
-
-    const optionHasContent = (option, language) => {
-      if (language === 'hi') {
-        return Boolean(
-          hasValue(option.option_text_hi) ||
-          hasValue(option.image_url)
-        );
-      }
-      return Boolean(
-        hasValue(option.option_text) ||
-        hasValue(option.image_url)
-      );
-    };
-
     const questionHasContent = (question, language) => {
-      const questionHasImage = hasValue(question.image_url);
       if (language === 'hi') {
         return Boolean(
-          hasValue(question.text_hi) ||
-          hasValue(question.explanation_hi) ||
-          questionHasImage ||
-          (question.question_options && question.question_options.some(opt => optionHasContent(opt, 'hi')))
+          (question.text_hi && question.text_hi.trim()) ||
+          (question.explanation_hi && question.explanation_hi.trim()) ||
+          (question.question_options && question.question_options.some(opt => opt.option_text_hi && opt.option_text_hi.trim()))
         );
       }
       return Boolean(
-        hasValue(question.text) ||
-        hasValue(question.explanation) ||
-        questionHasImage ||
-        (question.question_options && question.question_options.some(opt => optionHasContent(opt, 'en')))
+        (question.text && question.text.trim()) ||
+        (question.explanation && question.explanation.trim()) ||
+        (question.question_options && question.question_options.some(opt => opt.option_text && opt.option_text.trim()))
       );
     };
 
