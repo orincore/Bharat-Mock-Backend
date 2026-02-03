@@ -197,8 +197,8 @@ type Query {
 }
 
 type Mutation {
-  createExam(input: ExamInput!, sections: [SectionInput!]): ExamPayload!
-  updateExam(id: ID!, input: ExamInput!, sections: [SectionInput!]): ExamPayload!
+  createExam(input: ExamInput!, sections: [SectionInput!], logo: Upload, thumbnail: Upload): ExamPayload!
+  updateExam(id: ID!, input: ExamInput!, sections: [SectionInput!], logo: Upload, thumbnail: Upload): ExamPayload!
   deleteExam(id: ID!): Boolean!
   upsertDraftField(input: DraftFieldInput!): DraftField!
   clearDraft(draft_key: String!, exam_id: ID): Boolean!
