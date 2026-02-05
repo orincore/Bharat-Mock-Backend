@@ -23,8 +23,10 @@ const articleRoutes = require('./routes/articleRoutes');
 const blogRoutes = require('./routes/blog');
 const taxonomyRoutes = require('./routes/taxonomyRoutes');
 const subcategoryContentRoutes = require('./routes/subcategoryContentRoutes');
+const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const pageContentRoutes = require('./routes/pageContent');
 const adminRoutes = require('./routes/adminRoutes');
+const { startSubscriptionJobs } = require('./jobs/subscriptionJobs');
 
 const app = express();
 
@@ -101,6 +103,7 @@ app.use(`/api/${API_VERSION}/taxonomy`, taxonomyRoutes);
 app.use(`/api/${API_VERSION}/subcategories`, subcategoryContentRoutes);
 app.use(`/api/${API_VERSION}/page-content`, pageContentRoutes);
 app.use(`/api/${API_VERSION}/admin`, adminRoutes);
+app.use(`/api/${API_VERSION}/subscriptions`, subscriptionRoutes);
 
 const GRAPHQL_PATH = process.env.GRAPHQL_PATH || '/api/graphql';
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_FILE_SIZE, 10) || 5242880; // 5MB default
@@ -148,6 +151,7 @@ const startServer = async () => {
 };
 
 startServer();
+startSubscriptionJobs();
 
 process.on('unhandledRejection', (err) => {
   logger.error('Unhandled Promise Rejection:', err);

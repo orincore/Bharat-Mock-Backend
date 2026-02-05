@@ -21,8 +21,10 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+const hasEmailConfig = () => Boolean(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+
 const sendWelcomeEmail = async (userEmail, userName) => {
-  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+  if (!hasEmailConfig()) {
     console.warn('SMTP environment variables missing, skipping welcome email send');
     return;
   }
@@ -202,7 +204,7 @@ const sendWelcomeEmail = async (userEmail, userName) => {
 };
 
 const sendPasswordOtpEmail = async (userEmail, userName, otpCode) => {
-  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+  if (!hasEmailConfig()) {
     console.warn('SMTP environment variables missing, skipping password OTP email send');
     return;
   }
@@ -258,7 +260,190 @@ const sendPasswordOtpEmail = async (userEmail, userName, otpCode) => {
   }
 };
 
+const sendSubscriptionActivatedEmail = async (userEmail, userName, { planName, amount, currency, expiresAt, autoRenew }) => {
+  if (!hasEmailConfig()) return;
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: userEmail,
+    subject: `Your ${planName} subscription is live!`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <body style="font-family: 'Segoe UI', Arial, sans-serif; background-color:#f7f7fb; margin:0; padding:32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px; margin:0 auto; background:#ffffff; border-radius:16px; padding:32px;">
+          <tr><td>
+            <h2 style="margin-top:0; color:#111827;">Hi ${userName || 'there'},</h2>
+            <p style="color:#374151; line-height:1.6;">Thank you for upgrading to the <strong>${planName}</strong> plan. You now have unlimited access to all premium exams on Bharat Mock.</p>
+            <div style="margin:24px 0; padding:16px; border-radius:12px; background:#f3f4f6;">
+              <p style="margin:0; color:#111827; font-weight:600;">Plan summary</p>
+              <p style="margin:8px 0 0; color:#4b5563;">Amount paid: <strong>${currency} ${(amount / 100).toFixed(2)}</strong></p>
+              <p style="margin:4px 0 0; color:#4b5563;">Expires on: <strong>${
+                expiresAt ? new Date(expiresAt).toLocaleDateString() : 'N/A'
+              }</strong></p>
+              <p style="margin:4px 0 0; color:#4b5563;">Auto renew: <strong>${autoRenew ? 'Enabled' : 'Disabled'}</strong></p>
+            </div>
+            <p style="color:#374151; line-height:1.6;">You can manage your subscription anytime from the account dashboard.</p>
+            <div style="margin-top:32px;">
+              <a href="${process.env.FRONTEND_URL}/profile" style="display:inline-block; padding:12px 28px; border-radius:8px; background:#4f46e5; color:#ffffff; text-decoration:none;">Open dashboard</a>
+            </div>
+          </td></tr>
+        </table>
+      </body>
+      </html>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+  } catch (error) {
+    console.error('Error sending subscription activated email:', error);
+  }
+};
+
+const sendAutoRenewStatusEmail = async (userEmail, userName, { planName, autoRenew, expiresAt }) => {
+  if (!hasEmailConfig()) return;
+
+  const statusText = autoRenew ? 'Auto renew has been turned ON' : 'Auto renew has been turned OFF';
+  const secondaryText = autoRenew
+    ? 'You will be charged automatically on the next renewal date.'
+    : 'You will retain premium access until the expiry date. Renew manually to avoid interruption.';
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: userEmail,
+    subject: `${planName} auto renew ${autoRenew ? 'enabled' : 'disabled'}`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <body style="font-family:'Segoe UI',Arial,sans-serif;background-color:#f9fafb;margin:0;padding:32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:16px;padding:32px;">
+          <tr><td>
+            <h2 style="margin-top:0;color:#111827;">Hi ${userName || 'there'},</h2>
+            <p style="color:#111827;font-weight:600;">${statusText}</p>
+            <p style="color:#4b5563; line-height:1.6;">${secondaryText}</p>
+            <p style="color:#4b5563;">Current plan: <strong>${planName}</strong><br/>Expiry date: <strong>${expiresAt ? new Date(expiresAt).toLocaleDateString() : 'N/A'}</strong></p>
+            <p style="color:#6b7280;">You can change this anytime from the subscription settings.</p>
+          </td></tr>
+        </table>
+      </body>
+      </html>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+  } catch (error) {
+    console.error('Error sending auto renew status email:', error);
+  }
+};
+
+const sendRenewalReminderEmail = async (userEmail, userName, { planName, renewDate, amount, currency }) => {
+  if (!hasEmailConfig()) return;
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: userEmail,
+    subject: `${planName} renews soon`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <body style="font-family:'Segoe UI',Arial,sans-serif;background-color:#f3f4f6;margin:0;padding:32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:16px;padding:32px;">
+          <tr><td>
+            <h2 style="margin-top:0;color:#111827;">Hi ${userName || 'there'},</h2>
+            <p style="color:#374151;line-height:1.6;">Your <strong>${planName}</strong> subscription is set to renew automatically on <strong>${renewDate ? new Date(renewDate).toLocaleDateString() : 'the upcoming cycle'}</strong>.</p>
+            <div style="margin:20px 0;padding:16px;border-radius:12px;background:#eef2ff;">
+              <p style="margin:0;color:#312e81;font-weight:600;">Upcoming charge</p>
+              <p style="margin:6px 0;color:#4338ca;">${currency} ${(amount / 100).toFixed(2)}</p>
+            </div>
+            <p style="color:#4b5563;line-height:1.6;">No action is needed if you wish to continue enjoying premium access. You can manage auto-renew anytime from your dashboard.</p>
+          </td></tr>
+        </table>
+      </body>
+      </html>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+  } catch (error) {
+    console.error('Error sending renewal reminder email:', error);
+  }
+};
+
+const sendExpiryReminderEmail = async (userEmail, userName, { planName, expiryDate }) => {
+  if (!hasEmailConfig()) return;
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: userEmail,
+    subject: `${planName} access ends soon`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <body style="font-family:'Segoe UI',Arial,sans-serif;background-color:#f9fafb;margin:0;padding:32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:16px;padding:32px;">
+          <tr><td>
+            <h2 style="margin-top:0;color:#111827;">Hi ${userName || 'there'},</h2>
+            <p style="color:#374151;line-height:1.6;">Your <strong>${planName}</strong> subscription will expire on <strong>${expiryDate ? new Date(expiryDate).toLocaleDateString() : 'soon'}</strong>.</p>
+            <p style="color:#4b5563;line-height:1.6;">Renew now to retain uninterrupted access to all premium exams and analytics.</p>
+            <div style="margin-top:28px;">
+              <a href="${process.env.FRONTEND_URL}/pricing" style="display:inline-block;padding:12px 28px;background:#10b981;color:#ffffff;border-radius:8px;text-decoration:none;">Renew subscription</a>
+            </div>
+          </td></tr>
+        </table>
+      </body>
+      </html>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+  } catch (error) {
+    console.error('Error sending expiry reminder email:', error);
+  }
+};
+
+const sendSubscriptionExpiredEmail = async (userEmail, userName, { planName, expiredAt }) => {
+  if (!hasEmailConfig()) return;
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: userEmail,
+    subject: `${planName} subscription expired`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <body style="font-family:'Segoe UI',Arial,sans-serif;background-color:#f8fafc;margin:0;padding:32px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;margin:0 auto;background:#ffffff;border-radius:16px;padding:32px;">
+          <tr><td>
+            <h2 style="margin-top:0;color:#111827;">Hi ${userName || 'there'},</h2>
+            <p style="color:#374151;line-height:1.6;">Your <strong>${planName}</strong> subscription ended on <strong>${expiredAt ? new Date(expiredAt).toLocaleDateString() : 'recently'}</strong>.</p>
+            <p style="color:#4b5563;line-height:1.6;">We'd love to have you back! Renew anytime to regain premium access to mock exams, analytics, and upcoming releases.</p>
+            <div style="margin-top:28px;">
+              <a href="${process.env.FRONTEND_URL}/pricing" style="display:inline-block;padding:12px 28px;background:#6366f1;color:#ffffff;border-radius:8px;text-decoration:none;">Choose a plan</a>
+            </div>
+          </td></tr>
+        </table>
+      </body>
+      </html>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+  } catch (error) {
+    console.error('Error sending subscription expired email:', error);
+  }
+};
+
 module.exports = {
   sendWelcomeEmail,
-  sendPasswordOtpEmail
+  sendPasswordOtpEmail,
+  sendSubscriptionActivatedEmail,
+  sendAutoRenewStatusEmail,
+  sendRenewalReminderEmail,
+  sendExpiryReminderEmail,
+  sendSubscriptionExpiredEmail
 };
