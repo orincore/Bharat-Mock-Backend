@@ -17,6 +17,12 @@ router.delete('/blocks/:blockId', authenticate, requireAdmin, pageContentControl
 router.post('/blocks/reorder', authenticate, requireAdmin, pageContentController.reorderBlocks);
 router.post('/:subcategoryId/bulk-sync', authenticate, requireAdmin, pageContentController.bulkSyncPageContent);
 
+router.get('/:subcategoryId/custom-tabs', pageContentController.getCustomTabs);
+router.post('/:subcategoryId/custom-tabs', authenticate, requireAdmin, pageContentController.createCustomTab);
+router.put('/:subcategoryId/custom-tabs/:tabId', authenticate, requireAdmin, pageContentController.updateCustomTab);
+router.delete('/:subcategoryId/custom-tabs/:tabId', authenticate, requireAdmin, pageContentController.deleteCustomTab);
+router.post('/:subcategoryId/custom-tabs/reorder', authenticate, requireAdmin, pageContentController.reorderCustomTabs);
+
 router.post('/:subcategoryId/media', authenticate, requireAdmin, upload.single('file'), pageContentController.uploadMedia);
 router.get('/:subcategoryId/media', pageContentController.getMedia);
 

@@ -475,7 +475,8 @@ const createExam = async (req, res) => {
       if (subcat) subcategorySlug = subcat.slug;
     }
     
-    const urlPath = `/${categorySlug}/${subcategorySlug}/${examSlug}`.replace(/\/+/g, '/');
+    const combinedSlug = [categorySlug, subcategorySlug].filter(Boolean).join('-');
+    const urlPath = `/${combinedSlug}/${examSlug}`.replace(/\/+/g, '/');
 
     const parsedSyllabus = syllabus ? JSON.parse(syllabus) : [];
     const allowAnytimeFlag = allow_anytime === 'true' || allow_anytime === true;
@@ -1326,7 +1327,8 @@ const bulkCreateExamWithContent = async (req, res) => {
       if (subcat) subcategorySlug = subcat.slug;
     }
     
-    const urlPath = `/${categorySlug}/${subcategorySlug}/${examSlug}`.replace(/\/+/g, '/');
+    const combinedSlug = [categorySlug, subcategorySlug].filter(Boolean).join('-');
+    const urlPath = `/${combinedSlug}/${examSlug}`.replace(/\/+/g, '/');
 
     const parsedSyllabus = exam.syllabus || [];
     const supportsHindi = sections.some(s => 
@@ -1576,7 +1578,8 @@ const updateExamWithContent = async (req, res) => {
       if (subcat) subcategorySlug = subcat.slug;
     }
 
-    const urlPath = `/${categorySlug}/${subcategorySlug}/${examSlug}`.replace(/\/+/g, '/');
+    const combinedSlug = [categorySlug, subcategorySlug].filter(Boolean).join('-');
+    const urlPath = `/${combinedSlug}/${examSlug}`.replace(/\/+/g, '/');
 
     let parsedSyllabus = [];
     if (Array.isArray(examPayload.syllabus)) {

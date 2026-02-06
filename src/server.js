@@ -27,6 +27,7 @@ const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const pageContentRoutes = require('./routes/pageContent');
 const adminRoutes = require('./routes/adminRoutes');
 const { startSubscriptionJobs } = require('./jobs/subscriptionJobs');
+const homepageRoutes = require('./routes/homepageRoutes');
 
 const app = express();
 
@@ -102,6 +103,7 @@ app.use(`/api/${API_VERSION}/blogs`, blogRoutes);
 app.use(`/api/${API_VERSION}/taxonomy`, taxonomyRoutes);
 app.use(`/api/${API_VERSION}/subcategories`, subcategoryContentRoutes);
 app.use(`/api/${API_VERSION}/page-content`, pageContentRoutes);
+app.use(`/api/${API_VERSION}/homepage`, homepageRoutes);
 app.use(`/api/${API_VERSION}/admin`, adminRoutes);
 app.use(`/api/${API_VERSION}/subscriptions`, subscriptionRoutes);
 

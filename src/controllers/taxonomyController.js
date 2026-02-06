@@ -569,14 +569,19 @@ const getExamsByCategory = async (req, res) => {
   }
 };
 
+const parseCategorySlug = (slug = '') => slug.split('-')[0] || '';
+const parseSubcategorySlug = (slug = '') => slug.includes('-') ? slug.split('-').slice(1).join('-') : slug;
+
 const getSubcategoryBySlug = async (req, res) => {
   try {
     const { categorySlug, subcategorySlug } = req.params;
+    const resolvedCategorySlug = parseCategorySlug(categorySlug);
+    const resolvedSubcategorySlug = parseSubcategorySlug(subcategorySlug);
 
     const { data: category } = await supabase
       .from('exam_categories')
       .select('id, name, slug')
-      .eq('slug', categorySlug)
+      .eq('slug', resolvedCategorySlug)
       .eq('is_active', true)
       .single();
 
@@ -584,7 +589,7 @@ const getSubcategoryBySlug = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
-    const { data: subcategory, error } = await fetchSubcategoryRecord(category.id, subcategorySlug);
+    const { data: subcategory, error } = await fetchSubcategoryRecord(category.id, resolvedSubcategorySlug);
 
     if (error || !subcategory) {
       logger.error('Get subcategory by slug error:', error);
@@ -607,12 +612,14 @@ const getSubcategoryBySlug = async (req, res) => {
 const getExamsBySubcategory = async (req, res) => {
   try {
     const { categorySlug, subcategorySlug } = req.params;
+    const resolvedCategorySlug = parseCategorySlug(categorySlug);
+    const resolvedSubcategorySlug = parseSubcategorySlug(subcategorySlug);
     const { page = 1, limit = 12, difficulty, search } = req.query;
 
     const { data: category } = await supabase
       .from('exam_categories')
       .select('id')
-      .eq('slug', categorySlug)
+      .eq('slug', resolvedCategorySlug)
       .eq('is_active', true)
       .single();
 
@@ -620,7 +627,7 @@ const getExamsBySubcategory = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
-    const { data: subcategory } = await fetchSubcategoryRecord(category.id, subcategorySlug, 'id');
+    const { data: subcategory } = await fetchSubcategoryRecord(category.id, resolvedSubcategorySlug, 'id');
 
     if (!subcategory) {
       return res.status(404).json({ success: false, message: 'Subcategory not found' });

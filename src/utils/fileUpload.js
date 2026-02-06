@@ -16,7 +16,16 @@ const getAllowedFileTypes = () => {
       console.warn('ALLOWED_FILE_TYPES env var missing. Falling back to default image/pdf types.');
       warnedAboutAllowedTypes = true;
     }
-    return ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    return [
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+      'image/gif',
+      'application/pdf',
+      'video/mp4',
+      'video/webm',
+      'video/quicktime'
+    ];
   }
   return envValue.split(',');
 };
@@ -27,14 +36,14 @@ const fileFilter = (req, file, cb) => {
   if (allowedTypes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Only images and PDFs are allowed.'), false);
+    cb(new Error('Invalid file type. Only images, videos, and PDFs are allowed.'), false);
   }
 };
 
 const upload = multer({
   storage,
   limits: {
-    fileSize: parseInt(process.env.MAX_FILE_SIZE) || 5242880
+    fileSize: parseInt(process.env.MAX_FILE_SIZE, 10) || 150 * 1024 * 1024
   },
   fileFilter
 });

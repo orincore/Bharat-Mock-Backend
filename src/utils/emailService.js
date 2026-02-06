@@ -438,6 +438,39 @@ const sendSubscriptionExpiredEmail = async (userEmail, userName, { planName, exp
   }
 };
 
+const sendSubscriptionCancelledEmail = async (userEmail, userName, { planName, expiresAt }) => {
+  if (!hasEmailConfig()) return;
+
+  const expiryText = expiresAt ? new Date(expiresAt).toLocaleDateString() : 'the end of your cycle';
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: userEmail,
+    subject: `${planName} auto renew cancelled`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <body style="font-family:'Segoe UI',Arial,sans-serif;background:#f8fafc;margin:0;padding:24px;">
+        <table width="100%" cellpadding="0" cellspacing="0" style="max-width:620px;margin:0 auto;background:#ffffff;border-radius:16px;padding:32px;">
+          <tr><td>
+            <h2 style="margin-top:0;color:#111827;">Hi ${userName || 'there'},</h2>
+            <p style="color:#374151;line-height:1.6;">We've processed your request to cancel auto renew for the <strong>${planName}</strong> plan.</p>
+            <p style="color:#4b5563;line-height:1.6;">Your premium access remains active until <strong>${expiryText}</strong>. You can re-enable auto renew or purchase a new plan at any time from your dashboard.</p>
+            <p style="color:#9ca3af;margin-top:32px;">If this wasn't you, please contact support immediately.</p>
+          </td></tr>
+        </table>
+      </body>
+      </html>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+  } catch (error) {
+    console.error('Error sending subscription cancelled email:', error);
+  }
+};
+
 module.exports = {
   sendWelcomeEmail,
   sendPasswordOtpEmail,
@@ -445,5 +478,6 @@ module.exports = {
   sendAutoRenewStatusEmail,
   sendRenewalReminderEmail,
   sendExpiryReminderEmail,
-  sendSubscriptionExpiredEmail
+  sendSubscriptionExpiredEmail,
+  sendSubscriptionCancelledEmail
 };

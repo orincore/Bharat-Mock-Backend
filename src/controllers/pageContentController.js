@@ -1,5 +1,6 @@
 const supabase = require('../config/database');
 const { uploadToR2 } = require('../utils/fileUpload');
+const { slugify } = require('../utils/slugify');
 
 const buildErrorResponse = (res, message, error) => {
   console.error(message, error);
@@ -18,6 +19,18 @@ const pageContentController = {
     try {
       const { subcategoryId } = req.params;
       debugLog('[pageContentController.getPageContent]', { subcategoryId, userId: req.user?.id, adminRole: req.adminRole });
+
+      const { data: customTabs, error: tabsError } = await supabase
+        .from('subcategory_custom_tabs')
+        .select('*')
+        .eq('subcategory_id', subcategoryId)
+        .eq('is_active', true)
+        .order('display_order', { ascending: true })
+        .order('title', { ascending: true });
+
+      if (tabsError) {
+        return buildErrorResponse(res, 'Failed to fetch custom tabs', tabsError);
+      }
 
       const { data: sections, error: sectionsError } = await supabase
         .from('page_sections')
@@ -62,7 +75,8 @@ const pageContentController = {
       res.json({
         sections: groupedBlocks,
         orphanBlocks,
-        seo: seo || null
+        seo: seo || null,
+        customTabs: customTabs || []
       });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch page content', error);
@@ -84,7 +98,8 @@ const pageContentController = {
         is_collapsible,
         is_expanded,
         is_sidebar,
-        settings
+        settings,
+        custom_tab_id
       } = req.body;
 
       const { data, error } = await supabase
@@ -103,6 +118,7 @@ const pageContentController = {
             is_expanded: is_expanded ?? true,
             is_sidebar: is_sidebar || false,
             settings: settings || {},
+            custom_tab_id: custom_tab_id || null,
             created_by: req.user?.id || null,
             updated_by: req.user?.id || null
           }
@@ -135,7 +151,8 @@ const pageContentController = {
         is_expanded,
         is_active,
         is_sidebar,
-        settings
+        settings,
+        custom_tab_id
       } = req.body;
 
       const { data, error } = await supabase
@@ -152,6 +169,7 @@ const pageContentController = {
           is_active: is_active ?? undefined,
           is_sidebar: is_sidebar ?? undefined,
           settings: settings ?? undefined,
+          custom_tab_id: custom_tab_id ?? undefined,
           updated_by: req.user?.id || null
         })
         .eq('id', sectionId)
@@ -730,7 +748,8 @@ const pageContentController = {
         is_collapsible: section.is_collapsible ?? false,
         is_expanded: section.is_expanded ?? true,
         is_sidebar: section.is_sidebar ?? false,
-        settings: section.settings || {}
+        settings: section.settings || {},
+        custom_tab_id: section.custom_tab_id || null
       });
 
       const normalizeBlockPayload = (block = {}, sectionId) => ({
@@ -881,6 +900,163 @@ const pageContentController = {
       });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to bulk sync page content', error);
+    }
+  },
+
+  getCustomTabs: async (req, res) => {
+    try {
+      const { subcategoryId } = req.params;
+
+      const { data, error } = await supabase
+        .from('subcategory_custom_tabs')
+        .select('*')
+        .eq('subcategory_id', subcategoryId)
+        .eq('is_active', true)
+        .order('display_order', { ascending: true })
+        .order('title', { ascending: true });
+
+      if (error) {
+        return buildErrorResponse(res, 'Failed to fetch custom tabs', error);
+      }
+
+      res.json({ success: true, data: data || [] });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to fetch custom tabs', error);
+    }
+  },
+
+  createCustomTab: async (req, res) => {
+    try {
+      const { subcategoryId } = req.params;
+      const { title, description, display_order, tab_key } = req.body || {};
+
+      if (!title) {
+        return res.status(400).json({ success: false, message: 'Title is required' });
+      }
+
+      const normalizedKey = (tab_key || slugify(title)).slice(0, 190);
+
+      const { data: orderRow } = await supabase
+        .from('subcategory_custom_tabs')
+        .select('display_order')
+        .eq('subcategory_id', subcategoryId)
+        .order('display_order', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const nextOrder = typeof display_order === 'number'
+        ? display_order
+        : ((orderRow?.display_order ?? -1) + 1);
+
+      const { data, error } = await supabase
+        .from('subcategory_custom_tabs')
+        .insert([
+          {
+            subcategory_id: subcategoryId,
+            tab_key: normalizedKey,
+            title,
+            description: description || null,
+            display_order: nextOrder,
+            is_active: true,
+            created_by: req.user?.id || null,
+            updated_by: req.user?.id || null
+          }
+        ])
+        .select('*')
+        .single();
+
+      if (error) {
+        return buildErrorResponse(res, 'Failed to create custom tab', error);
+      }
+
+      res.status(201).json({ success: true, data });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to create custom tab', error);
+    }
+  },
+
+  updateCustomTab: async (req, res) => {
+    try {
+      const { tabId } = req.params;
+      const { title, description, display_order, is_active, tab_key } = req.body || {};
+
+      const updates = {
+        title: title ?? undefined,
+        description: description ?? undefined,
+        display_order: display_order ?? undefined,
+        is_active: typeof is_active === 'boolean' ? is_active : undefined,
+        tab_key: tab_key ? tab_key.slice(0, 190) : undefined,
+        updated_by: req.user?.id || null
+      };
+
+      const { data, error } = await supabase
+        .from('subcategory_custom_tabs')
+        .update(updates)
+        .eq('id', tabId)
+        .select('*')
+        .single();
+
+      if (error) {
+        if (error.code === 'PGRST116') {
+          return res.status(404).json({ success: false, message: 'Custom tab not found' });
+        }
+        return buildErrorResponse(res, 'Failed to update custom tab', error);
+      }
+
+      res.json({ success: true, data });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to update custom tab', error);
+    }
+  },
+
+  deleteCustomTab: async (req, res) => {
+    try {
+      const { subcategoryId, tabId } = req.params;
+
+      const { error } = await supabase
+        .from('subcategory_custom_tabs')
+        .delete()
+        .eq('id', tabId)
+        .eq('subcategory_id', subcategoryId);
+
+      if (error) {
+        if (error.code === 'PGRST116') {
+          return res.status(404).json({ success: false, message: 'Custom tab not found' });
+        }
+        return buildErrorResponse(res, 'Failed to delete custom tab', error);
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to delete custom tab', error);
+    }
+  },
+
+  reorderCustomTabs: async (req, res) => {
+    try {
+      const { subcategoryId } = req.params;
+      const { tabIds } = req.body || {};
+
+      if (!Array.isArray(tabIds)) {
+        return res.status(400).json({ success: false, message: 'tabIds array is required' });
+      }
+
+      for (let index = 0; index < tabIds.length; index += 1) {
+        const tabId = tabIds[index];
+        const { error } = await supabase
+          .from('subcategory_custom_tabs')
+          .update({ display_order: index, updated_by: req.user?.id || null })
+          .eq('id', tabId)
+          .eq('subcategory_id', subcategoryId);
+
+        if (error) {
+          throw error;
+        }
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to reorder custom tabs', error);
     }
   }
 };

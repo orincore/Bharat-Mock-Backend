@@ -155,8 +155,12 @@ const getProfile = async (req, res) => {
         date_of_birth,
         role,
         is_verified,
+        is_premium,
         auth_provider,
         is_onboarded,
+        subscription_plan_id,
+        subscription_expires_at,
+        subscription_auto_renew,
         created_at,
         user_education (
           level,
@@ -180,9 +184,29 @@ const getProfile = async (req, res) => {
       });
     }
 
+    let subscriptionPlan = null;
+    if (user?.subscription_plan_id) {
+      const { data: planData } = await supabase
+        .from('subscription_plans')
+        .select('id, name, description, duration_days, price_cents, currency_code')
+        .eq('id', user.subscription_plan_id)
+        .maybeSingle();
+
+      if (planData) {
+        subscriptionPlan = {
+          ...planData,
+          price_cents: Number(planData.price_cents),
+          duration_days: Number(planData.duration_days)
+        };
+      }
+    }
+
     res.json({
       success: true,
-      data: user
+      data: {
+        ...user,
+        subscription_plan: subscriptionPlan
+      }
     });
   } catch (error) {
     logger.error('Get profile error:', error);

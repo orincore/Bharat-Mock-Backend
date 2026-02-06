@@ -17,12 +17,14 @@ const {
   incrementPromocodeUsage,
   getLatestSubscriptionForUser,
   updateSubscriptionAutoRenew,
-  updateUserAutoRenewFlag
+  updateUserAutoRenewFlag,
+  cancelSubscription: cancelSubscriptionRecord
 } = require('../services/subscriptionService');
 const { createOrder, verifySignature, isConfigured } = require('../services/razorpayService');
 const {
   sendSubscriptionActivatedEmail,
-  sendAutoRenewStatusEmail
+  sendAutoRenewStatusEmail,
+  sendSubscriptionCancelledEmail
 } = require('../utils/emailService');
 
 const parseFeatures = (features) => {
@@ -221,6 +223,93 @@ const adminListTransactions = async (req, res) => {
   }
 };
 
+const buildPromoDescription = (promo, amountBefore, amountAfter) => {
+  if (!promo) return null;
+  const saved = Math.max(0, amountBefore - amountAfter);
+  if (promo.discount_type === 'percent') {
+    return `${promo.discount_value}% off • Saved ${formatCurrency(saved)}`;
+  }
+  return `Saved ${formatCurrency(saved)} with ${promo.code}`;
+};
+
+const formatCurrency = (amountCents) => `₹${(amountCents / 100).toFixed(2)}`;
+
+const resolvePlanAndPromo = async ({ planId, promoCode, autoRenew }) => {
+  const plan = await getPlanById(planId);
+  if (!plan || !plan.is_active) {
+    return { errorStatus: 404, errorMessage: 'Plan not found' };
+  }
+
+  let promo = null;
+  if (promoCode) {
+    promo = await getPromocodeByCode(promoCode.trim().toUpperCase());
+    const validation = validatePromocodeForPlan({ promo, planId, autoRenew });
+    if (!validation.valid) {
+      return { errorStatus: 400, errorMessage: validation.message };
+    }
+  }
+
+  let adjustedAmount = plan.price_cents;
+  if (promo) {
+    adjustedAmount = applyDiscount(adjustedAmount, promo);
+    if (promo.min_amount_cents && adjustedAmount < promo.min_amount_cents) {
+      return { errorStatus: 400, errorMessage: 'Plan price does not meet promo minimum' };
+    }
+  }
+
+  return {
+    plan,
+    promo,
+    amountCents: plan.price_cents,
+    adjustedAmount,
+    promoDescription: buildPromoDescription(promo, plan.price_cents, adjustedAmount)
+  };
+};
+
+const previewSubscriptionCheckout = async (req, res) => {
+  try {
+    const { plan_id: planId, promo_code: promoCode, auto_renew: autoRenew = true } = req.body || {};
+
+    if (!planId) {
+      return res.status(400).json({ success: false, message: 'plan_id is required' });
+    }
+
+    const result = await resolvePlanAndPromo({ planId, promoCode, autoRenew });
+    if (result.errorStatus) {
+      return res.status(result.errorStatus).json({ success: false, message: result.errorMessage });
+    }
+
+    const { plan, promo, amountCents, adjustedAmount, promoDescription } = result;
+
+    return res.json({
+      success: true,
+      data: {
+        plan: {
+          id: plan.id,
+          name: plan.name,
+          duration_days: plan.duration_days,
+          price_cents: plan.price_cents,
+          currency_code: plan.currency_code
+        },
+        amount_cents: amountCents,
+        adjusted_amount_cents: adjustedAmount,
+        promo: promo
+          ? {
+              id: promo.id,
+              code: promo.code,
+              discount_type: promo.discount_type,
+              discount_value: promo.discount_value
+            }
+          : null,
+        promoDescription
+      }
+    });
+  } catch (error) {
+    logger.error('Failed to preview subscription checkout:', error);
+    res.status(500).json({ success: false, message: 'Failed to preview checkout' });
+  }
+};
+
 const startSubscriptionCheckout = async (req, res) => {
   try {
     if (!isConfigured()) {
@@ -233,32 +322,20 @@ const startSubscriptionCheckout = async (req, res) => {
       return res.status(400).json({ success: false, message: 'plan_id is required' });
     }
 
-    const plan = await getPlanById(planId);
-    if (!plan || !plan.is_active) {
-      return res.status(404).json({ success: false, message: 'Plan not found' });
+    const result = await resolvePlanAndPromo({ planId, promoCode, autoRenew });
+    if (result.errorStatus) {
+      return res.status(result.errorStatus).json({ success: false, message: result.errorMessage });
     }
 
-    let promo = null;
-    if (promoCode) {
-      promo = await getPromocodeByCode(promoCode.trim().toUpperCase());
-      const validation = validatePromocodeForPlan({ promo, planId, autoRenew });
-      if (!validation.valid) {
-        return res.status(400).json({ success: false, message: validation.message });
-      }
-    }
+    const { plan, promo, adjustedAmount, promoDescription } = result;
 
-    let amountCents = plan.price_cents;
-    if (promo) {
-      amountCents = applyDiscount(amountCents, promo);
-      if (promo.min_amount_cents && amountCents < promo.min_amount_cents) {
-        return res.status(400).json({ success: false, message: 'Plan price does not meet promo minimum' });
-      }
-    }
+    const shortPlanId = plan.id.replace(/-/g, '').slice(0, 12);
+    const receipt = `sub_${shortPlanId}_${Date.now()}`.slice(0, 40);
 
     const order = await createOrder({
-      amount: amountCents,
+      amount: adjustedAmount,
       currency: plan.currency_code,
-      receipt: `sub_${plan.id}_${Date.now()}`,
+      receipt,
       notes: {
         planId: plan.id,
         userId: req.user.id
@@ -271,7 +348,7 @@ const startSubscriptionCheckout = async (req, res) => {
       promocodeId: promo?.id || null,
       autoRenew,
       razorpayOrderId: order.id,
-      amountCents,
+      amountCents: adjustedAmount,
       currencyCode: plan.currency_code
     });
 
@@ -282,7 +359,9 @@ const startSubscriptionCheckout = async (req, res) => {
         amount: order.amount,
         currency: order.currency,
         razorpayKey: process.env.RAZORPAY_KEY_ID,
-        subscriptionId: subscription.id
+        subscriptionId: subscription.id,
+        adjustedAmount,
+        promoDescription
       }
     });
   } catch (error) {
@@ -391,6 +470,37 @@ const toggleAutoRenew = async (req, res) => {
   }
 };
 
+const cancelSubscription = async (req, res) => {
+  try {
+    const subscription = await getLatestSubscriptionForUser(req.user.id);
+    if (!subscription || subscription.status !== 'active') {
+      return res.status(404).json({ success: false, message: 'No active subscription found' });
+    }
+
+    const updatedSubscription = await cancelSubscriptionRecord(subscription.id, req.user.id);
+    await updateUserAutoRenewFlag(req.user.id, false);
+
+    try {
+      const plan = subscription.plan_id ? await getPlanById(subscription.plan_id) : null;
+      await sendSubscriptionCancelledEmail(req.user.email, req.user.name, {
+        planName: plan?.name || 'Premium plan',
+        expiresAt: subscription.expires_at
+      });
+    } catch (emailError) {
+      logger.warn('Failed to send subscription cancelled email:', emailError);
+    }
+
+    res.json({
+      success: true,
+      message: 'Auto renew disabled. Your premium access remains active until the current expiry date.',
+      data: updatedSubscription
+    });
+  } catch (error) {
+    logger.error('Failed to cancel subscription:', error);
+    res.status(500).json({ success: false, message: 'Failed to cancel subscription' });
+  }
+};
+
 module.exports = {
   getPlans,
   adminListPlans,
@@ -401,7 +511,9 @@ module.exports = {
   adminCreatePromocode,
   adminUpdatePromocode,
   adminListTransactions,
+  previewSubscriptionCheckout,
   startSubscriptionCheckout,
   confirmSubscriptionPayment,
-  toggleAutoRenew
+  toggleAutoRenew,
+  cancelSubscription
 };

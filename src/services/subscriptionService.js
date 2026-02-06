@@ -535,6 +535,28 @@ const updateUserAutoRenewFlag = async (userId, autoRenew) => {
   }
 };
 
+const cancelSubscription = async (subscriptionId, userId) => {
+  const timestamp = new Date().toISOString();
+  const { data, error } = await supabase
+    .from('user_subscriptions')
+    .update({
+      status: 'canceled',
+      auto_renew: false,
+      updated_at: timestamp
+    })
+    .eq('id', subscriptionId)
+    .select('*')
+    .single();
+
+  if (error) {
+    logger.error('Failed to cancel subscription:', error, { subscriptionId });
+    throw new Error('Unable to cancel subscription');
+  }
+
+  await revokePremiumIfNeeded(userId);
+  return data;
+};
+
 module.exports = {
   listPlans,
   getPlanById,
@@ -562,5 +584,6 @@ module.exports = {
   markRenewalReminderSent,
   markExpiryReminderSent,
   getSubscriptionsToExpire,
-  markSubscriptionExpired
+  markSubscriptionExpired,
+  cancelSubscription
 };
