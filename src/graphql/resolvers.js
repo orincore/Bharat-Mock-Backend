@@ -409,26 +409,27 @@ const resolvers = {
         .select(`
           id,
           title,
-          description,
           duration,
           total_marks,
           total_questions,
           category,
-          subcategory,
           difficulty,
           status,
           start_date,
           end_date,
           pass_percentage,
           is_free,
-          price,
+          image_url,
           logo_url,
           thumbnail_url,
           negative_marking,
           negative_mark_value,
-          is_published,
+          allow_anytime,
+          supports_hindi,
           exam_type,
           show_in_mock_tests,
+          slug,
+          url_path,
           created_at,
           updated_at
         `, { count: 'exact' })
@@ -436,7 +437,7 @@ const resolvers = {
         .range(offset, offset + limit - 1);
 
       if (filter.search) {
-        query = query.or(`title.ilike.%${filter.search}%,description.ilike.%${filter.search}%`);
+        query = query.or(`title.ilike.%${filter.search}%`);
       }
       if (filter.status) query = query.eq('status', filter.status);
       if (filter.category) query = query.eq('category', filter.category);
@@ -464,7 +465,6 @@ const resolvers = {
         .select(`
           id,
           title,
-          description,
           duration,
           total_marks,
           total_questions,
@@ -479,19 +479,17 @@ const resolvers = {
           end_date,
           pass_percentage,
           is_free,
-          price,
-          exam_type,
-          show_in_mock_tests,
-          is_published,
+          image_url,
           logo_url,
           thumbnail_url,
           negative_marking,
           negative_mark_value,
-          slug,
-          url_path,
-          syllabus,
           allow_anytime,
           supports_hindi,
+          exam_type,
+          show_in_mock_tests,
+          slug,
+          url_path,
           created_at,
           updated_at
         `)
@@ -574,7 +572,6 @@ const resolvers = {
 
       const insertPayload = {
         title: input.title,
-        description: input.description,
         duration: numberOrNull(input.duration, 0),
         total_marks: numberOrNull(input.total_marks, 0),
         total_questions: numberOrNull(input.total_questions, 0),
@@ -589,7 +586,6 @@ const resolvers = {
         end_date: normalizedEndDate,
         pass_percentage: numberOrNull(input.pass_percentage, 0),
         is_free: bool(input.is_free, true),
-        price: numberOrNull(input.price, 0),
         negative_marking: bool(input.negative_marking),
         negative_mark_value: numberOrNull(input.negative_mark_value, 0),
         is_published: bool(input.is_published),
@@ -673,7 +669,6 @@ const resolvers = {
 
       const updatePayload = {
         title: input.title,
-        description: input.description,
         duration: numberOrNull(input.duration, 0),
         total_marks: numberOrNull(input.total_marks, 0),
         total_questions: numberOrNull(input.total_questions, 0),

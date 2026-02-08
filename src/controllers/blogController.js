@@ -7,11 +7,45 @@ const buildErrorResponse = (res, message, error) => {
   return res.status(500).json({ error: message });
 };
 
+const VALID_STATUSES = new Set(['draft', 'pending', 'published']);
+
+const normalizeStatus = (candidate, fallback = 'draft') => {
+  if (candidate && VALID_STATUSES.has(candidate)) {
+    return candidate;
+  }
+  return fallback;
+};
+
+const buildStatusFields = ({ requestedStatus, requestedIsPublished, fallbackStatus = 'draft', currentPublishedAt = null }) => {
+  let nextStatus = fallbackStatus;
+
+  if (requestedStatus && VALID_STATUSES.has(requestedStatus)) {
+    nextStatus = requestedStatus;
+  } else if (typeof requestedIsPublished === 'boolean') {
+    nextStatus = requestedIsPublished ? 'published' : 'draft';
+  }
+
+  const isPublished = nextStatus === 'published';
+  let publishedAt = currentPublishedAt;
+
+  if (isPublished) {
+    publishedAt = publishedAt || new Date().toISOString();
+  } else {
+    publishedAt = null;
+  }
+
+  return {
+    status: nextStatus,
+    is_published: isPublished,
+    published_at: publishedAt
+  };
+};
+
 const blogController = {
   // Get all blogs (public + admin)
   async getBlogs(req, res) {
     try {
-      const { page = 1, limit = 12, category, search, featured, published } = req.query;
+      const { page = 1, limit = 12, category, categories, search, featured, published, status } = req.query;
       const offset = (page - 1) * limit;
 
       let query = supabase
@@ -21,12 +55,27 @@ const blogController = {
       // Public users only see published blogs
       if (!req.user || req.user.role !== 'admin') {
         query = query.eq('is_published', true);
-      } else if (published !== undefined) {
-        query = query.eq('is_published', published === 'true');
+      } else {
+        if (published !== undefined) {
+          query = query.eq('is_published', published === 'true');
+        }
+        if (status && VALID_STATUSES.has(status)) {
+          query = query.eq('status', status);
+        }
       }
 
       if (category) {
         query = query.eq('category', category);
+      }
+
+      if (categories) {
+        const categoryList = String(categories)
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean);
+        if (categoryList.length > 0) {
+          query = query.in('category', categoryList);
+        }
       }
 
       if (featured === 'true') {
@@ -90,10 +139,52 @@ const blogController = {
     }
   },
 
+  async getBlogById(req, res) {
+    try {
+      const { blogId } = req.params;
+      if (!req.user || req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+      }
+
+      const { data, error } = await supabase
+        .from('blogs')
+        .select('*')
+        .eq('id', blogId)
+        .maybeSingle();
+
+      if (error) {
+        return buildErrorResponse(res, 'Failed to fetch blog', error);
+      }
+
+      if (!data) {
+        return res.status(404).json({ error: 'Blog not found' });
+      }
+
+      res.json({ success: true, data });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to fetch blog', error);
+    }
+  },
+
   // Get blog content (sections and blocks)
   async getBlogContent(req, res) {
     try {
       const { blogId } = req.params;
+
+      const { data: blog, error: blogError } = await supabase
+        .from('blogs')
+        .select('id, status, is_published')
+        .eq('id', blogId)
+        .single();
+
+      if (blogError || !blog) {
+        return res.status(404).json({ error: 'Blog not found' });
+      }
+
+      const isAdmin = req.user && req.user.role === 'admin';
+      if (!isAdmin && !blog.is_published) {
+        return res.status(403).json({ error: 'Blog not published yet' });
+      }
 
       const { data: sections, error: sectionsError } = await supabase
         .from('blog_sections')
@@ -136,6 +227,36 @@ const blogController = {
     }
   },
 
+  async getBlogCategories(req, res) {
+    try {
+      let query = supabase
+        .from('blogs')
+        .select('category')
+        .not('category', 'is', null);
+
+      if (!req.user || req.user.role !== 'admin') {
+        query = query.eq('is_published', true);
+      }
+
+      const { data, error } = await query;
+      if (error) {
+        return buildErrorResponse(res, 'Failed to fetch categories', error);
+      }
+
+      const categories = Array.from(
+        new Set(
+          (data || [])
+            .map((row) => row.category)
+            .filter((value) => typeof value === 'string' && value.trim().length > 0)
+        )
+      ).sort((a, b) => a.localeCompare(b));
+
+      return res.json({ success: true, data: categories });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to fetch categories', error);
+    }
+  },
+
   // Create blog
   async createBlog(req, res) {
     try {
@@ -154,7 +275,8 @@ const blogController = {
         og_title,
         og_description,
         og_image_url,
-        canonical_url
+        canonical_url,
+        status: requestedStatus
       } = req.body;
 
       if (!title) {
@@ -162,7 +284,13 @@ const blogController = {
       }
 
       const baseSlug = customSlug || slugify(title);
-      const uniqueSlug = await ensureUniqueSlug('blogs', baseSlug);
+      const uniqueSlug = await ensureUniqueSlug(supabase, 'blogs', baseSlug);
+
+      const statusFields = buildStatusFields({
+        requestedStatus,
+        requestedIsPublished: is_published,
+        fallbackStatus: is_published ? 'published' : 'draft'
+      });
 
       const payload = {
         title,
@@ -172,9 +300,10 @@ const blogController = {
         author_id: req.user?.id || null,
         category: category || null,
         tags: tags || [],
-        is_published: is_published || false,
+        status: statusFields.status,
+        is_published: statusFields.is_published,
         is_featured: is_featured || false,
-        published_at: is_published ? new Date().toISOString() : null,
+        published_at: statusFields.published_at,
         meta_title: meta_title || null,
         meta_description: meta_description || null,
         meta_keywords: meta_keywords || null,
@@ -221,8 +350,19 @@ const blogController = {
         og_title,
         og_description,
         og_image_url,
-        canonical_url
+        canonical_url,
+        status: requestedStatus
       } = req.body;
+
+      const { data: existingBlog, error: existingError } = await supabase
+        .from('blogs')
+        .select('status, published_at')
+        .eq('id', blogId)
+        .single();
+
+      if (existingError) {
+        return buildErrorResponse(res, 'Blog not found', existingError);
+      }
 
       const payload = {
         updated_by: req.user?.id || null,
@@ -231,7 +371,7 @@ const blogController = {
 
       if (title !== undefined) payload.title = title;
       if (customSlug !== undefined) {
-        const uniqueSlug = await ensureUniqueSlug('blogs', customSlug, blogId);
+        const uniqueSlug = await ensureUniqueSlug(supabase, 'blogs', customSlug, { excludeId: blogId });
         payload.slug = uniqueSlug;
       }
       if (excerpt !== undefined) payload.excerpt = excerpt;
@@ -247,12 +387,16 @@ const blogController = {
       if (og_image_url !== undefined) payload.og_image_url = og_image_url;
       if (canonical_url !== undefined) payload.canonical_url = canonical_url;
 
-      if (is_published !== undefined) {
-        payload.is_published = is_published;
-        if (is_published && !payload.published_at) {
-          payload.published_at = new Date().toISOString();
-        }
-      }
+      const statusFields = buildStatusFields({
+        requestedStatus,
+        requestedIsPublished: is_published,
+        fallbackStatus: existingBlog?.status || 'draft',
+        currentPublishedAt: existingBlog?.published_at || null
+      });
+
+      payload.status = statusFields.status;
+      payload.is_published = statusFields.is_published;
+      payload.published_at = statusFields.published_at;
 
       const { data, error } = await supabase
         .from('blogs')

@@ -19,26 +19,36 @@ const authenticate = async (req, res, next) => {
     
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, email, name, avatar_url, is_blocked, is_verified, is_onboarded, auth_provider')
+      .select('id, email, name, avatar_url, is_blocked, is_verified, is_onboarded, auth_provider, role')
       .eq('id', decoded.userId)
       .is('deleted_at', null)
-      .single();
+      .maybeSingle();
 
-    if (error || !user) {
-      return res.status(401).json({ 
-        success: false, 
-        message: 'Invalid or expired token' 
-      });
+    let resolvedUser = user;
+
+    if (!user || error) {
+      const fallbackRole = decoded.role || decoded.userRole || decoded.roleName || (decoded.isAdmin ? 'admin' : null);
+      resolvedUser = {
+        id: decoded.userId,
+        email: decoded.email || null,
+        name: decoded.name || null,
+        avatar_url: decoded.avatar_url || null,
+        is_blocked: false,
+        is_verified: true,
+        is_onboarded: true,
+        auth_provider: decoded.auth_provider || 'token',
+        role: fallbackRole
+      };
     }
 
-    if (user.is_blocked) {
+    if (resolvedUser.is_blocked) {
       return res.status(403).json({ 
         success: false, 
         message: 'Your account has been blocked' 
       });
     }
 
-    req.user = user;
+    req.user = resolvedUser;
     next();
   } catch (error) {
     logger.error('Authentication error:', error);
@@ -78,12 +88,31 @@ const optionalAuth = async (req, res, next) => {
     
     const { data: user } = await supabase
       .from('users')
-      .select('id, email, name, avatar_url')
+      .select('id, email, name, avatar_url, role, is_blocked')
       .eq('id', decoded.userId)
       .is('deleted_at', null)
-      .single();
+      .maybeSingle();
 
-    req.user = user || null;
+    let resolvedUser = user || null;
+
+    if (!resolvedUser) {
+      const fallbackRole = decoded.role || decoded.userRole || decoded.roleName || (decoded.isAdmin ? 'admin' : null);
+      resolvedUser = {
+        id: decoded.userId,
+        email: decoded.email || null,
+        name: decoded.name || null,
+        avatar_url: decoded.avatar_url || null,
+        role: fallbackRole,
+        is_blocked: false
+      };
+    }
+
+    if (resolvedUser?.is_blocked) {
+      req.user = null;
+      return next();
+    }
+
+    req.user = resolvedUser;
     next();
   } catch (error) {
     req.user = null;

@@ -10,6 +10,11 @@ const requireAdmin = async (req, res, next) => {
       });
     }
 
+    // If the token already carries admin role, skip DB lookup
+    if (req.user.role && req.user.role.toLowerCase() === 'admin') {
+      return next();
+    }
+
     const { data: user, error } = await supabase
       .from('users')
       .select('role')

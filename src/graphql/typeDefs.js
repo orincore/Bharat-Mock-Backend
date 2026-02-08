@@ -14,7 +14,6 @@ input ExamFilterInput {
 
 input ExamInput {
   title: String!
-  description: String
   duration: Int!
   total_marks: Int!
   total_questions: Int!
@@ -29,7 +28,6 @@ input ExamInput {
   end_date: String
   pass_percentage: Float
   is_free: Boolean
-  price: Float
   negative_marking: Boolean
   negative_mark_value: Float
   is_published: Boolean
@@ -87,7 +85,6 @@ input DraftFieldInput {
 type Exam {
   id: ID!
   title: String!
-  description: String
   duration: Int
   total_marks: Int
   total_questions: Int
@@ -102,7 +99,6 @@ type Exam {
   end_date: String
   pass_percentage: Float
   is_free: Boolean
-  price: Float
   negative_marking: Boolean
   negative_mark_value: Float
   is_published: Boolean

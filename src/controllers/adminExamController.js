@@ -28,7 +28,6 @@ const getAdminExams = async (req, res) => {
       .select(`
         id,
         title,
-        description,
         duration,
         total_marks,
         total_questions,
@@ -40,7 +39,6 @@ const getAdminExams = async (req, res) => {
         end_date,
         pass_percentage,
         is_free,
-        price,
         logo_url,
         thumbnail_url,
         negative_marking,
@@ -55,7 +53,7 @@ const getAdminExams = async (req, res) => {
       .range(offset, offset + parseInt(limit) - 1);
 
     if (search) {
-      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
+      query = query.or(`title.ilike.%${search}%`);
     }
 
     if (status) {
@@ -289,7 +287,9 @@ const getExamSectionsWithQuestions = async (req, res) => {
       `)
       .eq('exam_id', id)
       .is('deleted_at', null)
-      .order('question_number');
+      .order('section_id', { ascending: true })
+      .order('question_order', { ascending: true })
+      .order('question_number', { ascending: true });
 
     if (questionsError) {
       logger.error('Get questions error:', questionsError);
@@ -309,6 +309,11 @@ const getExamSectionsWithQuestions = async (req, res) => {
       section_order: section.section_order,
       questions: questions
         .filter(q => q.section_id === section.id)
+        .sort((a, b) => {
+          const orderA = a.question_order ?? a.question_number ?? Number.MAX_SAFE_INTEGER;
+          const orderB = b.question_order ?? b.question_number ?? Number.MAX_SAFE_INTEGER;
+          return orderA - orderB;
+        })
         .map(q => ({
           id: q.id,
           type: q.type,
@@ -357,7 +362,6 @@ const getAdminExamById = async (req, res) => {
       .select(`
         id,
         title,
-        description,
         duration,
         total_marks,
         total_questions,
@@ -372,7 +376,6 @@ const getAdminExamById = async (req, res) => {
         end_date,
         pass_percentage,
         is_free,
-        price,
         exam_type,
         show_in_mock_tests,
         is_published,
@@ -420,7 +423,6 @@ const createExam = async (req, res) => {
   try {
     const {
       title,
-      description,
       duration,
       total_marks,
       total_questions,
@@ -435,7 +437,6 @@ const createExam = async (req, res) => {
       end_date,
       pass_percentage,
       is_free,
-      price,
       negative_marking,
       negative_mark_value,
       syllabus,
@@ -488,7 +489,6 @@ const createExam = async (req, res) => {
       .from('exams')
       .insert({
         title,
-        description,
         duration: parseInt(duration),
         total_marks: parseInt(total_marks),
         total_questions: parseInt(total_questions),
@@ -503,7 +503,6 @@ const createExam = async (req, res) => {
         end_date: normalizedEndDate,
         pass_percentage: parseFloat(pass_percentage),
         is_free: is_free === 'true' || is_free === true,
-        price: parseFloat(price) || 0,
         negative_marking: negative_marking === 'true' || negative_marking === true,
         negative_mark_value: parseFloat(negative_mark_value) || 0,
         is_published: is_published === 'true' || is_published === true,
@@ -589,7 +588,6 @@ const updateExam = async (req, res) => {
     if (updateData.total_marks) updateData.total_marks = parseInt(updateData.total_marks);
     if (updateData.total_questions) updateData.total_questions = parseInt(updateData.total_questions);
     if (updateData.pass_percentage) updateData.pass_percentage = parseFloat(updateData.pass_percentage);
-    if (updateData.price) updateData.price = parseFloat(updateData.price);
     if (updateData.negative_mark_value) updateData.negative_mark_value = parseFloat(updateData.negative_mark_value);
     if (updateData.is_free !== undefined) updateData.is_free = updateData.is_free === 'true' || updateData.is_free === true;
     if (updateData.negative_marking !== undefined) updateData.negative_marking = updateData.negative_marking === 'true' || updateData.negative_marking === true;
@@ -666,28 +664,124 @@ const deleteExam = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: exam } = await supabase
+    const { data: exam, error: examFetchError } = await supabase
       .from('exams')
-      .select('logo_url, thumbnail_url')
+      .select('id, logo_url, thumbnail_url')
       .eq('id', id)
       .single();
 
-    if (exam?.logo_url) {
-      const logoKey = extractKeyFromUrl(exam.logo_url);
-      if (logoKey) await deleteFile(logoKey);
-    }
-    if (exam?.thumbnail_url) {
-      const thumbnailKey = extractKeyFromUrl(exam.thumbnail_url);
-      if (thumbnailKey) await deleteFile(thumbnailKey);
+    if (examFetchError || !exam) {
+      return res.status(404).json({
+        success: false,
+        message: 'Exam not found'
+      });
     }
 
-    const { error } = await supabase
+    // Collect related questions and options to clean up images and records
+    const { data: questions } = await supabase
+      .from('questions')
+      .select('id, image_url')
+      .eq('exam_id', id);
+
+    const questionIds = questions?.map(q => q.id) || [];
+
+    let options = [];
+    if (questionIds.length) {
+      const { data: optionRecords } = await supabase
+        .from('question_options')
+        .select('id, question_id, image_url')
+        .in('question_id', questionIds);
+      options = optionRecords || [];
+    }
+
+    // Delete option images
+    for (const option of options) {
+      if (option.image_url) {
+        const optionKey = extractKeyFromUrl(option.image_url);
+        if (optionKey) {
+          try {
+            await deleteFile(optionKey);
+          } catch (fileError) {
+            logger.warn('Failed to delete option image:', fileError);
+          }
+        }
+      }
+    }
+
+    // Delete question images
+    for (const question of questions || []) {
+      if (question.image_url) {
+        const questionKey = extractKeyFromUrl(question.image_url);
+        if (questionKey) {
+          try {
+            await deleteFile(questionKey);
+          } catch (fileError) {
+            logger.warn('Failed to delete question image:', fileError);
+          }
+        }
+      }
+    }
+
+    // Delete options and questions from DB
+    if (questionIds.length) {
+      const { error: deleteOptionsError } = await supabase
+        .from('question_options')
+        .delete()
+        .in('question_id', questionIds);
+      if (deleteOptionsError) {
+        logger.error('Delete options error:', deleteOptionsError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to delete related options'
+        });
+      }
+
+      const { error: deleteQuestionsError } = await supabase
+        .from('questions')
+        .delete()
+        .eq('exam_id', id);
+      if (deleteQuestionsError) {
+        logger.error('Delete questions error:', deleteQuestionsError);
+        return res.status(500).json({
+          success: false,
+          message: 'Failed to delete related questions'
+        });
+      }
+    }
+
+    // Delete sections and syllabus rows
+    await supabase.from('exam_sections').delete().eq('exam_id', id);
+    await supabase.from('exam_syllabus').delete().eq('exam_id', id);
+
+    // Delete exam media
+    if (exam.logo_url) {
+      const logoKey = extractKeyFromUrl(exam.logo_url);
+      if (logoKey) {
+        try {
+          await deleteFile(logoKey);
+        } catch (fileError) {
+          logger.warn('Failed to delete logo image:', fileError);
+        }
+      }
+    }
+    if (exam.thumbnail_url) {
+      const thumbnailKey = extractKeyFromUrl(exam.thumbnail_url);
+      if (thumbnailKey) {
+        try {
+          await deleteFile(thumbnailKey);
+        } catch (fileError) {
+          logger.warn('Failed to delete thumbnail image:', fileError);
+        }
+      }
+    }
+
+    const { error: deleteExamError } = await supabase
       .from('exams')
       .delete()
       .eq('id', id);
 
-    if (error) {
-      logger.error('Delete exam error:', error);
+    if (deleteExamError) {
+      logger.error('Delete exam error:', deleteExamError);
       return res.status(500).json({
         success: false,
         message: 'Failed to delete exam'
@@ -696,7 +790,7 @@ const deleteExam = async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Exam deleted successfully'
+      message: 'Exam and related content deleted successfully'
     });
   } catch (error) {
     logger.error('Delete exam error:', error);
@@ -1339,7 +1433,6 @@ const bulkCreateExamWithContent = async (req, res) => {
       .from('exams')
       .insert({
         title: exam.title,
-        description: exam.description,
         duration: parseInt(exam.duration),
         total_marks: parseInt(exam.total_marks),
         total_questions: parseInt(exam.total_questions),
@@ -1354,7 +1447,6 @@ const bulkCreateExamWithContent = async (req, res) => {
         end_date: exam.end_date,
         pass_percentage: parseFloat(exam.pass_percentage),
         is_free: exam.is_free === 'true' || exam.is_free === true,
-        price: parseFloat(exam.price) || 0,
         negative_marking: exam.negative_marking === 'true' || exam.negative_marking === true,
         negative_mark_value: parseFloat(exam.negative_mark_value) || 0,
         is_published: exam.is_published === 'true' || exam.is_published === true,
@@ -1602,7 +1694,6 @@ const updateExamWithContent = async (req, res) => {
 
     const updatePayload = {
       title: examPayload.title,
-      description: examPayload.description,
       duration: numberOrNull(examPayload.duration, 0),
       total_marks: numberOrNull(examPayload.total_marks, 0),
       total_questions: numberOrNull(examPayload.total_questions, 0),
@@ -1617,7 +1708,6 @@ const updateExamWithContent = async (req, res) => {
       end_date: normalizedEndDate,
       pass_percentage: numberOrNull(examPayload.pass_percentage, 0),
       is_free: bool(examPayload.is_free),
-      price: numberOrNull(examPayload.price, 0),
       negative_marking: bool(examPayload.negative_marking),
       negative_mark_value: numberOrNull(examPayload.negative_mark_value, 0),
       is_published: bool(examPayload.is_published),
@@ -1775,6 +1865,264 @@ const updateExamWithContent = async (req, res) => {
   }
 };
 
+// Immediate image upload for questions
+const uploadQuestionImageController = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No image file provided'
+      });
+    }
+
+    // Check if question exists
+    const { data: question, error: questionError } = await supabase
+      .from('questions')
+      .select('id, image_url')
+      .eq('id', id)
+      .single();
+
+    if (questionError || !question) {
+      return res.status(404).json({
+        success: false,
+        message: 'Question not found'
+      });
+    }
+
+    // Delete old image if exists
+    if (question.image_url) {
+      const oldImageKey = extractKeyFromUrl(question.image_url);
+      if (oldImageKey) {
+        try {
+          await deleteFile(oldImageKey);
+        } catch (deleteError) {
+          logger.warn('Failed to delete old question image:', deleteError);
+        }
+      }
+    }
+
+    // Upload new image
+    const imageResult = await uploadQuestionImage(req.file);
+    
+    // Update question with new image URL
+    const { error: updateError } = await supabase
+      .from('questions')
+      .update({ image_url: imageResult.url })
+      .eq('id', id);
+
+    if (updateError) {
+      logger.error('Failed to update question image URL:', updateError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update question image'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Question image uploaded successfully',
+      data: {
+        image_url: imageResult.url
+      }
+    });
+  } catch (error) {
+    logger.error('Upload question image error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while uploading question image'
+    });
+  }
+};
+
+// Remove question image
+const removeQuestionImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get current question
+    const { data: question, error: questionError } = await supabase
+      .from('questions')
+      .select('id, image_url')
+      .eq('id', id)
+      .single();
+
+    if (questionError || !question) {
+      return res.status(404).json({
+        success: false,
+        message: 'Question not found'
+      });
+    }
+
+    // Delete image from Cloudflare if exists
+    if (question.image_url) {
+      const imageKey = extractKeyFromUrl(question.image_url);
+      if (imageKey) {
+        try {
+          await deleteFile(imageKey);
+        } catch (deleteError) {
+          logger.warn('Failed to delete question image from Cloudflare:', deleteError);
+        }
+      }
+    }
+
+    // Update question to remove image URL
+    const { error: updateError } = await supabase
+      .from('questions')
+      .update({ image_url: null })
+      .eq('id', id);
+
+    if (updateError) {
+      logger.error('Failed to remove question image URL:', updateError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to remove question image'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Question image removed successfully'
+    });
+  } catch (error) {
+    logger.error('Remove question image error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while removing question image'
+    });
+  }
+};
+
+// Immediate image upload for options
+const uploadOptionImageController = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No image file provided'
+      });
+    }
+
+    // Check if option exists
+    const { data: option, error: optionError } = await supabase
+      .from('question_options')
+      .select('id, image_url')
+      .eq('id', id)
+      .single();
+
+    if (optionError || !option) {
+      return res.status(404).json({
+        success: false,
+        message: 'Option not found'
+      });
+    }
+
+    // Delete old image if exists
+    if (option.image_url) {
+      const oldImageKey = extractKeyFromUrl(option.image_url);
+      if (oldImageKey) {
+        try {
+          await deleteFile(oldImageKey);
+        } catch (deleteError) {
+          logger.warn('Failed to delete old option image:', deleteError);
+        }
+      }
+    }
+
+    // Upload new image
+    const imageResult = await uploadOptionImage(req.file);
+    
+    // Update option with new image URL
+    const { error: updateError } = await supabase
+      .from('question_options')
+      .update({ image_url: imageResult.url })
+      .eq('id', id);
+
+    if (updateError) {
+      logger.error('Failed to update option image URL:', updateError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update option image'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Option image uploaded successfully',
+      data: {
+        image_url: imageResult.url
+      }
+    });
+  } catch (error) {
+    logger.error('Upload option image error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while uploading option image'
+    });
+  }
+};
+
+// Remove option image
+const removeOptionImage = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get current option
+    const { data: option, error: optionError } = await supabase
+      .from('question_options')
+      .select('id, image_url')
+      .eq('id', id)
+      .single();
+
+    if (optionError || !option) {
+      return res.status(404).json({
+        success: false,
+        message: 'Option not found'
+      });
+    }
+
+    // Delete image from Cloudflare if exists
+    if (option.image_url) {
+      const imageKey = extractKeyFromUrl(option.image_url);
+      if (imageKey) {
+        try {
+          await deleteFile(imageKey);
+        } catch (deleteError) {
+          logger.warn('Failed to delete option image from Cloudflare:', deleteError);
+        }
+      }
+    }
+
+    // Update option to remove image URL
+    const { error: updateError } = await supabase
+      .from('question_options')
+      .update({ image_url: null })
+      .eq('id', id);
+
+    if (updateError) {
+      logger.error('Failed to remove option image URL:', updateError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to remove option image'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Option image removed successfully'
+    });
+  } catch (error) {
+    logger.error('Remove option image error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while removing option image'
+    });
+  }
+};
+
 module.exports = {
   getAdminExams,
   getAdminExamById,
@@ -1793,6 +2141,10 @@ module.exports = {
   bulkCreateExamWithContent,
   updateExamWithContent,
   saveDraftExam,
+  uploadQuestionImage: uploadQuestionImageController,
+  removeQuestionImage,
+  uploadOptionImage: uploadOptionImageController,
+  removeOptionImage,
   getUserDetails,
   getAllUsers,
   updateUserRole,

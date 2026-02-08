@@ -11,7 +11,7 @@ const slugify = (text = '') => {
     .substring(0, 180);
 };
 
-const ensureUniqueSlug = async (supabase, table, baseSlug, options = {}) => {
+const ensureUniqueSlug = async (client, table, baseSlug, options = {}) => {
   const { column = 'slug', excludeId, filters = {} } = options;
 
   let slug = baseSlug || 'item';
@@ -20,7 +20,7 @@ const ensureUniqueSlug = async (supabase, table, baseSlug, options = {}) => {
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    let query = supabase
+    let query = client
       .from(table)
       .select('id')
       .eq(column, uniqueSlug)

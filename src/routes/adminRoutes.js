@@ -21,6 +21,10 @@ const {
   updateOption,
   bulkCreateExamWithContent,
   saveDraftExam,
+  uploadQuestionImage,
+  removeQuestionImage,
+  uploadOptionImage,
+  removeOptionImage,
   getAllUsers,
   getUserDetails,
   updateUserRole,
@@ -54,20 +58,11 @@ router.post('/exams', upload.fields([
   { name: 'thumbnail', maxCount: 1 }
 ]), createExam);
 
-router.post('/exams/bulk', upload.fields([
-  { name: 'logo', maxCount: 1 },
-  { name: 'thumbnail', maxCount: 1 }
-]), bulkCreateExamWithContent);
+router.post('/exams/bulk', upload.any(), bulkCreateExamWithContent);
 
-router.post('/exams/draft', upload.fields([
-  { name: 'logo', maxCount: 1 },
-  { name: 'thumbnail', maxCount: 1 }
-]), saveDraftExam);
+router.post('/exams/draft', upload.any(), saveDraftExam);
 
-router.put('/exams/:id/content', upload.fields([
-  { name: 'logo', maxCount: 1 },
-  { name: 'thumbnail', maxCount: 1 }
-]), updateExamWithContent);
+router.put('/exams/:id/content', upload.any(), updateExamWithContent);
 
 router.put('/exams/:id', upload.fields([
   { name: 'logo', maxCount: 1 },
@@ -84,8 +79,15 @@ router.post('/questions', upload.single('image'), createQuestion);
 router.put('/questions/:id', upload.single('image'), updateQuestion);
 router.delete('/questions/:id', deleteQuestion);
 
+// Immediate image upload endpoints
+router.post('/questions/:id/upload-image', upload.single('image'), uploadQuestionImage);
+router.delete('/questions/:id/remove-image', removeQuestionImage);
+
 router.post('/options', upload.single('image'), createOption);
 router.put('/options/:id', upload.single('image'), updateOption);
+
+router.post('/options/:id/upload-image', upload.single('image'), uploadOptionImage);
+router.delete('/options/:id/remove-image', removeOptionImage);
 
 router.get('/users', getAllUsers);
 router.get('/users/:id', getUserDetails);

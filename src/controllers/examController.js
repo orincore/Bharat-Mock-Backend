@@ -20,7 +20,6 @@ const getExams = async (req, res) => {
       .select(`
         id,
         title,
-        description,
         duration,
         total_marks,
         total_questions,
@@ -31,7 +30,6 @@ const getExams = async (req, res) => {
         end_date,
         pass_percentage,
         is_free,
-        price,
         image_url,
         logo_url,
         thumbnail_url,
@@ -49,7 +47,7 @@ const getExams = async (req, res) => {
       .order('start_date', { ascending: false });
 
     if (search) {
-      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
+      query = query.or(`title.ilike.%${search}%`);
     }
 
     if (category) {
@@ -150,7 +148,6 @@ const buildExamQuery = () => {
     .select(`
       id,
       title,
-      description,
       duration,
       total_marks,
       total_questions,
@@ -161,7 +158,6 @@ const buildExamQuery = () => {
       end_date,
       pass_percentage,
       is_free,
-      price,
       image_url,
       logo_url,
       thumbnail_url,
