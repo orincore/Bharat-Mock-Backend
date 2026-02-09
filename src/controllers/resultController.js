@@ -1,5 +1,90 @@
 const supabase = require('../config/database');
 const logger = require('../config/logger');
+const { evaluateExam } = require('./examController');
+
+const resultSelectFields = `
+  id,
+  user_id,
+  score,
+  total_marks,
+  percentage,
+  correct_answers,
+  wrong_answers,
+  unattempted,
+  time_taken,
+  rank,
+  total_participants,
+  status,
+  created_at,
+  attempt_id,
+  exam_id,
+  exam_attempts!inner (
+    language
+  ),
+  exams (
+    id,
+    title,
+    category,
+    difficulty,
+    image_url,
+    pass_percentage,
+    total_questions
+  )
+`;
+
+const fetchResultWithDetails = (filters = {}) => {
+  let query = supabase
+    .from('results')
+    .select(resultSelectFields)
+    .eq('is_published', true)
+    .eq('user_id', filters.userId);
+
+  if (filters.id) {
+    query = query.eq('id', filters.id);
+  }
+
+  if (filters.attemptId) {
+    query = query.eq('attempt_id', filters.attemptId);
+  }
+
+  return query.single();
+};
+
+const ensureResultForAttempt = async (attemptId, userId) => {
+  try {
+    const { data: existingResult } = await fetchResultWithDetails({ attemptId, userId });
+    if (existingResult) {
+      return { result: existingResult };
+    }
+
+    const { data: attempt, error: attemptError } = await supabase
+      .from('exam_attempts')
+      .select('id, exam_id, user_id, is_submitted')
+      .eq('id', attemptId)
+      .single();
+
+    if (attemptError || !attempt || attempt.user_id !== userId) {
+      return { status: 404, message: 'Exam attempt not found' };
+    }
+
+    if (!attempt.is_submitted) {
+      return { status: 400, message: 'Exam has not been submitted yet' };
+    }
+
+    await evaluateExam(attemptId, attempt.exam_id, userId);
+
+    const { data: regeneratedResult, error: regenerationError } = await fetchResultWithDetails({ attemptId, userId });
+
+    if (regenerationError || !regeneratedResult) {
+      return { status: 404, message: 'Result not found' };
+    }
+
+    return { result: regeneratedResult };
+  } catch (error) {
+    logger.error('ensureResultForAttempt error:', error);
+    return { status: 500, message: 'Failed to fetch result details' };
+  }
+};
 
 const getResults = async (req, res) => {
   try {
@@ -121,45 +206,12 @@ const getResultByAttemptId = async (req, res) => {
   try {
     const { attemptId } = req.params;
 
-    const { data: result, error } = await supabase
-      .from('results')
-      .select(`
-        id,
-        score,
-        total_marks,
-        percentage,
-        correct_answers,
-        wrong_answers,
-        unattempted,
-        time_taken,
-        rank,
-        total_participants,
-        status,
-        created_at,
-        attempt_id,
-        exam_id,
-        exam_attempts!inner (
-          language
-        ),
-        exams (
-          id,
-          title,
-          description,
-          category,
-          difficulty,
-          image_url,
-          pass_percentage,
-          total_questions
-        )
-      `)
-      .eq('attempt_id', attemptId)
-      .eq('user_id', req.user.id)
-      .single();
+    const { result, status, message } = await ensureResultForAttempt(attemptId, req.user.id);
 
-    if (error || !result) {
-      return res.status(404).json({
+    if (!result) {
+      return res.status(status || 404).json({
         success: false,
-        message: 'Result not found'
+        message: message || 'Result not found'
       });
     }
 
@@ -246,7 +298,6 @@ const getResultById = async (req, res) => {
         exams (
           id,
           title,
-          description,
           category,
           difficulty,
           image_url,
@@ -263,10 +314,16 @@ const getResultById = async (req, res) => {
     }
 
     if (error || !result) {
-      return res.status(404).json({
-        success: false,
-        message: 'Result not found'
-      });
+      const ensured = await ensureResultForAttempt(id, req.user.id);
+
+      if (!ensured.result) {
+        return res.status(ensured.status || 404).json({
+          success: false,
+          message: ensured.message || 'Result not found'
+        });
+      }
+
+      result = ensured.result;
     }
 
     const { data: sectionAnalysis } = await supabase

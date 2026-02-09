@@ -182,7 +182,10 @@ const fetchExamByIdentifier = async (identifier) => {
     .filter(Boolean)
     .pop();
 
-  const runQuery = async (filter) => buildExamQuery().match(filter).single();
+  const runQuery = async (filter) => {
+    const { data, error } = await buildExamQuery().match(filter).single();
+    return { exam: data, error };
+  };
 
   if (isUUID) {
     return runQuery({ id: normalizedId });
@@ -392,13 +395,7 @@ const startExam = async (req, res) => {
     const { examId } = req.params;
     const { language = 'en' } = req.body;
 
-    const { data: exam, error: examError } = await supabase
-      .from('exams')
-      .select('id, status, start_date, end_date, is_free, price, allow_anytime, supports_hindi')
-      .eq('id', examId)
-      .eq('is_published', true)
-      .is('deleted_at', null)
-      .single();
+    const { exam, error: examError } = await fetchExamByIdentifier(examId);
 
     if (examError || !exam) {
       return res.status(404).json({
@@ -406,6 +403,8 @@ const startExam = async (req, res) => {
         message: 'Exam not found'
       });
     }
+
+    const resolvedExamId = exam.id;
 
     const allowAnytime = exam.allow_anytime === true;
 
@@ -445,7 +444,7 @@ const startExam = async (req, res) => {
         .from('transactions')
         .select('id')
         .eq('user_id', req.user.id)
-        .eq('exam_id', examId)
+        .eq('exam_id', resolvedExamId)
         .eq('status', 'success')
         .single();
 
@@ -460,7 +459,7 @@ const startExam = async (req, res) => {
     const { data: attempt, error: attemptError } = await supabase
       .from('exam_attempts')
       .insert({
-        exam_id: examId,
+        exam_id: resolvedExamId,
         user_id: req.user.id,
         language: language,
         ip_address: req.ip,
