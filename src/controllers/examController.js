@@ -40,11 +40,13 @@ const getExams = async (req, res) => {
         exam_type,
         show_in_mock_tests,
         slug,
-        url_path
+        url_path,
+        created_at,
+        updated_at
       `, { count: 'exact' })
       .eq('is_published', true)
       .is('deleted_at', null)
-      .order('start_date', { ascending: false });
+      .order('created_at', { ascending: false });
 
     if (search) {
       query = query.or(`title.ilike.%${search}%`);

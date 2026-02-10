@@ -28,6 +28,12 @@ const pageContentRoutes = require('./routes/pageContent');
 const adminRoutes = require('./routes/adminRoutes');
 const { startSubscriptionJobs } = require('./jobs/subscriptionJobs');
 const homepageRoutes = require('./routes/homepageRoutes');
+const navigationRoutes = require('./routes/navigationRoutes');
+const footerRoutes = require('./routes/footerRoutes');
+const contactRoutes = require('./routes/contactRoutes');
+const aboutRoutes = require('./routes/aboutRoutes');
+const privacyRoutes = require('./routes/privacyRoutes');
+const disclaimerRoutes = require('./routes/disclaimerRoutes');
 
 const app = express();
 
@@ -104,6 +110,12 @@ app.use(`/api/${API_VERSION}/taxonomy`, taxonomyRoutes);
 app.use(`/api/${API_VERSION}/subcategories`, subcategoryContentRoutes);
 app.use(`/api/${API_VERSION}/page-content`, pageContentRoutes);
 app.use(`/api/${API_VERSION}/homepage`, homepageRoutes);
+app.use(`/api/${API_VERSION}/navigation`, navigationRoutes);
+app.use(`/api/${API_VERSION}/footer`, footerRoutes);
+app.use(`/api/${API_VERSION}/contact`, contactRoutes);
+app.use(`/api/${API_VERSION}/about`, aboutRoutes);
+app.use(`/api/${API_VERSION}/privacy`, privacyRoutes);
+app.use(`/api/${API_VERSION}/disclaimer`, disclaimerRoutes);
 app.use(`/api/${API_VERSION}/admin`, adminRoutes);
 app.use(`/api/${API_VERSION}/subscriptions`, subscriptionRoutes);
 

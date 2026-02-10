@@ -30,6 +30,24 @@ const {
   updateUserRole,
   toggleUserBlock
 } = require('../controllers/adminExamController');
+const {
+  getAdminNavigationLinks,
+  createNavigationLink,
+  updateNavigationLink,
+  deleteNavigationLink,
+  reorderNavigationLinks
+} = require('../controllers/navigationController');
+const {
+  getAdminFooterLinks,
+  createFooterLink,
+  updateFooterLink,
+  deleteFooterLink,
+  reorderFooterLinks
+} = require('../controllers/footerController');
+const { adminGetContact, adminUpsertContact } = require('../controllers/contactController');
+const { adminGetAbout, adminUpsertAbout } = require('../controllers/aboutController');
+const { adminGetPrivacyPolicy, adminUpsertPrivacyPolicy } = require('../controllers/privacyController');
+const { adminGetDisclaimer, adminUpsertDisclaimer } = require('../controllers/disclaimerController');
 
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -74,6 +92,30 @@ router.delete('/exams/:id', deleteExam);
 router.post('/sections', createSection);
 router.put('/sections/:id', updateSection);
 router.delete('/sections/:id', deleteSection);
+
+router.get('/navigation', getAdminNavigationLinks);
+router.post('/navigation', createNavigationLink);
+router.put('/navigation/:id', updateNavigationLink);
+router.delete('/navigation/:id', deleteNavigationLink);
+router.post('/navigation/reorder', reorderNavigationLinks);
+
+router.get('/footer', getAdminFooterLinks);
+router.post('/footer', createFooterLink);
+router.put('/footer/:id', updateFooterLink);
+router.delete('/footer/:id', deleteFooterLink);
+router.post('/footer/reorder', reorderFooterLinks);
+
+router.get('/contact', adminGetContact);
+router.put('/contact', adminUpsertContact);
+
+router.get('/about', adminGetAbout);
+router.put('/about', adminUpsertAbout);
+
+router.get('/privacy', adminGetPrivacyPolicy);
+router.put('/privacy', adminUpsertPrivacyPolicy);
+
+router.get('/disclaimer', adminGetDisclaimer);
+router.put('/disclaimer', adminUpsertDisclaimer);
 
 router.post('/questions', upload.single('image'), createQuestion);
 router.put('/questions/:id', upload.single('image'), updateQuestion);

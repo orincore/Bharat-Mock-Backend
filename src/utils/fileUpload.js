@@ -9,25 +9,41 @@ const storage = multer.memoryStorage();
 
 let warnedAboutAllowedTypes = false;
 
+const DEFAULT_ALLOWED_FILE_TYPES = [
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+  'application/pdf',
+  'video/mp4',
+  'video/webm',
+  'video/quicktime'
+];
+
+const sanitizeAllowedTypes = (raw) =>
+  raw
+    .split(',')
+    .map((type) => type.trim())
+    .filter(Boolean);
+
 const getAllowedFileTypes = () => {
   const envValue = process.env.ALLOWED_FILE_TYPES;
   if (!envValue) {
     if (!warnedAboutAllowedTypes) {
-      console.warn('ALLOWED_FILE_TYPES env var missing. Falling back to default image/pdf types.');
+      console.warn('ALLOWED_FILE_TYPES env var missing. Falling back to default media types.');
       warnedAboutAllowedTypes = true;
     }
-    return [
-      'image/jpeg',
-      'image/png',
-      'image/webp',
-      'image/gif',
-      'application/pdf',
-      'video/mp4',
-      'video/webm',
-      'video/quicktime'
-    ];
+    process.env.ALLOWED_FILE_TYPES = DEFAULT_ALLOWED_FILE_TYPES.join(',');
+    return DEFAULT_ALLOWED_FILE_TYPES;
   }
-  return envValue.split(',');
+
+  const parsed = sanitizeAllowedTypes(envValue);
+  if (!parsed.length) {
+    console.warn('ALLOWED_FILE_TYPES env var was empty after parsing. Using defaults.');
+    process.env.ALLOWED_FILE_TYPES = DEFAULT_ALLOWED_FILE_TYPES.join(',');
+    return DEFAULT_ALLOWED_FILE_TYPES;
+  }
+  return parsed;
 };
 
 const fileFilter = (req, file, cb) => {
