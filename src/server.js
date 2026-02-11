@@ -85,7 +85,7 @@ const generalLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skipSuccessfulRequests: false,
-  keyGenerator: (req) => req.ip || req.headers['x-forwarded-for'] || 'unknown',
+  validate: { xForwardedForHeader: false, trustProxy: false },
 });
 
 const authLimiter = rateLimit({
@@ -94,6 +94,7 @@ const authLimiter = rateLimit({
   message: { success: false, message: 'Too many authentication attempts. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false, trustProxy: false },
 });
 
 const uploadLimiter = rateLimit({
@@ -102,6 +103,7 @@ const uploadLimiter = rateLimit({
   message: { success: false, message: 'Too many upload requests. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false, trustProxy: false },
 });
 
 if (process.env.NODE_ENV === 'production') {
