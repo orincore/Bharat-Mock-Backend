@@ -78,6 +78,8 @@ if (process.env.NODE_ENV !== 'production') {
   app.use(morgan('dev'));
 }
 
+const API_VERSION = process.env.API_VERSION || 'v1';
+
 const globalLimiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 900000,
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000,
@@ -109,8 +111,6 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString()
   });
 });
-
-const API_VERSION = process.env.API_VERSION || 'v1';
 
 if (process.env.NODE_ENV === 'production') {
   app.use(`/api/${API_VERSION}/auth`, authLimiter);
