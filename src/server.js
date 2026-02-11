@@ -78,16 +78,28 @@ if (process.env.NODE_ENV !== 'production') {
   app.use(morgan('dev'));
 }
 
-const limiter = rateLimit({
+const globalLimiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 900000,
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
-  message: 'Too many requests from this IP, please try again later.',
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000,
+  message: { success: false, message: 'Too many requests from this IP, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
+  keyGenerator: (req) => req.ip,
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { success: false, message: 'Too many auth attempts, please try again after 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { xForwardedForHeader: false },
+  keyGenerator: (req) => req.ip,
 });
 
 if (process.env.NODE_ENV === 'production') {
-  app.use('/api/', limiter);
+  app.use('/api/', globalLimiter);
 }
 
 app.get('/health', (req, res) => {
@@ -100,6 +112,9 @@ app.get('/health', (req, res) => {
 
 const API_VERSION = process.env.API_VERSION || 'v1';
 
+if (process.env.NODE_ENV === 'production') {
+  app.use(`/api/${API_VERSION}/auth`, authLimiter);
+}
 app.use(`/api/${API_VERSION}/auth`, authRoutes);
 app.use(`/api/${API_VERSION}/exams`, examRoutes);
 app.use(`/api/${API_VERSION}/results`, resultRoutes);
@@ -156,10 +171,15 @@ const startServer = async () => {
 
     server = app.listen(PORT, () => {
       logger.info(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
-      console.log(`📚 API Documentation: http://localhost:${PORT}/api/${API_VERSION}`);
-      console.log(`🔗 GraphQL Endpoint: http://localhost:${PORT}${GRAPHQL_PATH}`);
+      console.log(`Server running on http://localhost:${PORT}`);
+      console.log(`API: http://localhost:${PORT}/api/${API_VERSION}`);
+      console.log(`GraphQL: http://localhost:${PORT}${GRAPHQL_PATH}`);
     });
+
+    server.keepAliveTimeout = 65000;
+    server.headersTimeout = 66000;
+    server.maxConnections = 0;
+    server.timeout = 120000;
   } catch (error) {
     logger.error('Failed to start server', error);
     process.exit(1);
@@ -169,13 +189,12 @@ const startServer = async () => {
 startServer();
 startSubscriptionJobs();
 
-process.on('unhandledRejection', (err) => {
-  logger.error('Unhandled Promise Rejection:', err);
-  if (server) {
-    server.close(() => process.exit(1));
-  } else {
-    process.exit(1);
-  }
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught Exception (keeping process alive):', { message: err.message, stack: err.stack });
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled Promise Rejection (keeping process alive):', { reason: reason?.message || reason, stack: reason?.stack });
 });
 
 process.on('SIGTERM', () => {
@@ -183,7 +202,20 @@ process.on('SIGTERM', () => {
   if (server) {
     server.close(() => {
       logger.info('Process terminated');
+      process.exit(0);
     });
+    setTimeout(() => {
+      logger.warn('Forced shutdown after timeout');
+      process.exit(1);
+    }, 10000);
+  }
+});
+
+process.on('SIGINT', () => {
+  logger.info('SIGINT received, shutting down gracefully');
+  if (server) {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 10000);
   }
 });
 

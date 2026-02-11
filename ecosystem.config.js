@@ -3,17 +3,27 @@ module.exports = {
     {
       name: 'bharat-mock-backend',
       cwd: '/root/Bharat-Mock-Backend',
-      script: 'npm',
-      args: 'run start',
-      interpreter: 'none',
+      script: 'src/server.js',
+      node_args: '--max-old-space-size=3072',
+      exec_mode: 'cluster',
+      instances: 2,
       env: {
         NODE_ENV: 'production'
       },
-      max_restarts: 5,
-      restart_delay: 4000,
+      autorestart: true,
+      watch: false,
+      max_restarts: 15,
+      min_uptime: '10s',
+      restart_delay: 3000,
+      exp_backoff_restart_delay: 100,
+      max_memory_restart: '1500M',
+      kill_timeout: 10000,
+      listen_timeout: 10000,
       error_file: '/var/log/pm2/bharat-mock-backend-error.log',
       out_file: '/var/log/pm2/bharat-mock-backend-out.log',
-      combine_logs: true
+      combine_logs: true,
+      merge_logs: true,
+      time: true
     }
   ]
 };
