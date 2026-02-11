@@ -22,10 +22,16 @@ router.get('/category/:slug/exams', taxonomyController.getExamsByCategory);
 router.get('/category/:categorySlug/subcategory/:subcategorySlug', taxonomyController.getSubcategoryBySlug);
 router.get('/category/:categorySlug/subcategory/:subcategorySlug/exams', taxonomyController.getExamsBySubcategory);
 
+// Combined slug resolution (e.g. "ssc-test-test-ssc" → category "ssc-test" + subcategory "test-ssc")
+router.get('/resolve/:combinedSlug', taxonomyController.resolveCombinedSlug);
+
 router.post('/categories', authenticate, requireAdmin, upload.single('logo'), taxonomyController.createCategory);
 router.put('/categories/:id', authenticate, requireAdmin, upload.single('logo'), taxonomyController.updateCategory);
-router.post('/subcategories', authenticate, requireAdmin, taxonomyController.createSubcategory);
-router.put('/subcategories/:id', authenticate, requireAdmin, taxonomyController.updateSubcategory);
+router.delete('/categories/:id', authenticate, requireAdmin, taxonomyController.deleteCategory);
+router.post('/subcategories', authenticate, requireAdmin, upload.single('logo'), taxonomyController.createSubcategory);
+router.put('/subcategories/:id', authenticate, requireAdmin, upload.single('logo'), taxonomyController.updateSubcategory);
+router.delete('/subcategories/:id', authenticate, requireAdmin, taxonomyController.deleteSubcategory);
+router.post('/subcategories/reorder', authenticate, requireAdmin, taxonomyController.reorderSubcategories);
 router.post('/difficulties', authenticate, requireAdmin, taxonomyController.createDifficulty);
 
 router.get('/categories/:categoryId/notifications', categoryContentController.getNotifications);

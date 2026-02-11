@@ -10,7 +10,8 @@ const FOLDER_STRUCTURE = {
   QUESTION_IMAGES: 'questions/images',
   OPTION_IMAGES: 'options/images',
   USER_AVATARS: 'users/avatars',
-  CATEGORY_LOGOS: 'categories/logos'
+  CATEGORY_LOGOS: 'categories/logos',
+  SUBCATEGORY_LOGOS: 'subcategories/logos'
 };
 
 const uploadFile = async (file, folder, customFileName = null) => {
@@ -86,6 +87,10 @@ const uploadCategoryLogo = async (file) => {
   return uploadFile(file, FOLDER_STRUCTURE.CATEGORY_LOGOS);
 };
 
+const uploadSubcategoryLogo = async (file) => {
+  return uploadFile(file, FOLDER_STRUCTURE.SUBCATEGORY_LOGOS);
+};
+
 const extractKeyFromUrl = (url) => {
   if (!url || !url.includes(R2_PUBLIC_URL)) return null;
   return url.replace(`${R2_PUBLIC_URL}/`, '');
@@ -124,6 +129,7 @@ module.exports = {
   uploadOptionImage,
   uploadUserAvatar,
   uploadCategoryLogo,
+  uploadSubcategoryLogo,
   extractKeyFromUrl,
   FOLDER_STRUCTURE
 };
