@@ -7,8 +7,6 @@ const path = require('path');
 
 const storage = multer.memoryStorage();
 
-let warnedAboutAllowedTypes = false;
-
 const DEFAULT_ALLOWED_FILE_TYPES = [
   'image/jpeg',
   'image/png',
@@ -20,39 +18,27 @@ const DEFAULT_ALLOWED_FILE_TYPES = [
   'video/quicktime'
 ];
 
-const sanitizeAllowedTypes = (raw) =>
-  raw
-    .split(',')
-    .map((type) => type.trim())
-    .filter(Boolean);
-
-const getAllowedFileTypes = () => {
+const resolveAllowedFileTypes = () => {
   const envValue = process.env.ALLOWED_FILE_TYPES;
   if (!envValue) {
-    if (!warnedAboutAllowedTypes) {
-      console.warn('ALLOWED_FILE_TYPES env var missing. Falling back to default media types.');
-      warnedAboutAllowedTypes = true;
-    }
-    process.env.ALLOWED_FILE_TYPES = DEFAULT_ALLOWED_FILE_TYPES.join(',');
+    console.info('[fileUpload] ALLOWED_FILE_TYPES env var not set. Using defaults:', DEFAULT_ALLOWED_FILE_TYPES.join(', '));
     return DEFAULT_ALLOWED_FILE_TYPES;
   }
-
-  const parsed = sanitizeAllowedTypes(envValue);
+  const parsed = envValue.split(',').map((t) => t.trim()).filter(Boolean);
   if (!parsed.length) {
-    console.warn('ALLOWED_FILE_TYPES env var was empty after parsing. Using defaults.');
-    process.env.ALLOWED_FILE_TYPES = DEFAULT_ALLOWED_FILE_TYPES.join(',');
+    console.info('[fileUpload] ALLOWED_FILE_TYPES was empty after parsing. Using defaults.');
     return DEFAULT_ALLOWED_FILE_TYPES;
   }
   return parsed;
 };
 
-const fileFilter = (req, file, cb) => {
-  const allowedTypes = getAllowedFileTypes();
+const ALLOWED_FILE_TYPES = resolveAllowedFileTypes();
 
-  if (allowedTypes.includes(file.mimetype)) {
+const fileFilter = (req, file, cb) => {
+  if (ALLOWED_FILE_TYPES.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error('Invalid file type. Only images, videos, and PDFs are allowed.'), false);
+    cb(new Error(`Invalid file type '${file.mimetype}'. Allowed: ${ALLOWED_FILE_TYPES.join(', ')}`), false);
   }
 };
 
