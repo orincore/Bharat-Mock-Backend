@@ -5,8 +5,8 @@ module.exports = {
       cwd: '/root/Bharat-Mock-Backend',
       script: 'src/server.js',
       node_args: '--max-old-space-size=3072',
-      exec_mode: 'cluster',
-      instances: 2,
+      exec_mode: 'fork',
+      instances: 1,
       env: {
         NODE_ENV: 'production',
         PORT: 8000,

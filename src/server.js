@@ -178,7 +178,6 @@ const startServer = async () => {
 
     server.keepAliveTimeout = 65000;
     server.headersTimeout = 66000;
-    server.maxConnections = 0;
     server.timeout = 120000;
   } catch (error) {
     logger.error('Failed to start server', error);
