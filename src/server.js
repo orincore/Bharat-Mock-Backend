@@ -78,36 +78,16 @@ if (process.env.NODE_ENV !== 'production') {
   app.use(morgan('dev'));
 }
 
-const generalLimiter = rateLimit({
+const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 900000,
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 2000,
-  message: { success: false, message: 'Too many requests from this IP, please try again later.' },
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
+  message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
-  skipSuccessfulRequests: false,
-  validate: { xForwardedForHeader: false, trustProxy: false },
-});
-
-const authLimiter = rateLimit({
-  windowMs: 900000,
-  max: parseInt(process.env.AUTH_RATE_LIMIT) || 30,
-  message: { success: false, message: 'Too many authentication attempts. Please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: { xForwardedForHeader: false, trustProxy: false },
-});
-
-const uploadLimiter = rateLimit({
-  windowMs: 900000,
-  max: parseInt(process.env.UPLOAD_RATE_LIMIT) || 60,
-  message: { success: false, message: 'Too many upload requests. Please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: { xForwardedForHeader: false, trustProxy: false },
 });
 
 if (process.env.NODE_ENV === 'production') {
-  app.use('/api/', generalLimiter);
+  app.use('/api/', limiter);
 }
 
 app.get('/health', (req, res) => {
@@ -120,7 +100,7 @@ app.get('/health', (req, res) => {
 
 const API_VERSION = process.env.API_VERSION || 'v1';
 
-app.use(`/api/${API_VERSION}/auth`, authLimiter, authRoutes);
+app.use(`/api/${API_VERSION}/auth`, authRoutes);
 app.use(`/api/${API_VERSION}/exams`, examRoutes);
 app.use(`/api/${API_VERSION}/results`, resultRoutes);
 app.use(`/api/${API_VERSION}/colleges`, collegeRoutes);
@@ -176,15 +156,10 @@ const startServer = async () => {
 
     server = app.listen(PORT, () => {
       logger.info(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
-      console.log(`Server running on http://localhost:${PORT}`);
-      console.log(`API Documentation: http://localhost:${PORT}/api/${API_VERSION}`);
-      console.log(`GraphQL Endpoint: http://localhost:${PORT}${GRAPHQL_PATH}`);
+      console.log(`🚀 Server running on http://localhost:${PORT}`);
+      console.log(`📚 API Documentation: http://localhost:${PORT}/api/${API_VERSION}`);
+      console.log(`🔗 GraphQL Endpoint: http://localhost:${PORT}${GRAPHQL_PATH}`);
     });
-
-    server.keepAliveTimeout = parseInt(process.env.KEEP_ALIVE_TIMEOUT, 10) || 65000;
-    server.headersTimeout = parseInt(process.env.HEADERS_TIMEOUT, 10) || 66000;
-    server.maxConnections = parseInt(process.env.MAX_CONNECTIONS, 10) || 0;
-    server.timeout = parseInt(process.env.SERVER_TIMEOUT, 10) || 120000;
   } catch (error) {
     logger.error('Failed to start server', error);
     process.exit(1);
@@ -194,32 +169,22 @@ const startServer = async () => {
 startServer();
 startSubscriptionJobs();
 
-const gracefulShutdown = (signal) => {
-  logger.info(`${signal} received, shutting down gracefully`);
+process.on('unhandledRejection', (err) => {
+  logger.error('Unhandled Promise Rejection:', err);
+  if (server) {
+    server.close(() => process.exit(1));
+  } else {
+    process.exit(1);
+  }
+});
+
+process.on('SIGTERM', () => {
+  logger.info('SIGTERM received, shutting down gracefully');
   if (server) {
     server.close(() => {
-      logger.info('HTTP server closed');
-      process.exit(0);
+      logger.info('Process terminated');
     });
-    setTimeout(() => {
-      logger.warn('Forceful shutdown after timeout');
-      process.exit(1);
-    }, 10000);
-  } else {
-    process.exit(0);
   }
-};
-
-process.on('unhandledRejection', (reason, promise) => {
-  logger.error('Unhandled Promise Rejection:', { reason: reason?.message || reason, stack: reason?.stack });
 });
-
-process.on('uncaughtException', (err) => {
-  logger.error('Uncaught Exception:', { message: err.message, stack: err.stack });
-  gracefulShutdown('uncaughtException');
-});
-
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 module.exports = app;
