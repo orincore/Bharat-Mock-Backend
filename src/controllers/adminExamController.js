@@ -9,6 +9,30 @@ const safeAverage = (numbers = []) => {
   return parseFloat((valid.reduce((sum, value) => sum + value, 0) / valid.length).toFixed(1));
 };
 
+const QUESTION_BATCH_SIZE = 25;
+const OPTION_BATCH_SIZE = 50;
+
+const batchInsert = async (table, rows, selectColumns = '*', batchSize = QUESTION_BATCH_SIZE) => {
+  if (!rows.length) return [];
+  const allCreated = [];
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const chunk = rows.slice(i, i + batchSize);
+    const { data, error } = await supabase
+      .from(table)
+      .insert(chunk)
+      .select(selectColumns);
+    if (error) {
+      logger.error(`Batch insert error on ${table} (chunk ${Math.floor(i / batchSize) + 1}, rows ${i}-${i + chunk.length - 1}):`, error);
+    } else if (data) {
+      allCreated.push(...data);
+    }
+  }
+  if (allCreated.length !== rows.length) {
+    logger.warn(`${table}: expected ${rows.length} rows, inserted ${allCreated.length}`);
+  }
+  return allCreated;
+};
+
 const getAdminExams = async (req, res) => {
   try {
     const {
@@ -46,6 +70,7 @@ const getAdminExams = async (req, res) => {
         is_published,
         exam_type,
         show_in_mock_tests,
+        is_premium,
         created_at,
         updated_at
       `, { count: 'exact' })
@@ -378,6 +403,7 @@ const getAdminExamById = async (req, res) => {
         is_free,
         exam_type,
         show_in_mock_tests,
+        is_premium,
         is_published,
         logo_url,
         thumbnail_url,
@@ -476,8 +502,8 @@ const createExam = async (req, res) => {
       if (subcat) subcategorySlug = subcat.slug;
     }
     
-    const combinedSlug = [categorySlug, subcategorySlug].filter(Boolean).join('-');
-    const urlPath = `/${combinedSlug}/${examSlug}`.replace(/\/+/g, '/');
+    const parentSlug = subcategorySlug || categorySlug;
+    const urlPath = parentSlug ? `/${parentSlug}/${examSlug}` : `/${examSlug}`;
 
     const parsedSyllabus = syllabus ? JSON.parse(syllabus) : [];
     const allowAnytimeFlag = allow_anytime === 'true' || allow_anytime === true;
@@ -1392,42 +1418,35 @@ const bulkCreateExamWithContent = async (req, res) => {
       });
     }
 
-    let logoUrl = null;
-    let thumbnailUrl = null;
+    // Parallelize: file uploads + slug generation + category/subcategory lookups
+    const [logoResult, thumbnailResult, examSlug, catResult, subcatResult] = await Promise.all([
+      req.files?.logo ? uploadExamLogo(req.files.logo[0]) : Promise.resolve(null),
+      req.files?.thumbnail ? uploadExamThumbnail(req.files.thumbnail[0]) : Promise.resolve(null),
+      ensureUniqueSlug(supabase, 'exams', slugify(exam.slug || exam.title)),
+      exam.category_id
+        ? supabase.from('exam_categories').select('slug').eq('id', exam.category_id).single()
+        : Promise.resolve({ data: null }),
+      exam.subcategory_id
+        ? supabase.from('exam_subcategories').select('slug').eq('id', exam.subcategory_id).single()
+        : Promise.resolve({ data: null })
+    ]);
 
-    if (req.files) {
-      if (req.files.logo) {
-        const logoResult = await uploadExamLogo(req.files.logo[0]);
-        logoUrl = logoResult.url;
-      }
-      if (req.files.thumbnail) {
-        const thumbnailResult = await uploadExamThumbnail(req.files.thumbnail[0]);
-        thumbnailUrl = thumbnailResult.url;
-      }
-    }
-
-    const examSlug = await ensureUniqueSlug(supabase, 'exams', slugify(exam.slug || exam.title));
-    
-    let categorySlug = exam.category || '';
-    let subcategorySlug = exam.subcategory || '';
-    
-    if (exam.category_id) {
-      const { data: cat } = await supabase.from('exam_categories').select('slug').eq('id', exam.category_id).single();
-      if (cat) categorySlug = cat.slug;
-    }
-    
-    if (exam.subcategory_id) {
-      const { data: subcat } = await supabase.from('exam_subcategories').select('slug').eq('id', exam.subcategory_id).single();
-      if (subcat) subcategorySlug = subcat.slug;
-    }
-    
-    const combinedSlug = [categorySlug, subcategorySlug].filter(Boolean).join('-');
-    const urlPath = `/${combinedSlug}/${examSlug}`.replace(/\/+/g, '/');
+    const logoUrl = logoResult?.url || null;
+    const thumbnailUrl = thumbnailResult?.url || null;
+    const categorySlug = catResult.data?.slug || exam.category || '';
+    const subcategorySlug = subcatResult.data?.slug || exam.subcategory || '';
+    const parentSlug = subcategorySlug || categorySlug;
+    const urlPath = parentSlug ? `/${parentSlug}/${examSlug}` : `/${examSlug}`;
 
     const parsedSyllabus = exam.syllabus || [];
     const supportsHindi = sections.some(s => 
       s.name_hi || s.questions?.some(q => q.text_hi || q.explanation_hi || q.options?.some(o => o.option_text_hi))
     ) || false;
+
+    const allowAnytimeFlag = exam.allow_anytime === 'true' || exam.allow_anytime === true;
+    const normalizedStatus = allowAnytimeFlag ? 'anytime' : (exam.status || 'upcoming');
+    const normalizedStartDate = allowAnytimeFlag ? null : (exam.start_date || null);
+    const normalizedEndDate = allowAnytimeFlag ? null : (exam.end_date || null);
 
     const { data: createdExam, error: examError } = await supabase
       .from('exams')
@@ -1442,17 +1461,18 @@ const bulkCreateExamWithContent = async (req, res) => {
         subcategory_id: exam.subcategory_id || null,
         difficulty: exam.difficulty || null,
         difficulty_id: exam.difficulty_id || null,
-        status: exam.status || 'upcoming',
-        start_date: exam.start_date,
-        end_date: exam.end_date,
+        status: normalizedStatus,
+        start_date: normalizedStartDate,
+        end_date: normalizedEndDate,
         pass_percentage: parseFloat(exam.pass_percentage),
         is_free: exam.is_free === 'true' || exam.is_free === true,
         negative_marking: exam.negative_marking === 'true' || exam.negative_marking === true,
         negative_mark_value: parseFloat(exam.negative_mark_value) || 0,
         is_published: exam.is_published === 'true' || exam.is_published === true,
-        allow_anytime: exam.allow_anytime === 'true' || exam.allow_anytime === true,
+        allow_anytime: allowAnytimeFlag,
         exam_type: exam.exam_type || 'mock_test',
         show_in_mock_tests: exam.show_in_mock_tests === 'true' || exam.show_in_mock_tests === true,
+        is_premium: exam.is_premium === 'true' || exam.is_premium === true,
         supports_hindi: supportsHindi,
         logo_url: logoUrl,
         thumbnail_url: thumbnailUrl,
@@ -1471,86 +1491,114 @@ const bulkCreateExamWithContent = async (req, res) => {
       });
     }
 
-    if (parsedSyllabus?.length) {
-      const syllabusPayload = parsedSyllabus.map(topic => ({
-        exam_id: createdExam.id,
-        topic
-      }));
-      await supabase.from('exam_syllabus').insert(syllabusPayload);
-    }
+    // Insert syllabus in background (don't block response for it)
+    const syllabusPromise = parsedSyllabus?.length
+      ? supabase.from('exam_syllabus').insert(parsedSyllabus.map(topic => ({ exam_id: createdExam.id, topic })))
+      : Promise.resolve();
 
-    const createdSections = [];
-    
+    // Batch insert all sections at once
+    let createdSections = [];
     if (sections.length > 0) {
-      for (const section of sections) {
-        const { data: createdSection, error: sectionError } = await supabase
-          .from('exam_sections')
-          .insert({
-            exam_id: createdExam.id,
-            name: section.name,
-            name_hi: section.name_hi || null,
-            total_questions: section.total_questions,
-            marks_per_question: section.marks_per_question,
-            duration: section.duration || null,
-            section_order: section.section_order
-          })
-          .select()
-          .single();
+      const sectionInserts = sections.map((section, idx) => ({
+        exam_id: createdExam.id,
+        name: section.name,
+        name_hi: section.name_hi || null,
+        total_questions: section.total_questions,
+        marks_per_question: section.marks_per_question,
+        duration: section.duration || null,
+        section_order: section.section_order ?? (idx + 1)
+      }));
 
-        if (sectionError) {
-          logger.error('Bulk create section error:', sectionError);
-          continue;
-        }
+      const { data: batchSections, error: sectionError } = await supabase
+        .from('exam_sections')
+        .insert(sectionInserts)
+        .select();
 
-        createdSections.push(createdSection);
+      if (sectionError) {
+        logger.error('Bulk create sections error:', sectionError);
+      } else {
+        createdSections = batchSections || [];
+      }
 
-        if (section.questions && section.questions.length > 0) {
-          for (const question of section.questions) {
-            const { data: createdQuestion, error: questionError } = await supabase
-              .from('questions')
-              .insert({
-                exam_id: createdExam.id,
-                section_id: createdSection.id,
-                type: question.type,
-                text: question.text,
-                text_hi: question.text_hi || null,
-                marks: question.marks,
-                negative_marks: question.negative_marks,
-                explanation: question.explanation || null,
-                explanation_hi: question.explanation_hi || null,
-                difficulty: question.difficulty,
-                image_url: question.image_url || null,
-                question_order: question.question_order || null
-              })
-              .select()
-              .single();
+      // Chunked insert: questions then options (prevents Supabase row truncation)
+      if (createdSections.length > 0) {
+        const allQuestionInserts = [];
+        const questionSectionMap = [];
 
-            if (questionError) {
-              logger.error('Bulk create question error:', questionError);
-              continue;
-            }
+        // Build a name-based lookup so section order mismatches don't lose questions
+        const sectionByName = new Map();
+        createdSections.forEach(s => sectionByName.set(s.name, s));
 
-            if (question.options && question.options.length > 0) {
-              const optionsPayload = question.options.map(option => ({
-                question_id: createdQuestion.id,
-                option_text: option.option_text,
-                option_text_hi: option.option_text_hi || null,
-                is_correct: option.is_correct,
-                option_order: option.option_order,
-                image_url: option.image_url || null
-              }));
+        for (let i = 0; i < sections.length; i++) {
+          const section = sections[i];
+          const createdSection = createdSections[i] || sectionByName.get(section.name);
+          if (!createdSection || !section.questions?.length) continue;
 
-              const { error: optionsError } = await supabase
-                .from('question_options')
-                .insert(optionsPayload);
-
-              if (optionsError) {
-                logger.error('Bulk create options error:', optionsError);
-              }
-            }
+          for (let qIdx = 0; qIdx < section.questions.length; qIdx++) {
+            const question = section.questions[qIdx];
+            questionSectionMap.push({ question });
+            allQuestionInserts.push({
+              exam_id: createdExam.id,
+              section_id: createdSection.id,
+              type: question.type,
+              text: question.text,
+              text_hi: question.text_hi || null,
+              marks: question.marks,
+              negative_marks: question.negative_marks,
+              explanation: question.explanation || null,
+              explanation_hi: question.explanation_hi || null,
+              difficulty: question.difficulty,
+              image_url: question.image_url || null,
+              question_order: question.question_order || (qIdx + 1),
+              question_number: question.question_number || (qIdx + 1)
+            });
           }
         }
+
+        logger.info(`Bulk create: inserting ${allQuestionInserts.length} questions in chunks of ${QUESTION_BATCH_SIZE}`);
+
+        const createdQuestions = await batchInsert('questions', allQuestionInserts, 'id', QUESTION_BATCH_SIZE);
+
+        logger.info(`Bulk create: ${createdQuestions.length}/${allQuestionInserts.length} questions inserted`);
+
+        if (createdQuestions.length > 0) {
+          const allOptionInserts = [];
+          for (let qi = 0; qi < createdQuestions.length; qi++) {
+            const { question } = questionSectionMap[qi];
+            if (!question.options?.length) continue;
+            for (const option of question.options) {
+              allOptionInserts.push({
+                question_id: createdQuestions[qi].id,
+                option_text: option.option_text,
+                option_text_hi: option.option_text_hi || null,
+                is_correct: option.is_correct === true || option.is_correct === 'true',
+                option_order: option.option_order,
+                image_url: option.image_url || null
+              });
+            }
+          }
+
+          logger.info(`Bulk create: inserting ${allOptionInserts.length} options in chunks of ${OPTION_BATCH_SIZE}`);
+
+          await batchInsert('question_options', allOptionInserts, 'id', OPTION_BATCH_SIZE);
+        }
       }
+    }
+
+    await syllabusPromise;
+
+    // Verify actual inserted counts from DB
+    const { count: dbQuestionCount } = await supabase
+      .from('questions')
+      .select('id', { count: 'exact', head: true })
+      .eq('exam_id', createdExam.id);
+
+    const expectedQuestions = sections.reduce((sum, s) => sum + (s.questions?.length || 0), 0);
+
+    if (dbQuestionCount !== expectedQuestions) {
+      logger.error(`Bulk create verification FAILED: expected ${expectedQuestions} questions, DB has ${dbQuestionCount} for exam ${createdExam.id}`);
+    } else {
+      logger.info(`Bulk create verification OK: ${dbQuestionCount}/${expectedQuestions} questions for exam ${createdExam.id}`);
     }
 
     res.status(201).json({
@@ -1558,7 +1606,9 @@ const bulkCreateExamWithContent = async (req, res) => {
       message: 'Exam created successfully with all content',
       data: {
         exam: createdExam,
-        sections: createdSections
+        sections: createdSections,
+        questionCount: dbQuestionCount,
+        expectedQuestionCount: expectedQuestions
       }
     });
   } catch (error) {
@@ -1623,55 +1673,48 @@ const updateExamWithContent = async (req, res) => {
       return Number.isNaN(parsed) ? fallback : parsed;
     };
 
-    let logoUrl = existingExam.logo_url || null;
-    let thumbnailUrl = existingExam.thumbnail_url || null;
+    // Parallelize: file uploads + slug generation + category/subcategory lookups
+    const uploadPromises = [];
 
-    if (req.files) {
-      if (req.files.logo && req.files.logo[0]) {
-        if (existingExam.logo_url) {
-          const oldLogoKey = extractKeyFromUrl(existingExam.logo_url);
-          if (oldLogoKey) await deleteFile(oldLogoKey);
-        }
-        const logoResult = await uploadExamLogo(req.files.logo[0]);
-        logoUrl = logoResult.url;
+    if (req.files?.logo?.[0]) {
+      if (existingExam.logo_url) {
+        const oldLogoKey = extractKeyFromUrl(existingExam.logo_url);
+        if (oldLogoKey) deleteFile(oldLogoKey).catch(() => {});
       }
+      uploadPromises.push(uploadExamLogo(req.files.logo[0]));
+    } else {
+      uploadPromises.push(Promise.resolve(null));
+    }
 
-      if (req.files.thumbnail && req.files.thumbnail[0]) {
-        if (existingExam.thumbnail_url) {
-          const oldThumbKey = extractKeyFromUrl(existingExam.thumbnail_url);
-          if (oldThumbKey) await deleteFile(oldThumbKey);
-        }
-        const thumbnailResult = await uploadExamThumbnail(req.files.thumbnail[0]);
-        thumbnailUrl = thumbnailResult.url;
+    if (req.files?.thumbnail?.[0]) {
+      if (existingExam.thumbnail_url) {
+        const oldThumbKey = extractKeyFromUrl(existingExam.thumbnail_url);
+        if (oldThumbKey) deleteFile(oldThumbKey).catch(() => {});
       }
+      uploadPromises.push(uploadExamThumbnail(req.files.thumbnail[0]));
+    } else {
+      uploadPromises.push(Promise.resolve(null));
     }
 
     const baseSlug = slugify(examPayload.slug || examPayload.title || 'exam');
-    const examSlug = await ensureUniqueSlug(supabase, 'exams', baseSlug, { excludeId: id });
 
-    let categorySlug = examPayload.category || '';
-    let subcategorySlug = examPayload.subcategory || '';
+    const [logoResult, thumbnailResult, examSlug, catResult, subcatResult] = await Promise.all([
+      ...uploadPromises,
+      ensureUniqueSlug(supabase, 'exams', baseSlug, { excludeId: id }),
+      examPayload.category_id
+        ? supabase.from('exam_categories').select('slug').eq('id', examPayload.category_id).single()
+        : Promise.resolve({ data: null }),
+      examPayload.subcategory_id
+        ? supabase.from('exam_subcategories').select('slug').eq('id', examPayload.subcategory_id).single()
+        : Promise.resolve({ data: null })
+    ]);
 
-    if (examPayload.category_id) {
-      const { data: cat } = await supabase
-        .from('exam_categories')
-        .select('slug')
-        .eq('id', examPayload.category_id)
-        .single();
-      if (cat) categorySlug = cat.slug;
-    }
-
-    if (examPayload.subcategory_id) {
-      const { data: subcat } = await supabase
-        .from('exam_subcategories')
-        .select('slug')
-        .eq('id', examPayload.subcategory_id)
-        .single();
-      if (subcat) subcategorySlug = subcat.slug;
-    }
-
-    const combinedSlug = [categorySlug, subcategorySlug].filter(Boolean).join('-');
-    const urlPath = `/${combinedSlug}/${examSlug}`.replace(/\/+/g, '/');
+    const logoUrl = logoResult?.url || existingExam.logo_url || null;
+    const thumbnailUrl = thumbnailResult?.url || existingExam.thumbnail_url || null;
+    const categorySlug = catResult.data?.slug || examPayload.category || '';
+    const subcategorySlug = subcatResult.data?.slug || examPayload.subcategory || '';
+    const parentSlug = subcategorySlug || categorySlug;
+    const urlPath = parentSlug ? `/${parentSlug}/${examSlug}` : `/${examSlug}`;
 
     let parsedSyllabus = [];
     if (Array.isArray(examPayload.syllabus)) {
@@ -1714,6 +1757,7 @@ const updateExamWithContent = async (req, res) => {
       allow_anytime: allowAnytimeFlag,
       exam_type: examPayload.exam_type || 'mock_test',
       show_in_mock_tests: bool(examPayload.show_in_mock_tests),
+      is_premium: bool(examPayload.is_premium),
       supports_hindi: supportsHindi,
       logo_url: logoUrl,
       thumbnail_url: thumbnailUrl,
@@ -1722,12 +1766,14 @@ const updateExamWithContent = async (req, res) => {
       syllabus: parsedSyllabus
     };
 
-    const { data: updatedExam, error: updateError } = await supabase
-      .from('exams')
-      .update(updatePayload)
-      .eq('id', id)
-      .select()
-      .single();
+    // Parallelize: update exam + delete old content (syllabus, questions, options, sections)
+    const [examUpdateResult, , existingQuestionsResult] = await Promise.all([
+      supabase.from('exams').update(updatePayload).eq('id', id).select().single(),
+      supabase.from('exam_syllabus').delete().eq('exam_id', id),
+      supabase.from('questions').select('id').eq('exam_id', id)
+    ]);
+
+    const { data: updatedExam, error: updateError } = examUpdateResult;
 
     if (updateError) {
       logger.error('Update exam with content error:', updateError);
@@ -1737,115 +1783,133 @@ const updateExamWithContent = async (req, res) => {
       });
     }
 
-    const { error: deleteSyllabusError } = await supabase
-      .from('exam_syllabus')
-      .delete()
-      .eq('exam_id', id);
-
-    if (deleteSyllabusError) {
-      logger.error('Delete syllabus error:', deleteSyllabusError);
-    } else if (parsedSyllabus.length) {
-      const syllabusPayload = parsedSyllabus.map(topic => ({ exam_id: id, topic }));
-      const { error: insertSyllabusError } = await supabase
-        .from('exam_syllabus')
-        .insert(syllabusPayload);
-      if (insertSyllabusError) {
-        logger.error('Insert syllabus error:', insertSyllabusError);
-      }
-    }
-
-    const { data: existingQuestions } = await supabase
-      .from('questions')
-      .select('id')
-      .eq('exam_id', id);
+    // Parallelize: insert new syllabus + delete old options/questions/sections
+    const existingQuestions = existingQuestionsResult.data;
+    const deleteContentPromises = [];
 
     if (existingQuestions?.length) {
       const questionIds = existingQuestions.map(q => q.id);
-      await supabase
-        .from('question_options')
-        .delete()
-        .in('question_id', questionIds);
+      deleteContentPromises.push(
+        supabase.from('question_options').delete().in('question_id', questionIds)
+      );
     }
 
-    await supabase.from('questions').delete().eq('exam_id', id);
-    await supabase.from('exam_sections').delete().eq('exam_id', id);
+    if (parsedSyllabus.length) {
+      deleteContentPromises.push(
+        supabase.from('exam_syllabus').insert(parsedSyllabus.map(topic => ({ exam_id: id, topic })))
+      );
+    }
 
-    const createdSections = [];
+    await Promise.all(deleteContentPromises);
 
-    for (const section of sectionsPayload) {
-      const sectionInsert = {
+    // Now delete questions and sections (must be after options are deleted)
+    await Promise.all([
+      supabase.from('questions').delete().eq('exam_id', id),
+      supabase.from('exam_sections').delete().eq('exam_id', id)
+    ]);
+
+    // Batch insert all sections at once
+    let createdSections = [];
+
+    if (sectionsPayload.length > 0) {
+      const sectionInserts = sectionsPayload.map((section, idx) => ({
         exam_id: id,
         name: section.name || '',
         name_hi: section.name_hi || null,
         total_questions: numberOrNull(section.total_questions, section.questions?.length || 0),
         marks_per_question: numberOrNull(section.marks_per_question, 1),
         duration: numberOrNull(section.duration),
-        section_order: numberOrNull(section.section_order, createdSections.length + 1)
-      };
+        section_order: numberOrNull(section.section_order, idx + 1)
+      }));
 
-      const { data: createdSection, error: sectionError } = await supabase
+      const { data: batchSections, error: sectionError } = await supabase
         .from('exam_sections')
-        .insert(sectionInsert)
-        .select()
-        .single();
+        .insert(sectionInserts)
+        .select();
 
       if (sectionError) {
-        logger.error('Update exam section insert error:', sectionError);
-        continue;
+        logger.error('Update exam sections batch insert error:', sectionError);
+      } else {
+        createdSections = batchSections || [];
       }
 
-      createdSections.push(createdSection);
+      // Chunked insert: questions then options (prevents Supabase row truncation)
+      if (createdSections.length > 0) {
+        const allQuestionInserts = [];
+        const questionSectionMap = [];
 
-      if (!section.questions || section.questions.length === 0) {
-        continue;
-      }
+        // Build a name-based lookup so section order mismatches don't lose questions
+        const sectionByName = new Map();
+        createdSections.forEach(s => sectionByName.set(s.name, s));
 
-      for (const question of section.questions) {
-        const questionInsert = {
-          exam_id: id,
-          section_id: createdSection.id,
-          type: question.type,
-          text: question.text,
-          text_hi: question.text_hi || null,
-          marks: numberOrNull(question.marks, 0),
-          negative_marks: numberOrNull(question.negative_marks, 0),
-          explanation: question.explanation || null,
-          explanation_hi: question.explanation_hi || null,
-          difficulty: question.difficulty,
-          image_url: question.image_url || null,
-          question_order: question.question_order || null
-        };
+        for (let i = 0; i < sectionsPayload.length; i++) {
+          const section = sectionsPayload[i];
+          const createdSection = createdSections[i] || sectionByName.get(section.name);
+          if (!createdSection || !section.questions?.length) continue;
 
-        const { data: createdQuestion, error: questionError } = await supabase
-          .from('questions')
-          .insert(questionInsert)
-          .select()
-          .single();
-
-        if (questionError) {
-          logger.error('Update exam question insert error:', questionError);
-          continue;
-        }
-
-        if (question.options && question.options.length > 0) {
-          const optionsPayload = question.options.map(option => ({
-            question_id: createdQuestion.id,
-            option_text: option.option_text,
-            option_text_hi: option.option_text_hi || null,
-            is_correct: bool(option.is_correct),
-            option_order: numberOrNull(option.option_order),
-            image_url: option.image_url || null
-          }));
-
-          const { error: optionsError } = await supabase
-            .from('question_options')
-            .insert(optionsPayload);
-
-          if (optionsError) {
-            logger.error('Update exam option insert error:', optionsError);
+          for (let qIdx = 0; qIdx < section.questions.length; qIdx++) {
+            const question = section.questions[qIdx];
+            questionSectionMap.push({ question });
+            allQuestionInserts.push({
+              exam_id: id,
+              section_id: createdSection.id,
+              type: question.type,
+              text: question.text,
+              text_hi: question.text_hi || null,
+              marks: numberOrNull(question.marks, 0),
+              negative_marks: numberOrNull(question.negative_marks, 0),
+              explanation: question.explanation || null,
+              explanation_hi: question.explanation_hi || null,
+              difficulty: question.difficulty,
+              image_url: question.image_url || null,
+              question_order: question.question_order || (qIdx + 1),
+              question_number: question.question_number || (qIdx + 1)
+            });
           }
         }
+
+        logger.info(`Update exam: inserting ${allQuestionInserts.length} questions in chunks of ${QUESTION_BATCH_SIZE}`);
+
+        const createdQuestions = await batchInsert('questions', allQuestionInserts, 'id', QUESTION_BATCH_SIZE);
+
+        logger.info(`Update exam: ${createdQuestions.length}/${allQuestionInserts.length} questions inserted`);
+
+        if (createdQuestions.length > 0) {
+          const allOptionInserts = [];
+          for (let qi = 0; qi < createdQuestions.length; qi++) {
+            const { question } = questionSectionMap[qi];
+            if (!question.options?.length) continue;
+            for (const option of question.options) {
+              allOptionInserts.push({
+                question_id: createdQuestions[qi].id,
+                option_text: option.option_text,
+                option_text_hi: option.option_text_hi || null,
+                is_correct: bool(option.is_correct),
+                option_order: numberOrNull(option.option_order),
+                image_url: option.image_url || null
+              });
+            }
+          }
+
+          logger.info(`Update exam: inserting ${allOptionInserts.length} options in chunks of ${OPTION_BATCH_SIZE}`);
+
+          await batchInsert('question_options', allOptionInserts, 'id', OPTION_BATCH_SIZE);
+        }
       }
+    }
+
+    // Verify actual inserted counts from DB
+    const { count: dbQuestionCount } = await supabase
+      .from('questions')
+      .select('id', { count: 'exact', head: true })
+      .eq('exam_id', id);
+
+    const expectedQuestions = sectionsPayload.reduce((sum, s) => sum + (s.questions?.length || 0), 0);
+
+    if (dbQuestionCount !== expectedQuestions) {
+      logger.error(`Update exam verification FAILED: expected ${expectedQuestions} questions, DB has ${dbQuestionCount} for exam ${id}`);
+    } else {
+      logger.info(`Update exam verification OK: ${dbQuestionCount}/${expectedQuestions} questions for exam ${id}`);
     }
 
     res.json({
@@ -1853,7 +1917,9 @@ const updateExamWithContent = async (req, res) => {
       message: 'Exam updated successfully with all content',
       data: {
         exam: updatedExam,
-        sections: createdSections
+        sections: createdSections,
+        questionCount: dbQuestionCount,
+        expectedQuestionCount: expectedQuestions
       }
     });
   } catch (error) {

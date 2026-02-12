@@ -360,9 +360,7 @@ const createSubcategory = async (req, res) => {
     }
 
     const normalizedSlug = slugify(slug || name);
-    const uniqueSlug = await ensureUniqueSlug(supabase, 'exam_subcategories', normalizedSlug, {
-      filters: { category_id }
-    });
+    const uniqueSlug = await ensureUniqueSlug(supabase, 'exam_subcategories', normalizedSlug);
 
     let logo_url = null;
     if (logoFile) {
@@ -420,8 +418,7 @@ const updateSubcategory = async (req, res) => {
 
     let normalizedSlug = slug ? slugify(slug) : slugify(name);
     normalizedSlug = await ensureUniqueSlug(supabase, 'exam_subcategories', normalizedSlug, {
-      excludeId: id,
-      filters: { category_id: existingSubcategory.category_id }
+      excludeId: id
     });
 
     const updateData = {
@@ -670,7 +667,6 @@ const getExamsByCategory = async (req, res) => {
       .select(`
         id,
         title,
-        description,
         duration,
         total_marks,
         total_questions,
@@ -679,7 +675,6 @@ const getExamsByCategory = async (req, res) => {
         start_date,
         end_date,
         is_free,
-        price,
         logo_url,
         thumbnail_url,
         slug,
@@ -702,7 +697,7 @@ const getExamsByCategory = async (req, res) => {
     }
 
     if (search) {
-      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
+      query = query.ilike('title', `%${search}%`);
     }
 
     const { data: exams, error, count } = await query;
@@ -801,7 +796,6 @@ const getExamsBySubcategory = async (req, res) => {
       .select(`
         id,
         title,
-        description,
         duration,
         total_marks,
         total_questions,
@@ -810,7 +804,6 @@ const getExamsBySubcategory = async (req, res) => {
         start_date,
         end_date,
         is_free,
-        price,
         logo_url,
         thumbnail_url,
         slug,
@@ -834,7 +827,7 @@ const getExamsBySubcategory = async (req, res) => {
     }
 
     if (search) {
-      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
+      query = query.ilike('title', `%${search}%`);
     }
 
     const { data: exams, error, count } = await query;
@@ -886,6 +879,122 @@ const reorderSubcategories = async (req, res) => {
   } catch (error) {
     logger.error('Reorder subcategories error:', error);
     res.status(500).json({ success: false, message: 'Server error while reordering subcategories' });
+  }
+};
+
+const getSubcategoryByOwnSlug = async (req, res) => {
+  try {
+    const { slug } = req.params;
+
+    const { data: subcategories, error } = await supabase
+      .from('exam_subcategories')
+      .select('id, name, slug, description, category_id, logo_url, display_order, is_active, created_at, updated_at')
+      .eq('slug', slug)
+      .or('is_active.eq.true,is_active.is.null');
+
+    const subcategory = subcategories?.[0];
+    if (error || !subcategory) {
+      return res.status(404).json({ success: false, message: 'Subcategory not found' });
+    }
+
+    let category = null;
+    if (subcategory.category_id) {
+      const { data: categoryData } = await supabase
+        .from('exam_categories')
+        .select('id, name, slug')
+        .eq('id', subcategory.category_id)
+        .single();
+      if (categoryData) {
+        category = categoryData;
+      }
+    }
+
+    res.json({ success: true, data: { ...subcategory, category } });
+  } catch (error) {
+    logger.error('Get subcategory by own slug error:', error);
+    res.status(500).json({ success: false, message: 'Server error while fetching subcategory' });
+  }
+};
+
+const getExamsBySubcategorySlug = async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const { page = 1, limit = 12, difficulty, search, exam_type } = req.query;
+    const pageNumber = Number.parseInt(page, 10) || 1;
+    const limitNumber = Math.min(Number.parseInt(limit, 10) || 12, 100);
+
+    const { data: subcategories } = await supabase
+      .from('exam_subcategories')
+      .select('id')
+      .eq('slug', slug)
+      .or('is_active.eq.true,is_active.is.null');
+
+    const subcategory = subcategories?.[0];
+    if (!subcategory) {
+      return res.json({ success: true, data: [], pagination: { page: pageNumber, limit: limitNumber, total: 0, totalPages: 0 } });
+    }
+
+    const offset = (pageNumber - 1) * limitNumber;
+
+    let query = supabase
+      .from('exams')
+      .select(`
+        id,
+        title,
+        duration,
+        total_marks,
+        total_questions,
+        difficulty,
+        status,
+        start_date,
+        end_date,
+        is_free,
+        logo_url,
+        thumbnail_url,
+        slug,
+        url_path,
+        exam_type,
+        subcategory,
+        supports_hindi
+      `, { count: 'exact' })
+      .eq('subcategory_id', subcategory.id)
+      .eq('is_published', true)
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limitNumber - 1);
+
+    if (difficulty) {
+      query = query.eq('difficulty', difficulty);
+    }
+
+    if (exam_type) {
+      query = query.eq('exam_type', exam_type);
+    }
+
+    if (search) {
+      query = query.ilike('title', `%${search}%`);
+    }
+
+    const { data: exams, error, count } = await query;
+
+    if (error) {
+      logger.error('Get exams by subcategory slug error:', error);
+      return res.status(500).json({ success: false, message: 'Failed to fetch exams' });
+    }
+
+    res.json({
+      success: true,
+      data: exams || [],
+      pagination: {
+        page: pageNumber,
+        limit: limitNumber,
+        total: count || exams?.length || 0,
+        totalPages: count ? Math.ceil(count / limitNumber) : 1
+      }
+    });
+  } catch (error) {
+    logger.error('Get exams by subcategory slug error:', error);
+    res.status(500).json({ success: false, message: 'Server error while fetching exams' });
   }
 };
 
@@ -947,8 +1056,10 @@ module.exports = {
   getCategoryById,
   getCategoryBySlug,
   getSubcategoryById,
+  getSubcategoryByOwnSlug,
   getExamsByCategory,
   getSubcategoryBySlug,
   getExamsBySubcategory,
+  getExamsBySubcategorySlug,
   resolveCombinedSlug
 };

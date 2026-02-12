@@ -35,6 +35,7 @@ const contactRoutes = require('./routes/contactRoutes');
 const aboutRoutes = require('./routes/aboutRoutes');
 const privacyRoutes = require('./routes/privacyRoutes');
 const disclaimerRoutes = require('./routes/disclaimerRoutes');
+const initRoutes = require('./routes/initRoutes');
 
 const app = express();
 
@@ -69,8 +70,8 @@ app.use(cors({
 
 app.use(compression());
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 app.use(passport.initialize());
 
@@ -135,6 +136,7 @@ app.use(`/api/${API_VERSION}/privacy`, privacyRoutes);
 app.use(`/api/${API_VERSION}/disclaimer`, disclaimerRoutes);
 app.use(`/api/${API_VERSION}/admin`, adminRoutes);
 app.use(`/api/${API_VERSION}/subscriptions`, subscriptionRoutes);
+app.use(`/api/${API_VERSION}/init`, initRoutes);
 
 const GRAPHQL_PATH = process.env.GRAPHQL_PATH || '/api/graphql';
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_FILE_SIZE, 10) || 5242880; // 5MB default

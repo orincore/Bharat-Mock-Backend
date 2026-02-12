@@ -22,6 +22,10 @@ router.get('/category/:slug/exams', taxonomyController.getExamsByCategory);
 router.get('/category/:categorySlug/subcategory/:subcategorySlug', taxonomyController.getSubcategoryBySlug);
 router.get('/category/:categorySlug/subcategory/:subcategorySlug/exams', taxonomyController.getExamsBySubcategory);
 
+// Direct subcategory slug routes (independent of category)
+router.get('/subcategory/:slug', taxonomyController.getSubcategoryByOwnSlug);
+router.get('/subcategory/:slug/exams', taxonomyController.getExamsBySubcategorySlug);
+
 // Combined slug resolution (e.g. "ssc-test-test-ssc" → category "ssc-test" + subcategory "test-ssc")
 router.get('/resolve/:combinedSlug', taxonomyController.resolveCombinedSlug);
 

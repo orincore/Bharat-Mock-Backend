@@ -5,6 +5,7 @@ const { requireAdmin } = require('../middleware/adminAuth');
 const { upload } = require('../utils/fileUpload');
 const homepageController = require('../controllers/homepageController');
 
+router.get('/data', homepageController.getHomepageData);
 router.get('/hero/:slug?', homepageController.getHero);
 router.put('/hero', authenticate, requireAdmin, homepageController.upsertHero);
 router.post(

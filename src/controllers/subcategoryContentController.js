@@ -818,7 +818,7 @@ const getQuestionPapers = async (req, res) => {
       .from('subcategory_question_papers')
       .select(`
         *,
-        exam:exams(id, title, slug, url_path, description, total_questions, duration, total_marks, difficulty, is_free, price, logo_url, thumbnail_url, supports_hindi)
+        exam:exams(id, title, slug, url_path, total_questions, duration, total_marks, difficulty, is_free, logo_url, thumbnail_url, supports_hindi)
       `, { count: 'exact' })
       .eq('subcategory_id', subcategoryId)
       .order('year', { ascending: false })

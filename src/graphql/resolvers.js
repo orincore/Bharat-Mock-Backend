@@ -428,6 +428,7 @@ const resolvers = {
           supports_hindi,
           exam_type,
           show_in_mock_tests,
+          is_premium,
           slug,
           url_path,
           created_at,
@@ -488,6 +489,7 @@ const resolvers = {
           supports_hindi,
           exam_type,
           show_in_mock_tests,
+          is_premium,
           slug,
           url_path,
           created_at,
@@ -561,8 +563,8 @@ const resolvers = {
       const examSlug = await ensureUniqueSlug(supabase, 'exams', baseSlug);
       const categorySlug = input.category_id ? await fetchCategorySlug(input.category_id) : (input.category || '');
       const subcategorySlug = input.subcategory_id ? await fetchSubcategorySlug(input.subcategory_id) : (input.subcategory || '');
-      const combinedSlug = [categorySlug, subcategorySlug].filter(Boolean).join('-');
-      const urlPath = `/${combinedSlug}/${examSlug}`.replace(/\/+\/+/g, '/');
+      const parentSlug = subcategorySlug || categorySlug;
+      const urlPath = parentSlug ? `/${parentSlug}/${examSlug}` : `/${examSlug}`;
       const allowAnytimeFlag = bool(input.allow_anytime);
       const normalizedStatus = allowAnytimeFlag ? 'anytime' : (input.status || 'upcoming');
       const normalizedStartDate = allowAnytimeFlag ? null : (input.start_date || null);
@@ -592,6 +594,7 @@ const resolvers = {
         allow_anytime: allowAnytimeFlag,
         exam_type: input.exam_type || 'mock_test',
         show_in_mock_tests: bool(input.show_in_mock_tests),
+        is_premium: bool(input.is_premium),
         supports_hindi: supportsHindi,
         logo_url: logoUrl,
         thumbnail_url: thumbnailUrl,
@@ -658,8 +661,8 @@ const resolvers = {
       const examSlug = await ensureUniqueSlug(supabase, 'exams', baseSlug, { excludeId: id });
       const categorySlug = input.category_id ? await fetchCategorySlug(input.category_id) : (input.category || '');
       const subcategorySlug = input.subcategory_id ? await fetchSubcategorySlug(input.subcategory_id) : (input.subcategory || '');
-      const combinedSlug = [categorySlug, subcategorySlug].filter(Boolean).join('-');
-      const urlPath = `/${combinedSlug}/${examSlug}`.replace(/\/+\/+/g, '/');
+      const parentSlug = subcategorySlug || categorySlug;
+      const urlPath = parentSlug ? `/${parentSlug}/${examSlug}` : `/${examSlug}`;
       const allowAnytimeFlag = bool(input.allow_anytime);
       const normalizedStatus = allowAnytimeFlag ? 'anytime' : (input.status || 'upcoming');
       const normalizedStartDate = allowAnytimeFlag ? null : (input.start_date || null);
@@ -683,13 +686,14 @@ const resolvers = {
         end_date: normalizedEndDate,
         pass_percentage: numberOrNull(input.pass_percentage, 0),
         is_free: bool(input.is_free, true),
-        price: numberOrNull(input.price, 0),
+        
         negative_marking: bool(input.negative_marking),
         negative_mark_value: numberOrNull(input.negative_mark_value, 0),
         is_published: bool(input.is_published),
         allow_anytime: allowAnytimeFlag,
         exam_type: input.exam_type || 'mock_test',
         show_in_mock_tests: bool(input.show_in_mock_tests),
+        is_premium: bool(input.is_premium),
         supports_hindi: supportsHindi,
         logo_url: logoUrl,
         thumbnail_url: thumbnailUrl,

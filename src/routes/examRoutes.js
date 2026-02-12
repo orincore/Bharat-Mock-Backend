@@ -9,6 +9,11 @@ router.get('/', optionalAuth, examController.getExams);
 
 router.get('/categories', examController.getExamCategories);
 
+router.get('/path/:parentSlug/:examSlug',
+  optionalAuth,
+  examController.getExamByShortPath
+);
+
 router.get('/path/:category/:subcategory/:examSlug',
   optionalAuth,
   examController.getExamByPath

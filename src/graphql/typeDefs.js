@@ -34,6 +34,7 @@ input ExamInput {
   allow_anytime: Boolean
   exam_type: String
   show_in_mock_tests: Boolean
+  is_premium: Boolean
   slug: String
   syllabus: [String!]
 }
@@ -105,6 +106,7 @@ type Exam {
   allow_anytime: Boolean
   exam_type: String
   show_in_mock_tests: Boolean
+  is_premium: Boolean
   supports_hindi: Boolean
   logo_url: String
   thumbnail_url: String

@@ -182,8 +182,94 @@ const uploadHeroMedia = async (req, res) => {
   }
 };
 
+const getHomepageData = async (req, res) => {
+  try {
+    const [heroResult, categoriesResult, examsResult, blogsResult] = await Promise.all([
+      supabase
+        .from('homepage_hero')
+        .select('*')
+        .eq('slug', DEFAULT_SLUG)
+        .maybeSingle(),
+      supabase
+        .from('exam_categories')
+        .select('id, name, slug, description, logo_url, display_order, is_active')
+        .or('is_active.eq.true,is_active.is.null')
+        .order('display_order', { ascending: true }),
+      supabase
+        .from('exams')
+        .select('id, title, duration, total_marks, total_questions, category, category_id, subcategory, subcategory_id, difficulty, status, start_date, end_date, pass_percentage, is_free, image_url, logo_url, thumbnail_url, negative_marking, negative_mark_value, allow_anytime, slug, url_path, exam_type, show_in_mock_tests')
+        .eq('is_published', true)
+        .is('deleted_at', null)
+        .or('status.eq.ongoing,status.eq.anytime,allow_anytime.eq.true')
+        .limit(4),
+      supabase
+        .from('blogs')
+        .select('id, title, slug, excerpt, featured_image_url, category, tags, author_id, is_published, is_featured, published_at, created_at, view_count, read_time')
+        .eq('is_published', true)
+        .order('published_at', { ascending: false })
+        .limit(10)
+    ]);
+
+    let featuredArticles = blogsResult.data || [];
+
+    if ((!featuredArticles || featuredArticles.length === 0) && blogsResult.error) {
+      logger.warn('Homepage blogs fetch failed, falling back to legacy articles table', blogsResult.error);
+    }
+
+    if (!featuredArticles || featuredArticles.length === 0) {
+      const { data: articleFallback } = await supabase
+        .from('articles')
+        .select('id, title, slug, excerpt, featured_image, category, tags, author_name, author_avatar, is_published, published_at, created_at, views, read_time')
+        .eq('is_published', true)
+        .order('published_at', { ascending: false })
+        .limit(10);
+      featuredArticles = articleFallback || [];
+    }
+
+    const categories = categoriesResult.data || [];
+    const categoryIds = categories.map(c => c.id);
+
+    let subcategoriesByCategory = {};
+    if (categoryIds.length > 0) {
+      const { data: allSubcategories } = await supabase
+        .from('exam_subcategories')
+        .select('id, name, slug, description, category_id, logo_url, display_order, is_active')
+        .in('category_id', categoryIds)
+        .or('is_active.eq.true,is_active.is.null')
+        .order('display_order', { ascending: true });
+
+      if (allSubcategories) {
+        for (const sub of allSubcategories) {
+          if (!sub.name || !sub.slug) continue;
+          if (!subcategoriesByCategory[sub.category_id]) {
+            subcategoriesByCategory[sub.category_id] = [];
+          }
+          subcategoriesByCategory[sub.category_id].push(sub);
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        hero: heroResult.data || null,
+        categories: categories.map(cat => ({
+          ...cat,
+          subcategories: subcategoriesByCategory[cat.id] || []
+        })),
+        featuredExams: examsResult.data || [],
+        featuredArticles
+      }
+    });
+  } catch (error) {
+    logger.error('Get homepage data error:', error);
+    return res.status(500).json(formatError('Failed to fetch homepage data'));
+  }
+};
+
 module.exports = {
   getHero,
+  getHomepageData,
   upsertHero,
   uploadHeroMedia,
 };
