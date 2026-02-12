@@ -16,4 +16,17 @@ router.post(
   homepageController.uploadHeroMedia
 );
 
+router.get('/banners', homepageController.getBanners);
+router.post('/banners', authenticate, requireAdmin, homepageController.createBanner);
+router.put('/banners/:id', authenticate, requireAdmin, homepageController.updateBanner);
+router.delete('/banners/:id', authenticate, requireAdmin, homepageController.deleteBanner);
+router.post('/banners/reorder', authenticate, requireAdmin, homepageController.reorderBanners);
+router.post(
+  '/banners/upload',
+  authenticate,
+  requireAdmin,
+  upload.single('file'),
+  homepageController.uploadBannerImage
+);
+
 module.exports = router;

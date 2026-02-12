@@ -182,9 +182,30 @@ const uploadHeroMedia = async (req, res) => {
   }
 };
 
+const fetchBanners = async (onlyActive = true) => {
+  let query = supabase
+    .from('homepage_banners')
+    .select('*')
+    .order('display_order', { ascending: true })
+    .order('created_at', { ascending: true });
+
+  if (onlyActive) {
+    query = query.eq('is_active', true);
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    logger.error('Fetch homepage banners error:', error);
+    return [];
+  }
+
+  return data || [];
+};
+
 const getHomepageData = async (req, res) => {
   try {
-    const [heroResult, categoriesResult, examsResult, blogsResult] = await Promise.all([
+    const [heroResult, categoriesResult, examsResult, blogsResult, banners] = await Promise.all([
       supabase
         .from('homepage_hero')
         .select('*')
@@ -207,7 +228,8 @@ const getHomepageData = async (req, res) => {
         .select('id, title, slug, excerpt, featured_image_url, category, tags, author_id, is_published, is_featured, published_at, created_at, view_count, read_time')
         .eq('is_published', true)
         .order('published_at', { ascending: false })
-        .limit(10)
+        .limit(10),
+      fetchBanners(true),
     ]);
 
     let featuredArticles = blogsResult.data || [];
@@ -253,6 +275,7 @@ const getHomepageData = async (req, res) => {
       success: true,
       data: {
         hero: heroResult.data || null,
+        banners,
         categories: categories.map(cat => ({
           ...cat,
           subcategories: subcategoriesByCategory[cat.id] || []
@@ -267,9 +290,194 @@ const getHomepageData = async (req, res) => {
   }
 };
 
+const getBanners = async (req, res) => {
+  try {
+    const includeInactive = req.query.include_inactive === 'true';
+    const banners = await fetchBanners(!includeInactive);
+    return res.json({ success: true, data: banners });
+  } catch (error) {
+    logger.error('Get banners error:', error);
+    return res.status(500).json(formatError('Failed to fetch homepage banners'));
+  }
+};
+
+const createBanner = async (req, res) => {
+  try {
+    const {
+      title,
+      subtitle,
+      image_url,
+      link_url,
+      button_text,
+      display_order,
+      is_active = true,
+    } = req.body;
+
+    if (!title || !image_url) {
+      return res.status(400).json(formatError('Title and image URL are required'));
+    }
+
+    let orderValue = Number(display_order);
+    if (!Number.isFinite(orderValue)) {
+      const { count } = await supabase
+        .from('homepage_banners')
+        .select('*', { count: 'exact', head: true });
+      orderValue = (count || 0);
+    }
+
+    const payload = {
+      title,
+      subtitle: subtitle || null,
+      image_url,
+      link_url: link_url || null,
+      button_text: button_text || null,
+      display_order: orderValue,
+      is_active: Boolean(is_active),
+    };
+
+    const { data, error } = await supabase
+      .from('homepage_banners')
+      .insert(payload)
+      .select('*')
+      .single();
+
+    if (error) {
+      logger.error('Create banner error:', error);
+      return res.status(500).json(formatError('Failed to create banner'));
+    }
+
+    return res.json({ success: true, data });
+  } catch (error) {
+    logger.error('Create banner exception:', error);
+    return res.status(500).json(formatError('Server error while creating banner'));
+  }
+};
+
+const updateBanner = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json(formatError('Banner ID is required'));
+    }
+
+    const payload = sanitizePayload({
+      title: req.body.title,
+      subtitle: req.body.subtitle,
+      image_url: req.body.image_url,
+      link_url: req.body.link_url,
+      button_text: req.body.button_text,
+      display_order: Number.isFinite(Number(req.body.display_order)) ? Number(req.body.display_order) : undefined,
+      is_active: typeof req.body.is_active === 'boolean' ? req.body.is_active : undefined,
+    });
+
+    if (!Object.keys(payload).length) {
+      return res.status(400).json(formatError('No fields to update'));
+    }
+
+    const { data, error } = await supabase
+      .from('homepage_banners')
+      .update(payload)
+      .eq('id', id)
+      .select('*')
+      .maybeSingle();
+
+    if (error || !data) {
+      logger.error('Update banner error:', error);
+      return res.status(404).json(formatError('Banner not found or failed to update'));
+    }
+
+    return res.json({ success: true, data });
+  } catch (error) {
+    logger.error('Update banner exception:', error);
+    return res.status(500).json(formatError('Server error while updating banner'));
+  }
+};
+
+const deleteBanner = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json(formatError('Banner ID is required'));
+    }
+
+    const { error } = await supabase
+      .from('homepage_banners')
+      .delete()
+      .eq('id', id);
+
+    if (error) {
+      logger.error('Delete banner error:', error);
+      return res.status(500).json(formatError('Failed to delete banner'));
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    logger.error('Delete banner exception:', error);
+    return res.status(500).json(formatError('Server error while deleting banner'));
+  }
+};
+
+const reorderBanners = async (req, res) => {
+  try {
+    const { order } = req.body;
+    if (!Array.isArray(order) || order.length === 0) {
+      return res.status(400).json(formatError('Order array is required'));
+    }
+
+    const updates = order.map((id, index) =>
+      supabase
+        .from('homepage_banners')
+        .update({ display_order: index })
+        .eq('id', id)
+    );
+
+    await Promise.all(updates);
+
+    return res.json({ success: true });
+  } catch (error) {
+    logger.error('Reorder banners error:', error);
+    return res.status(500).json(formatError('Failed to reorder banners'));
+  }
+};
+
+const uploadBannerImage = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json(formatError('Image file is required'));
+    }
+
+    const folder = 'homepage/banners';
+    const uploadResult = await uploadToR2(req.file, folder);
+
+    if (!uploadResult?.url) {
+      return res.status(500).json(formatError('Failed to upload banner image'));
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        url: uploadResult.url,
+        key: uploadResult.key,
+        mime_type: req.file.mimetype,
+        size: req.file.size,
+        original_name: req.file.originalname,
+      },
+    });
+  } catch (error) {
+    logger.error('Upload banner image error:', error);
+    return res.status(500).json(formatError('Server error while uploading banner image'));
+  }
+};
+
 module.exports = {
   getHero,
   getHomepageData,
   upsertHero,
   uploadHeroMedia,
+  getBanners,
+  createBanner,
+  updateBanner,
+  deleteBanner,
+  reorderBanners,
+  uploadBannerImage,
 };
