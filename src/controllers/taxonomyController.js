@@ -810,7 +810,8 @@ const getExamsBySubcategory = async (req, res) => {
         url_path,
         exam_type,
         subcategory,
-        supports_hindi
+        supports_hindi,
+        show_in_mock_tests
       `, { count: 'exact' })
       .eq('subcategory_id', subcategory.id)
       .eq('is_published', true)
@@ -955,7 +956,8 @@ const getExamsBySubcategorySlug = async (req, res) => {
         url_path,
         exam_type,
         subcategory,
-        supports_hindi
+        supports_hindi,
+        show_in_mock_tests
       `, { count: 'exact' })
       .eq('subcategory_id', subcategory.id)
       .eq('is_published', true)

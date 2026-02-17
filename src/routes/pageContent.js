@@ -23,6 +23,13 @@ router.put('/:subcategoryId/custom-tabs/:tabId', authenticate, requireAdmin, pag
 router.delete('/:subcategoryId/custom-tabs/:tabId', authenticate, requireAdmin, pageContentController.deleteCustomTab);
 router.post('/:subcategoryId/custom-tabs/reorder', authenticate, requireAdmin, pageContentController.reorderCustomTabs);
 
+router.get('/:subcategoryId/tab-config', pageContentController.getTabConfig);
+router.post('/:subcategoryId/tab-config', authenticate, requireAdmin, pageContentController.createTabConfig);
+router.put('/:subcategoryId/tab-config/:tabConfigId', authenticate, requireAdmin, pageContentController.updateTabConfig);
+router.delete('/:subcategoryId/tab-config/:tabConfigId', authenticate, requireAdmin, pageContentController.deleteTabConfig);
+router.post('/:subcategoryId/tab-config/reorder', authenticate, requireAdmin, pageContentController.reorderTabConfig);
+router.post('/:subcategoryId/tab-config/initialize', authenticate, requireAdmin, pageContentController.initializeDefaultTabs);
+
 router.post('/:subcategoryId/media', authenticate, requireAdmin, upload.single('file'), pageContentController.uploadMedia);
 router.get('/:subcategoryId/media', pageContentController.getMedia);
 

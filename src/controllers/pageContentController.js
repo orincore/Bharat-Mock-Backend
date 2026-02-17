@@ -20,6 +20,20 @@ const pageContentController = {
       const { subcategoryId } = req.params;
       debugLog('[pageContentController.getPageContent]', { subcategoryId, userId: req.user?.id, adminRole: req.adminRole });
 
+      const { data: tabConfig, error: tabConfigError } = await supabase
+        .from('subcategory_tab_config')
+        .select(`
+          *,
+          custom_tab:subcategory_custom_tabs(id, title, description, tab_key)
+        `)
+        .eq('subcategory_id', subcategoryId)
+        .eq('is_active', true)
+        .order('display_order', { ascending: true });
+
+      if (tabConfigError) {
+        return buildErrorResponse(res, 'Failed to fetch tab configuration', tabConfigError);
+      }
+
       const { data: customTabs, error: tabsError } = await supabase
         .from('subcategory_custom_tabs')
         .select('*')
@@ -76,7 +90,8 @@ const pageContentController = {
         sections: groupedBlocks,
         orphanBlocks,
         seo: seo || null,
-        customTabs: customTabs || []
+        customTabs: customTabs || [],
+        tabConfig: tabConfig || []
       });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch page content', error);
@@ -1057,6 +1072,240 @@ const pageContentController = {
       res.json({ success: true });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to reorder custom tabs', error);
+    }
+  },
+
+  getTabConfig: async (req, res) => {
+    try {
+      const { subcategoryId } = req.params;
+
+      const { data, error } = await supabase
+        .from('subcategory_tab_config')
+        .select(`
+          *,
+          custom_tab:subcategory_custom_tabs(id, title, description, tab_key)
+        `)
+        .eq('subcategory_id', subcategoryId)
+        .eq('is_active', true)
+        .order('display_order', { ascending: true });
+
+      if (error) {
+        return buildErrorResponse(res, 'Failed to fetch tab configuration', error);
+      }
+
+      res.json({ success: true, data: data || [] });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to fetch tab configuration', error);
+    }
+  },
+
+  initializeDefaultTabs: async (req, res) => {
+    try {
+      const { subcategoryId } = req.params;
+
+      const { data: existing } = await supabase
+        .from('subcategory_tab_config')
+        .select('id')
+        .eq('subcategory_id', subcategoryId)
+        .limit(1);
+
+      if (existing && existing.length > 0) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'Tab configuration already exists for this subcategory' 
+        });
+      }
+
+      const defaultTabs = [
+        {
+          subcategory_id: subcategoryId,
+          tab_type: 'overview',
+          tab_label: 'Overview',
+          tab_key: 'overview',
+          display_order: 0,
+          is_active: true,
+          created_by: req.user?.id || null,
+          updated_by: req.user?.id || null
+        },
+        {
+          subcategory_id: subcategoryId,
+          tab_type: 'mock-tests',
+          tab_label: 'Mock Tests',
+          tab_key: 'mock-tests',
+          display_order: 1,
+          is_active: true,
+          created_by: req.user?.id || null,
+          updated_by: req.user?.id || null
+        },
+        {
+          subcategory_id: subcategoryId,
+          tab_type: 'question-papers',
+          tab_label: 'Previous Papers',
+          tab_key: 'question-papers',
+          display_order: 2,
+          is_active: true,
+          created_by: req.user?.id || null,
+          updated_by: req.user?.id || null
+        }
+      ];
+
+      const { data, error } = await supabase
+        .from('subcategory_tab_config')
+        .insert(defaultTabs)
+        .select('*');
+
+      if (error) {
+        return buildErrorResponse(res, 'Failed to initialize default tabs', error);
+      }
+
+      res.status(201).json({ success: true, data });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to initialize default tabs', error);
+    }
+  },
+
+  createTabConfig: async (req, res) => {
+    try {
+      const { subcategoryId } = req.params;
+      const { tab_type, tab_label, tab_key, custom_tab_id, display_order, is_active } = req.body || {};
+
+      if (!tab_type || !tab_label) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'tab_type and tab_label are required' 
+        });
+      }
+
+      if (tab_type === 'custom' && !custom_tab_id) {
+        return res.status(400).json({ 
+          success: false, 
+          message: 'custom_tab_id is required for custom tab type' 
+        });
+      }
+
+      const normalizedKey = tab_key || slugify(tab_label);
+
+      const { data: orderRow } = await supabase
+        .from('subcategory_tab_config')
+        .select('display_order')
+        .eq('subcategory_id', subcategoryId)
+        .order('display_order', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const nextOrder = typeof display_order === 'number'
+        ? display_order
+        : ((orderRow?.display_order ?? -1) + 1);
+
+      const { data, error } = await supabase
+        .from('subcategory_tab_config')
+        .insert([
+          {
+            subcategory_id: subcategoryId,
+            tab_type,
+            tab_label,
+            tab_key: normalizedKey,
+            custom_tab_id: custom_tab_id || null,
+            display_order: nextOrder,
+            is_active: is_active !== false,
+            created_by: req.user?.id || null,
+            updated_by: req.user?.id || null
+          }
+        ])
+        .select('*')
+        .single();
+
+      if (error) {
+        return buildErrorResponse(res, 'Failed to create tab configuration', error);
+      }
+
+      res.status(201).json({ success: true, data });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to create tab configuration', error);
+    }
+  },
+
+  updateTabConfig: async (req, res) => {
+    try {
+      const { tabConfigId } = req.params;
+      const { tab_label, tab_key, display_order, is_active } = req.body || {};
+
+      const updates = {
+        tab_label: tab_label ?? undefined,
+        tab_key: tab_key ?? undefined,
+        display_order: display_order ?? undefined,
+        is_active: typeof is_active === 'boolean' ? is_active : undefined,
+        updated_by: req.user?.id || null
+      };
+
+      const { data, error } = await supabase
+        .from('subcategory_tab_config')
+        .update(updates)
+        .eq('id', tabConfigId)
+        .select('*')
+        .single();
+
+      if (error) {
+        if (error.code === 'PGRST116') {
+          return res.status(404).json({ success: false, message: 'Tab configuration not found' });
+        }
+        return buildErrorResponse(res, 'Failed to update tab configuration', error);
+      }
+
+      res.json({ success: true, data });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to update tab configuration', error);
+    }
+  },
+
+  deleteTabConfig: async (req, res) => {
+    try {
+      const { subcategoryId, tabConfigId } = req.params;
+
+      const { error } = await supabase
+        .from('subcategory_tab_config')
+        .delete()
+        .eq('id', tabConfigId)
+        .eq('subcategory_id', subcategoryId);
+
+      if (error) {
+        if (error.code === 'PGRST116') {
+          return res.status(404).json({ success: false, message: 'Tab configuration not found' });
+        }
+        return buildErrorResponse(res, 'Failed to delete tab configuration', error);
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to delete tab configuration', error);
+    }
+  },
+
+  reorderTabConfig: async (req, res) => {
+    try {
+      const { subcategoryId } = req.params;
+      const { tabConfigIds } = req.body || {};
+
+      if (!Array.isArray(tabConfigIds)) {
+        return res.status(400).json({ success: false, message: 'tabConfigIds array is required' });
+      }
+
+      for (let index = 0; index < tabConfigIds.length; index += 1) {
+        const tabConfigId = tabConfigIds[index];
+        const { error } = await supabase
+          .from('subcategory_tab_config')
+          .update({ display_order: index, updated_by: req.user?.id || null })
+          .eq('id', tabConfigId)
+          .eq('subcategory_id', subcategoryId);
+
+        if (error) {
+          throw error;
+        }
+      }
+
+      res.json({ success: true });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to reorder tab configuration', error);
     }
   }
 };

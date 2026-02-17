@@ -9,12 +9,13 @@ const buildExamCacheKey = (params) => {
     limit = 10,
     search = '',
     category = '',
+    subcategory = '',
     status = '',
     difficulty = '',
     exam_type = '',
     is_premium = ''
   } = params;
-  return `exams:${page}:${limit}:${search.toLowerCase().trim()}:${category}:${status}:${difficulty}:${exam_type}:${is_premium}`;
+  return `exams:${page}:${limit}:${search.toLowerCase().trim()}:${category}:${subcategory}:${status}:${difficulty}:${exam_type}:${is_premium}`;
 };
 
 const getExams = async (req, res) => {
@@ -24,6 +25,7 @@ const getExams = async (req, res) => {
       limit = 10, 
       search, 
       category, 
+      subcategory,
       status, 
       difficulty,
       exam_type,
@@ -77,7 +79,39 @@ const getExams = async (req, res) => {
     }
 
     if (category) {
-      query = query.eq('category', category);
+      const slugList = category
+        .split(',')
+        .map((slug) => slug.trim())
+        .filter(Boolean);
+
+      if (slugList.length) {
+        const { data: categoryRows } = await supabase
+          .from('exam_categories')
+          .select('id, slug')
+          .in('slug', slugList);
+
+        if (categoryRows?.length) {
+          query = query.in('category_id', categoryRows.map((row) => row.id));
+        }
+      }
+    }
+
+    if (subcategory) {
+      const slugList = subcategory
+        .split(',')
+        .map((slug) => slug.trim())
+        .filter(Boolean);
+
+      if (slugList.length) {
+        const { data: subcategoryRows } = await supabase
+          .from('exam_subcategories')
+          .select('id, slug')
+          .in('slug', slugList);
+
+        if (subcategoryRows?.length) {
+          query = query.in('subcategory_id', subcategoryRows.map((row) => row.id));
+        }
+      }
     }
 
     if (status) {
@@ -85,7 +119,34 @@ const getExams = async (req, res) => {
     }
 
     if (difficulty) {
-      query = query.eq('difficulty', difficulty);
+      const slugList = difficulty
+        .split(',')
+        .map((slug) => slug.trim())
+        .filter(Boolean);
+
+      if (slugList.length === 1) {
+        const single = slugList[0];
+        const { data: difficultyData } = await supabase
+          .from('exam_difficulties')
+          .select('id')
+          .eq('slug', single)
+          .maybeSingle();
+
+        if (difficultyData) {
+          query = query.eq('difficulty_id', difficultyData.id);
+        } else {
+          query = query.eq('difficulty', single);
+        }
+      } else if (slugList.length > 1) {
+        const { data: difficultyRows } = await supabase
+          .from('exam_difficulties')
+          .select('id')
+          .in('slug', slugList);
+
+        if (difficultyRows?.length) {
+          query = query.in('difficulty_id', difficultyRows.map((row) => row.id));
+        }
+      }
     }
 
     if (exam_type) {
