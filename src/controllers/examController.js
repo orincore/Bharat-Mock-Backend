@@ -753,7 +753,8 @@ const getExamQuestions = async (req, res) => {
           option_text,
           option_text_hi,
           option_order,
-          image_url
+          image_url,
+          imageUrl:image_url
         )
       `)
       .eq('exam_id', examId)
@@ -778,18 +779,38 @@ const getExamQuestions = async (req, res) => {
         return Boolean(
           (question.text_hi && question.text_hi.trim()) ||
           (question.explanation_hi && question.explanation_hi.trim()) ||
-          (question.question_options && question.question_options.some(opt => opt.option_text_hi && opt.option_text_hi.trim()))
+          (question.image_url && question.image_url.trim()) ||
+          (question.question_options && question.question_options.some(opt => 
+            (opt.option_text_hi && opt.option_text_hi.trim()) || 
+            (opt.image_url && opt.image_url.trim())
+          ))
         );
       }
       return Boolean(
         (question.text && question.text.trim()) ||
         (question.explanation && question.explanation.trim()) ||
-        (question.question_options && question.question_options.some(opt => opt.option_text && opt.option_text.trim()))
+        (question.image_url && question.image_url.trim()) ||
+        (question.question_options && question.question_options.some(opt => 
+          (opt.option_text && opt.option_text.trim()) || 
+          (opt.image_url && opt.image_url.trim())
+        ))
       );
     };
 
     const buildFilteredQuestions = (language) => {
-      const filtered = questions.filter(question => questionHasContent(question, language));
+      const filtered = questions.filter(question => {
+        const hasContent = questionHasContent(question, language);
+        if (!hasContent) {
+          logger.info(`Question ${question.id} filtered out for language ${language}:`, {
+            text: question.text?.substring(0, 50),
+            text_hi: question.text_hi?.substring(0, 50),
+            image_url: question.image_url,
+            options_count: question.question_options?.length
+          });
+        }
+        return hasContent;
+      });
+      logger.info(`Filtered questions for language ${language}: ${filtered.length}/${questions.length}`);
       return filtered;
     };
 
@@ -852,6 +873,12 @@ const getExamQuestions = async (req, res) => {
         };
       })
       .filter(Boolean);
+
+    logger.info(`Final response for exam ${examId}, attempt ${attemptId}:`, {
+      total_questions: questionsWithAnswers.length,
+      sections_count: sectionsWithQuestions.length,
+      sections: sectionsWithQuestions.map(s => ({ id: s.id, name: s.name, questions: s.questions.length }))
+    });
 
     res.json({
       success: true,
