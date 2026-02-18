@@ -86,15 +86,233 @@ const pageContentController = {
 
       const orphanBlocks = (blocks || []).filter(block => !block.section_id);
 
+      // Group sidebar sections by tab for tab-specific sidebar support
+      const sidebarsByTab = {};
+      groupedBlocks.filter(s => s.is_sidebar).forEach(sidebar => {
+        const tabKey = sidebar.sidebar_tab_id || 'shared';
+        if (!sidebarsByTab[tabKey]) {
+          sidebarsByTab[tabKey] = [];
+        }
+        sidebarsByTab[tabKey].push(sidebar);
+      });
+
       res.json({
         sections: groupedBlocks,
         orphanBlocks,
         seo: seo || null,
         customTabs: customTabs || [],
-        tabConfig: tabConfig || []
+        tabConfig: tabConfig || [],
+        sidebarsByTab
       });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch page content', error);
+    }
+  },
+
+  syncSections: async (req, res) => {
+    try {
+      const { subcategoryId } = req.params;
+      const { sections = [], deletedSectionIds = [] } = req.body || {};
+
+      if (!Array.isArray(sections)) {
+        return res.status(400).json({ success: false, message: 'Sections payload must be an array' });
+      }
+
+      const sanitizedDeletedIds = Array.isArray(deletedSectionIds)
+        ? deletedSectionIds.filter((id) => typeof id === 'string' && id.trim())
+        : [];
+
+      if (sanitizedDeletedIds.length) {
+        await supabase
+          .from('page_content_blocks')
+          .delete()
+          .in('section_id', sanitizedDeletedIds);
+
+        await supabase
+          .from('page_sections')
+          .delete()
+          .in('id', sanitizedDeletedIds);
+      }
+
+      const { data: existingSectionsData, error: existingSectionsError } = await supabase
+        .from('page_sections')
+        .select('id')
+        .eq('subcategory_id', subcategoryId);
+
+      if (existingSectionsError) {
+        return buildErrorResponse(res, 'Failed to fetch existing sections', existingSectionsError);
+      }
+
+      const { data: existingBlocksData, error: existingBlocksError } = await supabase
+        .from('page_content_blocks')
+        .select('id, section_id')
+        .eq('subcategory_id', subcategoryId);
+
+      if (existingBlocksError) {
+        return buildErrorResponse(res, 'Failed to fetch existing blocks', existingBlocksError);
+      }
+
+      const existingBlocksBySection = new Map();
+      (existingBlocksData || []).forEach((block) => {
+        if (!existingBlocksBySection.has(block.section_id)) {
+          existingBlocksBySection.set(block.section_id, []);
+        }
+        existingBlocksBySection.get(block.section_id).push(block.id);
+      });
+
+      const upsertedSectionIds = [];
+
+      for (const rawSection of sections) {
+        if (!rawSection || !rawSection.title) continue;
+
+        const sectionPayload = {
+          section_key: rawSection.section_key || rawSection.title?.toLowerCase().replace(/\s+/g, '-') || null,
+          title: rawSection.title,
+          subtitle: rawSection.subtitle || null,
+          icon: rawSection.icon || null,
+          background_color: rawSection.background_color || null,
+          text_color: rawSection.text_color || null,
+          display_order: rawSection.display_order ?? 0,
+          is_collapsible: rawSection.is_collapsible ?? false,
+          is_expanded: rawSection.is_expanded ?? true,
+          is_active: rawSection.is_active ?? true,
+          is_sidebar: rawSection.is_sidebar ?? false,
+          sidebar_tab_id: rawSection.sidebar_tab_id ?? null,
+          settings: rawSection.settings || {},
+          custom_tab_id: rawSection.custom_tab_id || null,
+          updated_by: req.user?.id || null
+        };
+
+        let sectionId = rawSection.id;
+
+        if (!sectionId || sectionId.toString().startsWith('temp-')) {
+          const { data, error } = await supabase
+            .from('page_sections')
+            .insert([{ ...sectionPayload, subcategory_id: subcategoryId, created_by: req.user?.id || null }])
+            .select('id')
+            .single();
+
+          if (error) {
+            return buildErrorResponse(res, 'Failed to create section', error);
+          }
+
+          sectionId = data.id;
+        } else {
+          const { error } = await supabase
+            .from('page_sections')
+            .update(sectionPayload)
+            .eq('id', sectionId);
+
+          if (error) {
+            return buildErrorResponse(res, 'Failed to update section', error);
+          }
+        }
+
+        upsertedSectionIds.push(sectionId);
+
+        const providedBlocks = Array.isArray(rawSection.blocks) ? rawSection.blocks : [];
+        const upsertedBlockIds = [];
+
+        for (const rawBlock of providedBlocks) {
+          if (!rawBlock) continue;
+
+          const blockPayload = {
+            section_id: sectionId,
+            block_type: rawBlock.block_type,
+            content: rawBlock.content || {},
+            settings: rawBlock.settings || {},
+            display_order: rawBlock.display_order ?? 0,
+            parent_block_id: rawBlock.parent_block_id || null,
+            updated_by: req.user?.id || null
+          };
+
+          let blockId = rawBlock.id;
+
+          if (!blockId || blockId.toString().startsWith('temp-')) {
+            const { data, error } = await supabase
+              .from('page_content_blocks')
+              .insert([{ ...blockPayload, subcategory_id: subcategoryId, created_by: req.user?.id || null }])
+              .select('id')
+              .single();
+
+            if (error) {
+              return buildErrorResponse(res, 'Failed to create block', error);
+            }
+
+            blockId = data.id;
+          } else {
+            const { error } = await supabase
+              .from('page_content_blocks')
+              .update(blockPayload)
+              .eq('id', blockId);
+
+            if (error) {
+              return buildErrorResponse(res, 'Failed to update block', error);
+            }
+          }
+
+          upsertedBlockIds.push(blockId);
+        }
+
+        const existingBlockIds = existingBlocksBySection.get(sectionId) || [];
+        const blockIdsToDelete = existingBlockIds.filter((blockId) => !upsertedBlockIds.includes(blockId));
+
+        if (blockIdsToDelete.length) {
+          await supabase
+            .from('page_content_blocks')
+            .delete()
+            .in('id', blockIdsToDelete);
+        }
+      }
+
+      const sectionsToDelete = (existingSectionsData || []).filter((section) => !upsertedSectionIds.includes(section.id));
+
+      if (sectionsToDelete.length) {
+        const sectionIds = sectionsToDelete.map((section) => section.id);
+        await supabase
+          .from('page_content_blocks')
+          .delete()
+          .in('section_id', sectionIds);
+
+        await supabase
+          .from('page_sections')
+          .delete()
+          .in('id', sectionIds);
+      }
+
+      const { data: refreshedSections, error: refreshedSectionsError } = await supabase
+        .from('page_sections')
+        .select('*')
+        .eq('subcategory_id', subcategoryId)
+        .order('display_order', { ascending: true });
+
+      if (refreshedSectionsError) {
+        return buildErrorResponse(res, 'Failed to fetch updated sections', refreshedSectionsError);
+      }
+
+      const { data: refreshedBlocks, error: refreshedBlocksError } = await supabase
+        .from('page_content_blocks')
+        .select('*')
+        .eq('subcategory_id', subcategoryId)
+        .order('display_order', { ascending: true });
+
+      if (refreshedBlocksError) {
+        return buildErrorResponse(res, 'Failed to fetch updated blocks', refreshedBlocksError);
+      }
+
+      const groupedSections = (refreshedSections || []).map((section) => ({
+        ...section,
+        blocks: (refreshedBlocks || []).filter((block) => block.section_id === section.id)
+      }));
+
+      res.json({
+        success: true,
+        sections: groupedSections,
+        deletedSectionIds: [...sanitizedDeletedIds, ...(sectionsToDelete || []).map((section) => section.id)],
+        upsertedSectionIds
+      });
+    } catch (error) {
+      return buildErrorResponse(res, 'Failed to sync sections', error);
     }
   },
 
@@ -132,6 +350,7 @@ const pageContentController = {
             is_collapsible: is_collapsible || false,
             is_expanded: is_expanded ?? true,
             is_sidebar: is_sidebar || false,
+            sidebar_tab_id: req.body.sidebar_tab_id || null,
             settings: settings || {},
             custom_tab_id: custom_tab_id || null,
             created_by: req.user?.id || null,
@@ -183,6 +402,7 @@ const pageContentController = {
           is_expanded: is_expanded ?? undefined,
           is_active: is_active ?? undefined,
           is_sidebar: is_sidebar ?? undefined,
+          sidebar_tab_id: req.body.sidebar_tab_id !== undefined ? req.body.sidebar_tab_id : undefined,
           settings: settings ?? undefined,
           custom_tab_id: custom_tab_id ?? undefined,
           updated_by: req.user?.id || null
@@ -373,6 +593,32 @@ const pageContentController = {
         if (error) {
           throw error;
         }
+      }
+
+      const sectionsToDelete = (existingSections || []).filter((section) => !processedSectionIds.has(section.id));
+      if (sectionsToDelete.length) {
+        debugLog('[bulkSyncPageContent.deleteSections]', { count: sectionsToDelete.length, sectionIds: sectionsToDelete.map((section) => section.id) });
+        const { error: deleteSectionsError } = await supabase
+          .from('page_sections')
+          .delete()
+          .in('id', sectionsToDelete.map((section) => section.id));
+        if (deleteSectionsError) {
+          return buildErrorResponse(res, 'Failed to delete removed sections during bulk sync', deleteSectionsError);
+        }
+        operations.sectionsDeleted += sectionsToDelete.length;
+      }
+
+      const blocksToDelete = (existingBlocks || []).filter((block) => processedSectionIds.has(block.section_id) && !processedBlockIds.has(block.id));
+      if (blocksToDelete.length) {
+        debugLog('[bulkSyncPageContent.deleteBlocks]', { count: blocksToDelete.length, blockIds: blocksToDelete.map((block) => block.id) });
+        const { error: deleteBlocksError } = await supabase
+          .from('page_content_blocks')
+          .delete()
+          .in('id', blocksToDelete.map((block) => block.id));
+        if (deleteBlocksError) {
+          return buildErrorResponse(res, 'Failed to delete removed blocks during bulk sync', deleteBlocksError);
+        }
+        operations.blocksDeleted += blocksToDelete.length;
       }
 
       res.json({ message: 'Blocks reordered successfully' });
@@ -741,15 +987,19 @@ const pageContentController = {
 
       const existingSectionMap = new Map((existingSections || []).map((section) => [section.id, section]));
       const existingBlockMap = new Map((existingBlocks || []).map((block) => [block.id, block]));
+      const processedSectionIds = new Set();
+      const processedBlockIds = new Set();
       const sectionIdAliasMap = new Map();
 
       const operations = {
         sectionsCreated: 0,
         sectionsUpdated: 0,
         sectionsSkipped: 0,
+        sectionsDeleted: 0,
         blocksCreated: 0,
         blocksUpdated: 0,
-        blocksSkipped: 0
+        blocksSkipped: 0,
+        blocksDeleted: 0
       };
 
       const normalizeSectionPayload = (section = {}) => ({
@@ -763,6 +1013,7 @@ const pageContentController = {
         is_collapsible: section.is_collapsible ?? false,
         is_expanded: section.is_expanded ?? true,
         is_sidebar: section.is_sidebar ?? false,
+        sidebar_tab_id: section.sidebar_tab_id !== undefined ? section.sidebar_tab_id : null,
         settings: section.settings || {},
         custom_tab_id: section.custom_tab_id || null
       });
@@ -812,6 +1063,7 @@ const pageContentController = {
           } else {
             operations.sectionsSkipped += 1;
           }
+          processedSectionIds.add(section.id);
         } else {
           const insertPayload = {
             ...sectionPayload,
@@ -832,6 +1084,7 @@ const pageContentController = {
 
           sectionId = data.id;
           operations.sectionsCreated += 1;
+          processedSectionIds.add(sectionId);
         }
 
         sectionIdAliasMap.set(sectionAlias, sectionId || section.id);
@@ -863,6 +1116,7 @@ const pageContentController = {
             } else {
               operations.blocksSkipped += 1;
             }
+            processedBlockIds.add(block.id);
           } else {
             const insertPayload = {
               ...blockPayload,

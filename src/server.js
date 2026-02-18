@@ -24,6 +24,7 @@ const blogRoutes = require('./routes/blog');
 const taxonomyRoutes = require('./routes/taxonomyRoutes');
 const subcategoryContentRoutes = require('./routes/subcategoryContentRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
+const subscriptionPageRoutes = require('./routes/subscriptionPageRoutes');
 const pageContentRoutes = require('./routes/pageContent');
 const categoryPageContentRoutes = require('./routes/categoryPageContent');
 const adminRoutes = require('./routes/adminRoutes');
@@ -136,6 +137,7 @@ app.use(`/api/${API_VERSION}/privacy`, privacyRoutes);
 app.use(`/api/${API_VERSION}/disclaimer`, disclaimerRoutes);
 app.use(`/api/${API_VERSION}/admin`, adminRoutes);
 app.use(`/api/${API_VERSION}/subscriptions`, subscriptionRoutes);
+app.use(`/api/${API_VERSION}/subscription-page`, subscriptionPageRoutes);
 app.use(`/api/${API_VERSION}/init`, initRoutes);
 
 const GRAPHQL_PATH = process.env.GRAPHQL_PATH || '/api/graphql';

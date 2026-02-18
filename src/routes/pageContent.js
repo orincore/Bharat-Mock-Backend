@@ -10,6 +10,7 @@ router.get('/:subcategoryId', pageContentController.getPageContent);
 router.post('/:subcategoryId/sections', authenticate, requireAdmin, pageContentController.createSection);
 router.put('/sections/:sectionId', authenticate, requireAdmin, pageContentController.updateSection);
 router.delete('/sections/:sectionId', authenticate, requireAdmin, pageContentController.deleteSection);
+router.put('/:subcategoryId/sections/sync', authenticate, requireAdmin, pageContentController.syncSections);
 
 router.post('/:subcategoryId/blocks', authenticate, requireAdmin, pageContentController.createBlock);
 router.put('/blocks/:blockId', authenticate, requireAdmin, pageContentController.updateBlock);
