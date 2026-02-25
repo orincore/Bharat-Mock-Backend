@@ -1943,6 +1943,14 @@ const uploadQuestionImageController = async (req, res) => {
       });
     }
 
+    // Validate question ID format
+    if (!id || id.startsWith('question-') || id.startsWith('temp-')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid question ID. Please save the question first before uploading images.'
+      });
+    }
+
     // Check if question exists
     const { data: question, error: questionError } = await supabase
       .from('questions')
@@ -1951,9 +1959,10 @@ const uploadQuestionImageController = async (req, res) => {
       .single();
 
     if (questionError || !question) {
+      logger.error('Question not found for image upload:', { id, error: questionError });
       return res.status(404).json({
         success: false,
-        message: 'Question not found'
+        message: 'Question not found. Please save the question first before uploading images.'
       });
     }
 
@@ -2007,6 +2016,14 @@ const removeQuestionImage = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Validate question ID format
+    if (!id || id.startsWith('question-') || id.startsWith('temp-')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid question ID. Please save the question first.'
+      });
+    }
+
     // Get current question
     const { data: question, error: questionError } = await supabase
       .from('questions')
@@ -2015,9 +2032,10 @@ const removeQuestionImage = async (req, res) => {
       .single();
 
     if (questionError || !question) {
+      logger.error('Question not found for image removal:', { id, error: questionError });
       return res.status(404).json({
         success: false,
-        message: 'Question not found'
+        message: 'Question not found. The question may have been deleted or not saved yet.'
       });
     }
 
@@ -2072,6 +2090,14 @@ const uploadOptionImageController = async (req, res) => {
       });
     }
 
+    // Validate option ID format
+    if (!id || id.startsWith('opt-') || id.startsWith('temp-')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid option ID. Please save the option first before uploading images.'
+      });
+    }
+
     // Check if option exists
     const { data: option, error: optionError } = await supabase
       .from('question_options')
@@ -2080,9 +2106,10 @@ const uploadOptionImageController = async (req, res) => {
       .single();
 
     if (optionError || !option) {
+      logger.error('Option not found for image upload:', { id, error: optionError });
       return res.status(404).json({
         success: false,
-        message: 'Option not found'
+        message: 'Option not found. Please save the option first before uploading images.'
       });
     }
 
@@ -2136,6 +2163,14 @@ const removeOptionImage = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Validate option ID format
+    if (!id || id.startsWith('opt-') || id.startsWith('temp-')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid option ID. Please save the option first.'
+      });
+    }
+
     // Get current option
     const { data: option, error: optionError } = await supabase
       .from('question_options')
@@ -2144,9 +2179,10 @@ const removeOptionImage = async (req, res) => {
       .single();
 
     if (optionError || !option) {
+      logger.error('Option not found for image removal:', { id, error: optionError });
       return res.status(404).json({
         success: false,
-        message: 'Option not found'
+        message: 'Option not found. The option may have been deleted or not saved yet.'
       });
     }
 
