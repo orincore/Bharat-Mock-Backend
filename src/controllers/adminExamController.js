@@ -1561,12 +1561,16 @@ const bulkCreateExamWithContent = async (req, res) => {
 
         logger.info(`Bulk create: ${createdQuestions.length}/${allQuestionInserts.length} questions inserted`);
 
+        let questionIdMap = [];
+        
         if (createdQuestions.length > 0) {
           const allOptionInserts = [];
+          const optionQuestionMap = [];
           for (let qi = 0; qi < createdQuestions.length; qi++) {
             const { question } = questionSectionMap[qi];
             if (!question.options?.length) continue;
             for (const option of question.options) {
+              optionQuestionMap.push({ questionIndex: qi, originalOption: option });
               allOptionInserts.push({
                 question_id: createdQuestions[qi].id,
                 option_text: option.option_text,
@@ -1580,7 +1584,41 @@ const bulkCreateExamWithContent = async (req, res) => {
 
           logger.info(`Bulk create: inserting ${allOptionInserts.length} options in chunks of ${OPTION_BATCH_SIZE}`);
 
-          await batchInsert('question_options', allOptionInserts, 'id', OPTION_BATCH_SIZE);
+          const createdOptions = await batchInsert('question_options', allOptionInserts, 'id', OPTION_BATCH_SIZE);
+          
+          // Build question and option ID mappings
+          for (let qi = 0; qi < createdQuestions.length; qi++) {
+            const { question } = questionSectionMap[qi];
+            const questionMapping = {
+              oldId: question.id,
+              newId: createdQuestions[qi].id,
+              hasImage: !!question.image_url,
+              options: []
+            };
+            
+            // Map options for this question
+            if (question.options?.length) {
+              for (let oi = 0; oi < question.options.length; oi++) {
+                const optionIdx = optionQuestionMap.findIndex(
+                  (om, idx) => om.questionIndex === qi && 
+                  optionQuestionMap.slice(0, idx).filter(x => x.questionIndex === qi).length === oi
+                );
+                if (optionIdx >= 0 && createdOptions[optionIdx]) {
+                  questionMapping.options.push({
+                    oldId: question.options[oi].id,
+                    newId: createdOptions[optionIdx].id,
+                    hasImage: !!question.options[oi].image_url
+                  });
+                }
+              }
+            }
+            questionIdMap.push(questionMapping);
+          }
+        }
+        
+        // Store questionIdMap at exam level for easy access
+        if (questionIdMap.length > 0) {
+          createdExam.questionIdMap = questionIdMap;
         }
       }
     }
@@ -1608,7 +1646,8 @@ const bulkCreateExamWithContent = async (req, res) => {
         exam: createdExam,
         sections: createdSections,
         questionCount: dbQuestionCount,
-        expectedQuestionCount: expectedQuestions
+        expectedQuestionCount: expectedQuestions,
+        questionIdMap: createdExam.questionIdMap || []
       }
     });
   } catch (error) {
@@ -1874,12 +1913,16 @@ const updateExamWithContent = async (req, res) => {
 
         logger.info(`Update exam: ${createdQuestions.length}/${allQuestionInserts.length} questions inserted`);
 
+        let questionIdMap = [];
+        
         if (createdQuestions.length > 0) {
           const allOptionInserts = [];
+          const optionQuestionMap = [];
           for (let qi = 0; qi < createdQuestions.length; qi++) {
             const { question } = questionSectionMap[qi];
             if (!question.options?.length) continue;
             for (const option of question.options) {
+              optionQuestionMap.push({ questionIndex: qi, originalOption: option });
               allOptionInserts.push({
                 question_id: createdQuestions[qi].id,
                 option_text: option.option_text,
@@ -1893,7 +1936,41 @@ const updateExamWithContent = async (req, res) => {
 
           logger.info(`Update exam: inserting ${allOptionInserts.length} options in chunks of ${OPTION_BATCH_SIZE}`);
 
-          await batchInsert('question_options', allOptionInserts, 'id', OPTION_BATCH_SIZE);
+          const createdOptions = await batchInsert('question_options', allOptionInserts, 'id', OPTION_BATCH_SIZE);
+          
+          // Build question and option ID mappings
+          for (let qi = 0; qi < createdQuestions.length; qi++) {
+            const { question } = questionSectionMap[qi];
+            const questionMapping = {
+              oldId: question.id,
+              newId: createdQuestions[qi].id,
+              hasImage: !!question.image_url,
+              options: []
+            };
+            
+            // Map options for this question
+            if (question.options?.length) {
+              for (let oi = 0; oi < question.options.length; oi++) {
+                const optionIdx = optionQuestionMap.findIndex(
+                  (om, idx) => om.questionIndex === qi && 
+                  optionQuestionMap.slice(0, idx).filter(x => x.questionIndex === qi).length === oi
+                );
+                if (optionIdx >= 0 && createdOptions[optionIdx]) {
+                  questionMapping.options.push({
+                    oldId: question.options[oi].id,
+                    newId: createdOptions[optionIdx].id,
+                    hasImage: !!question.options[oi].image_url
+                  });
+                }
+              }
+            }
+            questionIdMap.push(questionMapping);
+          }
+        }
+        
+        // Store questionIdMap at exam level for easy access
+        if (questionIdMap.length > 0) {
+          updatedExam.questionIdMap = questionIdMap;
         }
       }
     }
@@ -1919,7 +1996,8 @@ const updateExamWithContent = async (req, res) => {
         exam: updatedExam,
         sections: createdSections,
         questionCount: dbQuestionCount,
-        expectedQuestionCount: expectedQuestions
+        expectedQuestionCount: expectedQuestions,
+        questionIdMap: updatedExam.questionIdMap || []
       }
     });
   } catch (error) {
