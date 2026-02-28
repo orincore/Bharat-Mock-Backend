@@ -42,6 +42,20 @@ const getAppInit = async (req, res) => {
         .order('created_at', { ascending: true })
         .limit(1)
         .single(),
+
+      supabase
+        .from('exam_categories')
+        .select('id, name, slug, icon, logo_url, display_order')
+        .or('is_active.eq.true,is_active.is.null')
+        .order('display_order', { ascending: true })
+        .order('name', { ascending: true }),
+
+      supabase
+        .from('exam_subcategories')
+        .select('id, name, slug, category_id, logo_url, display_order')
+        .or('is_active.eq.true,is_active.is.null')
+        .order('display_order', { ascending: true })
+        .order('name', { ascending: true }),
     ];
 
     if (isAuthenticated) {
@@ -66,7 +80,9 @@ const getAppInit = async (req, res) => {
     const navResult = results[0];
     const footerResult = results[1];
     const contactResult = results[2];
-    const profileResult = isAuthenticated ? results[3] : null;
+    const categoriesResult = results[3];
+    const subcategoriesResult = results[4];
+    const profileResult = isAuthenticated ? results[5] : null;
 
     const navigation = navResult.status === 'fulfilled' && !navResult.value.error
       ? navResult.value.data || []
@@ -79,6 +95,14 @@ const getAppInit = async (req, res) => {
     const contact = contactResult.status === 'fulfilled' && !contactResult.value.error
       ? contactResult.value.data || null
       : null;
+
+    const categories = categoriesResult.status === 'fulfilled' && !categoriesResult.value.error
+      ? categoriesResult.value.data || []
+      : [];
+
+    const subcategories = subcategoriesResult.status === 'fulfilled' && !subcategoriesResult.value.error
+      ? subcategoriesResult.value.data || []
+      : [];
 
     let profile = null;
     if (isAuthenticated && profileResult?.status === 'fulfilled' && !profileResult.value.error) {
@@ -107,6 +131,8 @@ const getAppInit = async (req, res) => {
         navigation,
         footer,
         contact,
+        categories,
+        subcategories,
         profile,
       },
     };
