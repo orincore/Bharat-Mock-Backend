@@ -325,6 +325,8 @@ const createBanner = async (req, res) => {
       orderValue = (count || 0);
     }
 
+    const normalizePlacement = (value) => (value && value.toLowerCase() === 'mid' ? 'mid' : 'top');
+
     const payload = {
       title,
       subtitle: subtitle || null,
@@ -333,6 +335,7 @@ const createBanner = async (req, res) => {
       button_text: button_text || null,
       display_order: orderValue,
       is_active: Boolean(is_active),
+      placement: normalizePlacement(req.body.placement)
     };
 
     const { data, error } = await supabase
@@ -368,6 +371,7 @@ const updateBanner = async (req, res) => {
       button_text: req.body.button_text,
       display_order: Number.isFinite(Number(req.body.display_order)) ? Number(req.body.display_order) : undefined,
       is_active: typeof req.body.is_active === 'boolean' ? req.body.is_active : undefined,
+      placement: req.body.placement ? (req.body.placement.toLowerCase() === 'mid' ? 'mid' : 'top') : undefined,
     });
 
     if (!Object.keys(payload).length) {
