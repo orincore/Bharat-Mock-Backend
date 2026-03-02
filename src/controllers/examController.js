@@ -3,6 +3,8 @@ const logger = require('../config/logger');
 
 const { getCache, setCache, deleteCacheByPrefix } = require('../utils/cache');
 
+const EXAM_CACHE_VERSION = 'v2';
+
 const buildExamCacheKey = (params) => {
   const {
     page = 1,
@@ -13,9 +15,10 @@ const buildExamCacheKey = (params) => {
     status = '',
     difficulty = '',
     exam_type = '',
-    is_premium = ''
+    is_premium = '',
+    year = ''
   } = params;
-  return `exams:${page}:${limit}:${search.toLowerCase().trim()}:${category}:${subcategory}:${status}:${difficulty}:${exam_type}:${is_premium}`;
+  return `${EXAM_CACHE_VERSION}:exams:${page}:${limit}:${search.toLowerCase().trim()}:${category}:${subcategory}:${status}:${difficulty}:${exam_type}:${is_premium}:${year}`;
 };
 
 const getExams = async (req, res) => {
@@ -29,7 +32,8 @@ const getExams = async (req, res) => {
       status, 
       difficulty,
       exam_type,
-      is_premium
+      is_premium,
+      year
     } = req.query;
 
     const offset = (page - 1) * limit;
@@ -53,6 +57,7 @@ const getExams = async (req, res) => {
         status,
         start_date,
         end_date,
+        exam_date,
         pass_percentage,
         is_free,
         image_url,
@@ -167,6 +172,27 @@ const getExams = async (req, res) => {
       query = query.eq('is_premium', false);
     }
 
+    if (year) {
+      const yearList = year
+        .split(',')
+        .map((value) => parseInt(value.trim(), 10))
+        .filter((value) => !Number.isNaN(value));
+
+      if (yearList.length === 1) {
+        const targetYear = yearList[0];
+        const start = `${targetYear}-01-01`;
+        const end = `${targetYear + 1}-01-01`;
+        query = query.gte('exam_date', start).lt('exam_date', end);
+      } else if (yearList.length > 1) {
+        const orFilters = yearList.map((yr) => {
+          const start = `${yr}-01-01`;
+          const end = `${yr + 1}-01-01`;
+          return `and(exam_date.gte.${start},exam_date.lt.${end})`;
+        });
+        query = query.or(orFilters.join(','));
+      }
+    }
+
     query = query.range(offset, offset + parseInt(limit) - 1);
 
     const { data: exams, error, count } = await query;
@@ -203,9 +229,24 @@ const getExams = async (req, res) => {
       }
     }
 
+    const yearSet = new Set();
+    exams.forEach((exam) => {
+      if (exam.exam_date) {
+        const parsed = new Date(exam.exam_date);
+        if (!Number.isNaN(parsed.getTime())) {
+          const year = parsed.getFullYear();
+          exam.exam_year = year;
+          yearSet.add(year);
+          return;
+        }
+      }
+      exam.exam_year = null;
+    });
+
     const responsePayload = {
       success: true,
       data: exams,
+      years: Array.from(yearSet).sort((a, b) => b - a),
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -309,6 +350,7 @@ const buildExamQuery = () => {
       status,
       start_date,
       end_date,
+      exam_date,
       pass_percentage,
       is_free,
       image_url,

@@ -1,24 +1,21 @@
 const express = require('express');
-const router = express.Router();
-
-const { authenticate, optionalAuth, adminAuth } = require('../middleware/auth');
+const { optionalAuth, authenticate } = require('../middleware/auth');
+const { requireAdmin } = require('../middleware/adminAuth');
+const { upload } = require('../utils/fileUpload');
 const {
   getPublicTestimonials,
-  getMyTestimonial,
-  createTestimonial,
-  updateOwnTestimonial,
-  deleteOwnTestimonial,
   getAllTestimonialsAdmin,
-  adminUpdateTestimonial
+  adminCreateTestimonial,
+  adminUpdateTestimonial,
+  adminDeleteTestimonial
 } = require('../controllers/testimonialsController');
 
-router.get('/', optionalAuth, getPublicTestimonials);
-router.get('/me', authenticate, getMyTestimonial);
-router.post('/', authenticate, createTestimonial);
-router.put('/:id', authenticate, updateOwnTestimonial);
-router.delete('/:id', authenticate, deleteOwnTestimonial);
+const router = express.Router();
 
-router.get('/admin/list', authenticate, adminAuth, getAllTestimonialsAdmin);
-router.patch('/admin/:id', authenticate, adminAuth, adminUpdateTestimonial);
+router.get('/', optionalAuth, getPublicTestimonials);
+router.get('/admin/list', authenticate, requireAdmin, getAllTestimonialsAdmin);
+router.post('/admin', authenticate, requireAdmin, upload.single('profilePhoto'), adminCreateTestimonial);
+router.put('/admin/:id', authenticate, requireAdmin, upload.single('profilePhoto'), adminUpdateTestimonial);
+router.delete('/admin/:id', authenticate, requireAdmin, adminDeleteTestimonial);
 
 module.exports = router;

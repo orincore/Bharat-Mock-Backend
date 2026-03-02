@@ -41,11 +41,19 @@ const getAdminExams = async (req, res) => {
       search,
       status,
       category,
+      subcategory,
       difficulty,
-      exam_type
+      exam_type,
+      is_premium,
+      is_published,
+      is_free,
+      date_from,
+      date_to
     } = req.query;
 
-    const offset = (page - 1) * limit;
+    const pageNumber = parseInt(page, 10) || 1;
+    const limitNumber = parseInt(limit, 10) || 10;
+    const offset = (pageNumber - 1) * limitNumber;
 
     let query = supabase
       .from('exams')
@@ -68,6 +76,7 @@ const getAdminExams = async (req, res) => {
         negative_marking,
         negative_mark_value,
         is_published,
+        exam_date,
         exam_type,
         show_in_mock_tests,
         is_premium,
@@ -75,7 +84,7 @@ const getAdminExams = async (req, res) => {
         updated_at
       `, { count: 'exact' })
       .order('created_at', { ascending: false })
-      .range(offset, offset + parseInt(limit) - 1);
+      .range(offset, offset + limitNumber - 1);
 
     if (search) {
       query = query.or(`title.ilike.%${search}%`);
@@ -89,12 +98,42 @@ const getAdminExams = async (req, res) => {
       query = query.eq('category', category);
     }
 
+    if (subcategory) {
+      query = query.eq('subcategory', subcategory);
+    }
+
     if (difficulty) {
       query = query.eq('difficulty', difficulty);
     }
 
     if (exam_type) {
       query = query.eq('exam_type', exam_type);
+    }
+
+    if (is_premium === 'true') {
+      query = query.eq('is_premium', true);
+    } else if (is_premium === 'false') {
+      query = query.eq('is_premium', false);
+    }
+
+    if (is_published === 'true') {
+      query = query.eq('is_published', true);
+    } else if (is_published === 'false') {
+      query = query.eq('is_published', false);
+    }
+
+    if (is_free === 'true') {
+      query = query.eq('is_free', true);
+    } else if (is_free === 'false') {
+      query = query.eq('is_free', false);
+    }
+
+    if (date_from) {
+      query = query.gte('exam_date', date_from);
+    }
+
+    if (date_to) {
+      query = query.lte('exam_date', date_to);
     }
 
     const { data: exams, error, count } = await query;
@@ -111,10 +150,10 @@ const getAdminExams = async (req, res) => {
       success: true,
       data: exams,
       pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
+        page: pageNumber,
+        limit: limitNumber,
         total: count || 0,
-        totalPages: count ? Math.ceil(count / limit) : 0
+        totalPages: count ? Math.ceil(count / limitNumber) : 0
       }
     });
   } catch (error) {
@@ -412,7 +451,13 @@ const getAdminExamById = async (req, res) => {
         slug,
         url_path,
         syllabus,
-        allow_anytime
+        allow_anytime,
+        is_test_series,
+        test_series_id,
+        test_series_section_id,
+        test_series_topic_id,
+        exam_date,
+        display_order
       `)
       .eq('id', id)
       .is('deleted_at', null)
@@ -470,7 +515,13 @@ const createExam = async (req, res) => {
       is_published,
       allow_anytime,
       exam_type,
-      show_in_mock_tests
+      show_in_mock_tests,
+      is_test_series,
+      test_series_id,
+      test_series_section_id,
+      test_series_topic_id,
+      exam_date,
+      display_order
     } = req.body;
 
     let logoUrl = null;
@@ -539,7 +590,13 @@ const createExam = async (req, res) => {
         thumbnail_url: thumbnailUrl,
         slug: examSlug,
         url_path: urlPath,
-        syllabus: parsedSyllabus
+        syllabus: parsedSyllabus,
+        is_test_series: is_test_series === 'true' || is_test_series === true,
+        test_series_id: test_series_id || null,
+        test_series_section_id: test_series_section_id || null,
+        test_series_topic_id: test_series_topic_id || null,
+        exam_date: exam_date || null,
+        display_order: display_order ? parseInt(display_order) : 0
       })
       .select()
       .single();
@@ -625,6 +682,19 @@ const updateExam = async (req, res) => {
       updateData.end_date = null;
     }
     if (updateData.show_in_mock_tests !== undefined) updateData.show_in_mock_tests = updateData.show_in_mock_tests === 'true' || updateData.show_in_mock_tests === true;
+    if (updateData.is_test_series !== undefined) {
+      updateData.is_test_series = updateData.is_test_series === 'true' || updateData.is_test_series === true;
+      if (!updateData.is_test_series) {
+        updateData.test_series_id = null;
+        updateData.test_series_section_id = null;
+        updateData.test_series_topic_id = null;
+      }
+    }
+    if (updateData.test_series_id !== undefined) updateData.test_series_id = updateData.test_series_id || null;
+    if (updateData.test_series_section_id !== undefined) updateData.test_series_section_id = updateData.test_series_section_id || null;
+    if (updateData.test_series_topic_id !== undefined) updateData.test_series_topic_id = updateData.test_series_topic_id || null;
+    if (updateData.exam_date !== undefined) updateData.exam_date = updateData.exam_date || null;
+    if (updateData.display_order !== undefined) updateData.display_order = parseInt(updateData.display_order) || 0;
     let parsedSyllabus = undefined;
     if (updateData.syllabus) {
       if (typeof updateData.syllabus === 'string') {
@@ -1478,7 +1548,13 @@ const bulkCreateExamWithContent = async (req, res) => {
         thumbnail_url: thumbnailUrl,
         slug: examSlug,
         url_path: urlPath,
-        syllabus: parsedSyllabus
+        syllabus: parsedSyllabus,
+        is_test_series: exam.is_test_series === 'true' || exam.is_test_series === true,
+        test_series_id: exam.test_series_id || null,
+        test_series_section_id: exam.test_series_section_id || null,
+        test_series_topic_id: exam.test_series_topic_id || null,
+        exam_date: exam.exam_date || null,
+        display_order: exam.display_order ? parseInt(exam.display_order) || 0 : 0
       })
       .select()
       .single();
@@ -1767,12 +1843,17 @@ const updateExamWithContent = async (req, res) => {
     }
 
     const allowAnytimeFlag = bool(examPayload.allow_anytime);
+    const isTestSeriesFlag = bool(examPayload.is_test_series);
     const normalizedStatus = allowAnytimeFlag ? 'anytime' : (examPayload.status || 'upcoming');
     const normalizedStartDate = allowAnytimeFlag ? null : (examPayload.start_date || null);
     const normalizedEndDate = allowAnytimeFlag ? null : (examPayload.end_date || null);
     const supportsHindi = sectionsPayload.some(section =>
       section.name_hi || section.questions?.some(q => q.text_hi || q.explanation_hi || q.options?.some(o => o.option_text_hi))
     );
+
+    const normalizedTestSeriesId = isTestSeriesFlag ? (examPayload.test_series_id || null) : null;
+    const normalizedTestSeriesSectionId = isTestSeriesFlag ? (examPayload.test_series_section_id || null) : null;
+    const normalizedTestSeriesTopicId = isTestSeriesFlag ? (examPayload.test_series_topic_id || null) : null;
 
     const updatePayload = {
       title: examPayload.title,
@@ -1802,7 +1883,13 @@ const updateExamWithContent = async (req, res) => {
       thumbnail_url: thumbnailUrl,
       slug: examSlug,
       url_path: urlPath,
-      syllabus: parsedSyllabus
+      syllabus: parsedSyllabus,
+      is_test_series: isTestSeriesFlag,
+      test_series_id: normalizedTestSeriesId,
+      test_series_section_id: normalizedTestSeriesSectionId,
+      test_series_topic_id: normalizedTestSeriesTopicId,
+      exam_date: examPayload.exam_date || null,
+      display_order: numberOrNull(examPayload.display_order, 0)
     };
 
     // Parallelize: update exam + delete old content (syllabus, questions, options, sections)
