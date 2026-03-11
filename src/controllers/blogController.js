@@ -276,6 +276,8 @@ const blogController = {
         og_description,
         og_image_url,
         canonical_url,
+        is_current_affairs_note,
+        current_affairs_tag,
         status: requestedStatus
       } = req.body;
 
@@ -311,6 +313,8 @@ const blogController = {
         og_description: og_description || null,
         og_image_url: og_image_url || null,
         canonical_url: canonical_url || null,
+        is_current_affairs_note: Boolean(is_current_affairs_note),
+        current_affairs_tag: current_affairs_tag || null,
         created_by: req.user?.id || null,
         updated_by: req.user?.id || null
       };
@@ -351,6 +355,8 @@ const blogController = {
         og_description,
         og_image_url,
         canonical_url,
+        is_current_affairs_note,
+        current_affairs_tag,
         status: requestedStatus
       } = req.body;
 
@@ -386,6 +392,8 @@ const blogController = {
       if (og_description !== undefined) payload.og_description = og_description;
       if (og_image_url !== undefined) payload.og_image_url = og_image_url;
       if (canonical_url !== undefined) payload.canonical_url = canonical_url;
+      if (is_current_affairs_note !== undefined) payload.is_current_affairs_note = Boolean(is_current_affairs_note);
+      if (current_affairs_tag !== undefined) payload.current_affairs_tag = current_affairs_tag || null;
 
       const statusFields = buildStatusFields({
         requestedStatus,

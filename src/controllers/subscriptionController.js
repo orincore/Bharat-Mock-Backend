@@ -39,6 +39,26 @@ const parseFeatures = (features) => {
   return [];
 };
 
+const parsePriceCentsInput = (value, fieldLabel, { allowNull = true } = {}) => {
+  if (value === undefined) {
+    return { provided: false };
+  }
+
+  if (value === null || value === '') {
+    if (allowNull) {
+      return { provided: true, value: null };
+    }
+    return { provided: true, error: `${fieldLabel} is required` };
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return { provided: true, error: `${fieldLabel} must be a non-negative amount` };
+  }
+
+  return { provided: true, value: Math.round(parsed) };
+};
+
 const validatePromocodeForPlan = ({ promo, planId, autoRenew }) => {
   const now = new Date();
 
@@ -103,12 +123,40 @@ const adminListPlans = async (req, res) => {
 
 const adminCreatePlan = async (req, res) => {
   try {
+    const normalPriceInput = parsePriceCentsInput(req.body.normal_price_cents, 'normal_price_cents', { allowNull: false });
+    const legacyPriceInput = parsePriceCentsInput(req.body.price_cents, 'price_cents', { allowNull: false });
+    const salePriceInput = parsePriceCentsInput(req.body.sale_price_cents, 'sale_price_cents');
+
+    if (normalPriceInput.error) {
+      return res.status(400).json({ success: false, message: normalPriceInput.error });
+    }
+    if (legacyPriceInput.error) {
+      return res.status(400).json({ success: false, message: legacyPriceInput.error });
+    }
+    if (salePriceInput.error) {
+      return res.status(400).json({ success: false, message: salePriceInput.error });
+    }
+
+    let normalPrice = normalPriceInput.provided ? normalPriceInput.value : legacyPriceInput.value;
+    if (normalPrice === undefined || normalPrice === null) {
+      normalPrice = 0;
+    }
+
+    const salePrice = salePriceInput.provided ? salePriceInput.value : null;
+    if (salePrice !== null && salePrice > normalPrice) {
+      return res.status(400).json({
+        success: false,
+        message: 'sale_price_cents cannot exceed normal_price_cents'
+      });
+    }
+
     const payload = {
       name: req.body.name,
       slug: req.body.slug,
       description: req.body.description || '',
       duration_days: Number(req.body.duration_days) || 30,
-      price_cents: Number(req.body.price_cents) || 0,
+      normal_price_cents: normalPrice,
+      sale_price_cents: salePrice,
       currency_code: req.body.currency_code || 'INR',
       features: parseFeatures(req.body.features)
     };
@@ -130,6 +178,51 @@ const adminUpdatePlan = async (req, res) => {
     const payload = { ...req.body };
     if (payload.features) {
       payload.features = parseFeatures(payload.features);
+    }
+
+    delete payload.price_cents;
+
+    const normalPriceInput = parsePriceCentsInput(req.body.normal_price_cents, 'normal_price_cents', { allowNull: false });
+    const legacyPriceInput = parsePriceCentsInput(req.body.price_cents, 'price_cents', { allowNull: false });
+    const salePriceInput = parsePriceCentsInput(req.body.sale_price_cents, 'sale_price_cents');
+
+    if (normalPriceInput.error) {
+      return res.status(400).json({ success: false, message: normalPriceInput.error });
+    }
+    if (legacyPriceInput.error) {
+      return res.status(400).json({ success: false, message: legacyPriceInput.error });
+    }
+    if (salePriceInput.error) {
+      return res.status(400).json({ success: false, message: salePriceInput.error });
+    }
+
+    if (normalPriceInput.provided) {
+      payload.normal_price_cents = normalPriceInput.value;
+    } else if (legacyPriceInput.provided) {
+      payload.normal_price_cents = legacyPriceInput.value;
+    }
+
+    if (salePriceInput.provided) {
+      payload.sale_price_cents = salePriceInput.value;
+    }
+
+    if (salePriceInput.provided && salePriceInput.value !== null) {
+      let comparisonPrice = payload.normal_price_cents;
+      if (comparisonPrice === undefined || comparisonPrice === null) {
+        const existingPlan = await getPlanById(req.params.planId);
+        comparisonPrice = existingPlan?.normal_price_cents ?? existingPlan?.price_cents ?? null;
+      }
+
+      if (comparisonPrice === null || comparisonPrice === undefined) {
+        return res.status(400).json({ success: false, message: 'Unable to determine plan price for sale comparison' });
+      }
+
+      if (salePriceInput.value > comparisonPrice) {
+        return res.status(400).json({
+          success: false,
+          message: 'sale_price_cents cannot exceed normal_price_cents'
+        });
+      }
     }
 
     const plan = await updatePlan(req.params.planId, payload);
@@ -289,6 +382,8 @@ const previewSubscriptionCheckout = async (req, res) => {
           name: plan.name,
           duration_days: plan.duration_days,
           price_cents: plan.price_cents,
+          normal_price_cents: plan.normal_price_cents,
+          sale_price_cents: plan.sale_price_cents,
           currency_code: plan.currency_code
         },
         amount_cents: amountCents,

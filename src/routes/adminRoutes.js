@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const { authenticate } = require('../middleware/auth');
-const { requireAdmin } = require('../middleware/adminAuth');
+const { authenticate, adminAuth, checkPermission, requireRole } = require('../middleware/auth');
+const activityLogger = require('../middleware/activityLogger');
 const {
   getAdminExams,
   getAdminExamById,
@@ -25,6 +25,10 @@ const {
   removeQuestionImage,
   uploadOptionImage,
   removeOptionImage,
+  uploadExamPdfEn,
+  uploadExamPdfHi,
+  removeExamPdfEn,
+  removeExamPdfHi,
   getAllUsers,
   getUserDetails,
   updateUserRole,
@@ -65,75 +69,95 @@ const upload = multer({
   }
 });
 
-router.use(authenticate);
-router.use(requireAdmin);
+const uploadPdf = multer({
+  storage,
+  limits: {
+    fileSize: parseInt(process.env.MAX_PDF_SIZE) || 10485760
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only PDF files are allowed.'));
+    }
+  }
+});
 
-router.get('/exams', getAdminExams);
-router.get('/exams/:id', getAdminExamById);
-router.get('/exams/:id/sections-questions', getExamSectionsWithQuestions);
-router.post('/exams', upload.fields([
+router.use(authenticate);
+router.use(adminAuth);
+
+router.get('/exams', checkPermission('exams', 'read'), getAdminExams);
+router.get('/exams/:id', checkPermission('exams', 'read'), getAdminExamById);
+router.get('/exams/:id/sections-questions', checkPermission('exams', 'read'), getExamSectionsWithQuestions);
+router.post('/exams', checkPermission('exams', 'create'), activityLogger('CREATE_EXAM', 'exam'), upload.fields([
   { name: 'logo', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 }
 ]), createExam);
 
-router.post('/exams/bulk', upload.any(), bulkCreateExamWithContent);
+router.post('/exams/bulk', checkPermission('exams', 'create'), activityLogger('BULK_CREATE_EXAM', 'exam'), upload.any(), bulkCreateExamWithContent);
 
-router.post('/exams/draft', upload.any(), saveDraftExam);
+router.post('/exams/draft', checkPermission('exams', 'create'), activityLogger('SAVE_DRAFT_EXAM', 'exam'), upload.any(), saveDraftExam);
 
-router.put('/exams/:id/content', upload.any(), updateExamWithContent);
+router.put('/exams/:id/content', checkPermission('exams', 'update'), activityLogger('UPDATE_EXAM_CONTENT', 'exam'), upload.any(), updateExamWithContent);
 
-router.put('/exams/:id', upload.fields([
+router.put('/exams/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_EXAM', 'exam'), upload.fields([
   { name: 'logo', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 }
 ]), updateExam);
 
-router.delete('/exams/:id', deleteExam);
+router.delete('/exams/:id', requireRole('admin'), activityLogger('DELETE_EXAM', 'exam'), deleteExam);
 
-router.post('/sections', createSection);
-router.put('/sections/:id', updateSection);
-router.delete('/sections/:id', deleteSection);
+router.post('/sections', checkPermission('exams', 'create'), activityLogger('CREATE_SECTION', 'section'), createSection);
+router.put('/sections/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_SECTION', 'section'), updateSection);
+router.delete('/sections/:id', requireRole('admin'), activityLogger('DELETE_SECTION', 'section'), deleteSection);
 
-router.get('/navigation', getAdminNavigationLinks);
-router.post('/navigation', createNavigationLink);
-router.put('/navigation/:id', updateNavigationLink);
-router.delete('/navigation/:id', deleteNavigationLink);
-router.post('/navigation/reorder', reorderNavigationLinks);
+router.get('/navigation', requireRole('admin'), getAdminNavigationLinks);
+router.post('/navigation', requireRole('admin'), activityLogger('CREATE_NAVIGATION', 'navigation'), createNavigationLink);
+router.put('/navigation/:id', requireRole('admin'), activityLogger('UPDATE_NAVIGATION', 'navigation'), updateNavigationLink);
+router.delete('/navigation/:id', requireRole('admin'), activityLogger('DELETE_NAVIGATION', 'navigation'), deleteNavigationLink);
+router.post('/navigation/reorder', requireRole('admin'), reorderNavigationLinks);
 
-router.get('/footer', getAdminFooterLinks);
-router.post('/footer', createFooterLink);
-router.put('/footer/:id', updateFooterLink);
-router.delete('/footer/:id', deleteFooterLink);
-router.post('/footer/reorder', reorderFooterLinks);
+router.get('/footer', requireRole('admin'), getAdminFooterLinks);
+router.post('/footer', requireRole('admin'), createFooterLink);
+router.put('/footer/:id', requireRole('admin'), updateFooterLink);
+router.delete('/footer/:id', requireRole('admin'), deleteFooterLink);
+router.post('/footer/reorder', requireRole('admin'), reorderFooterLinks);
 
-router.get('/contact', adminGetContact);
-router.put('/contact', adminUpsertContact);
+router.get('/contact', requireRole('admin'), adminGetContact);
+router.put('/contact', requireRole('admin'), adminUpsertContact);
 
-router.get('/about', adminGetAbout);
-router.put('/about', adminUpsertAbout);
+router.get('/about', requireRole('admin'), adminGetAbout);
+router.put('/about', requireRole('admin'), adminUpsertAbout);
 
-router.get('/privacy', adminGetPrivacyPolicy);
-router.put('/privacy', adminUpsertPrivacyPolicy);
+router.get('/privacy', requireRole('admin'), adminGetPrivacyPolicy);
+router.put('/privacy', requireRole('admin'), adminUpsertPrivacyPolicy);
 
-router.get('/disclaimer', adminGetDisclaimer);
-router.put('/disclaimer', adminUpsertDisclaimer);
+router.get('/disclaimer', requireRole('admin'), adminGetDisclaimer);
+router.put('/disclaimer', requireRole('admin'), adminUpsertDisclaimer);
 
-router.post('/questions', upload.single('image'), createQuestion);
-router.put('/questions/:id', upload.single('image'), updateQuestion);
-router.delete('/questions/:id', deleteQuestion);
+router.post('/questions', checkPermission('exams', 'create'), activityLogger('CREATE_QUESTION', 'question'), upload.single('image'), createQuestion);
+router.put('/questions/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_QUESTION', 'question'), upload.single('image'), updateQuestion);
+router.delete('/questions/:id', requireRole('admin'), activityLogger('DELETE_QUESTION', 'question'), deleteQuestion);
 
 // Immediate image upload endpoints
-router.post('/questions/:id/upload-image', upload.single('image'), uploadQuestionImage);
-router.delete('/questions/:id/remove-image', removeQuestionImage);
+router.post('/questions/:id/upload-image', checkPermission('exams', 'update'), activityLogger('UPLOAD_QUESTION_IMAGE', 'question'), upload.single('image'), uploadQuestionImage);
+router.delete('/questions/:id/remove-image', requireRole('admin'), activityLogger('REMOVE_QUESTION_IMAGE', 'question'), removeQuestionImage);
 
-router.post('/options', upload.single('image'), createOption);
-router.put('/options/:id', upload.single('image'), updateOption);
+router.post('/options', checkPermission('exams', 'create'), activityLogger('CREATE_OPTION', 'option'), upload.single('image'), createOption);
+router.put('/options/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_OPTION', 'option'), upload.single('image'), updateOption);
 
-router.post('/options/:id/upload-image', upload.single('image'), uploadOptionImage);
-router.delete('/options/:id/remove-image', removeOptionImage);
+router.post('/options/:id/upload-image', checkPermission('exams', 'update'), activityLogger('UPLOAD_OPTION_IMAGE', 'option'), upload.single('image'), uploadOptionImage);
+router.delete('/options/:id/remove-image', requireRole('admin'), activityLogger('REMOVE_OPTION_IMAGE', 'option'), removeOptionImage);
 
-router.get('/users', getAllUsers);
-router.get('/users/:id', getUserDetails);
-router.put('/users/:id/role', updateUserRole);
-router.put('/users/:id/toggle-block', toggleUserBlock);
+// PDF upload endpoints for exams
+router.post('/exams/:id/upload-pdf-en', checkPermission('exams', 'update'), activityLogger('UPLOAD_EXAM_PDF_EN', 'exam'), uploadPdf.single('pdf'), uploadExamPdfEn);
+router.post('/exams/:id/upload-pdf-hi', checkPermission('exams', 'update'), activityLogger('UPLOAD_EXAM_PDF_HI', 'exam'), uploadPdf.single('pdf'), uploadExamPdfHi);
+router.delete('/exams/:id/remove-pdf-en', requireRole('admin'), activityLogger('REMOVE_EXAM_PDF_EN', 'exam'), removeExamPdfEn);
+router.delete('/exams/:id/remove-pdf-hi', requireRole('admin'), activityLogger('REMOVE_EXAM_PDF_HI', 'exam'), removeExamPdfHi);
+
+router.get('/users', requireRole('admin'), getAllUsers);
+router.get('/users/:id', requireRole('admin'), getUserDetails);
+router.put('/users/:id/role', requireRole('admin'), activityLogger('UPDATE_USER_ROLE', 'user'), updateUserRole);
+router.put('/users/:id/toggle-block', requireRole('admin'), activityLogger('TOGGLE_USER_BLOCK', 'user'), toggleUserBlock);
 
 module.exports = router;

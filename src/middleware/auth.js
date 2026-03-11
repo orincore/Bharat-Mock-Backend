@@ -134,7 +134,9 @@ const adminAuth = async (req, res, next) => {
       .select(`
         id,
         is_active,
+        role_id,
         admin_roles (
+          id,
           name,
           description
         )
@@ -156,6 +158,7 @@ const adminAuth = async (req, res, next) => {
 
     req.adminUser = adminUser;
     req.adminRole = adminUser.admin_roles.name;
+    req.roleId = adminUser.admin_roles.id;
     next();
   } catch (error) {
     logger.error('Admin authentication error:', error);
@@ -173,17 +176,25 @@ const checkPermission = (resource, action) => {
         return next();
       }
 
-      const { data: permission } = await supabase
+      const { data: permission, error } = await supabase
         .from('admin_permissions')
-        .select(`can_${action}`)
-        .eq('role_id', req.adminUser.admin_roles.id)
+        .select('can_create, can_read, can_update, can_delete')
+        .eq('role_id', req.roleId)
         .eq('resource', resource)
-        .single();
+        .maybeSingle();
+
+      if (error) {
+        logger.error('Permission lookup error:', error);
+        return res.status(500).json({ 
+          success: false, 
+          message: 'Permission check failed' 
+        });
+      }
 
       if (!permission || !permission[`can_${action}`]) {
         return res.status(403).json({ 
           success: false, 
-          message: 'Insufficient permissions' 
+          message: `You do not have permission to ${action} ${resource}` 
         });
       }
 
@@ -198,9 +209,38 @@ const checkPermission = (resource, action) => {
   };
 };
 
+const requireRole = (...allowedRoles) => {
+  return async (req, res, next) => {
+    try {
+      if (!req.adminRole) {
+        return res.status(403).json({ 
+          success: false, 
+          message: 'Admin access required' 
+        });
+      }
+
+      if (!allowedRoles.includes(req.adminRole)) {
+        return res.status(403).json({ 
+          success: false, 
+          message: `Access denied. Required role: ${allowedRoles.join(' or ')}` 
+        });
+      }
+
+      next();
+    } catch (error) {
+      logger.error('Role check error:', error);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Role check failed' 
+      });
+    }
+  };
+};
+
 module.exports = {
   authenticate,
   optionalAuth,
   adminAuth,
-  checkPermission
+  checkPermission,
+  requireRole
 };

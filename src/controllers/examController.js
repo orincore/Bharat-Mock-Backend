@@ -159,11 +159,11 @@ const getExams = async (req, res) => {
         query = query.or('exam_type.eq.mock_test,and(exam_type.eq.past_paper,show_in_mock_tests.eq.true)');
       } else if (exam_type === 'all') {
         // no-op to include every type
+      } else if (exam_type === 'short_quiz') {
+        query = query.eq('exam_type', 'short_quiz');
       } else {
         query = query.eq('exam_type', exam_type);
       }
-    } else {
-      query = query.or('exam_type.eq.mock_test,and(exam_type.eq.past_paper,show_in_mock_tests.eq.true)');
     }
 
     if (is_premium === 'true') {
@@ -356,6 +356,8 @@ const buildExamQuery = () => {
       image_url,
       logo_url,
       thumbnail_url,
+      pdf_url_en,
+      pdf_url_hi,
       negative_marking,
       negative_mark_value,
       allow_anytime,
@@ -482,6 +484,8 @@ const getExamById = async (req, res) => {
           image_url,
           logo_url,
           thumbnail_url,
+          pdf_url_en,
+          pdf_url_hi,
           negative_marking,
           negative_mark_value,
           allow_anytime,
@@ -537,6 +541,8 @@ const getExamById = async (req, res) => {
             image_url,
             logo_url,
             thumbnail_url,
+            pdf_url_en,
+            pdf_url_hi,
             negative_marking,
             negative_mark_value,
             allow_anytime,

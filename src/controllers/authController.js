@@ -4,6 +4,20 @@ const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { sendWelcomeEmail, sendPasswordOtpEmail } = require('../utils/emailService');
 
+const normalizePlanRecord = (planData) => {
+  if (!planData) return null;
+  const normalPrice = Number(planData.normal_price_cents ?? planData.price_cents ?? 0);
+  const saleField = planData.sale_price_cents;
+  const salePrice = saleField === null || saleField === undefined ? null : Number(saleField);
+  return {
+    ...planData,
+    normal_price_cents: normalPrice,
+    sale_price_cents: salePrice,
+    price_cents: salePrice !== null ? salePrice : normalPrice,
+    duration_days: Number(planData.duration_days)
+  };
+};
+
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || '7d'
@@ -91,7 +105,7 @@ const login = async (req, res) => {
 
     const { data: user, error: fetchError } = await supabase
       .from('users')
-      .select('id, email, password_hash, name, avatar_url, phone, date_of_birth, role, is_blocked, created_at')
+      .select('id, email, password_hash, name, avatar_url, phone, date_of_birth, role, is_blocked, block_reason, created_at')
       .eq('email', email)
       .single();
 
@@ -105,7 +119,9 @@ const login = async (req, res) => {
     if (user.is_blocked) {
       return res.status(403).json({
         success: false,
-        message: 'Your account has been blocked'
+        message: user.block_reason 
+          ? `Your account has been suspended: ${user.block_reason}`
+          : 'Your account has been suspended'
       });
     }
 
@@ -155,6 +171,8 @@ const getProfile = async (req, res) => {
         date_of_birth,
         role,
         is_verified,
+        is_blocked,
+        block_reason,
         is_premium,
         auth_provider,
         is_onboarded,
@@ -188,16 +206,12 @@ const getProfile = async (req, res) => {
     if (user?.subscription_plan_id) {
       const { data: planData } = await supabase
         .from('subscription_plans')
-        .select('id, name, description, duration_days, price_cents, currency_code')
+        .select('id, name, description, duration_days, normal_price_cents, sale_price_cents, currency_code')
         .eq('id', user.subscription_plan_id)
         .maybeSingle();
 
       if (planData) {
-        subscriptionPlan = {
-          ...planData,
-          price_cents: Number(planData.price_cents),
-          duration_days: Number(planData.duration_days)
-        };
+        subscriptionPlan = normalizePlanRecord(planData);
       }
     }
 
@@ -554,6 +568,66 @@ const completeOnboarding = async (req, res) => {
   }
 };
 
+const refreshAuthToken = async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+
+    if (!refreshToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Refresh token is required'
+      });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(refreshToken, process.env.JWT_SECRET);
+    } catch (error) {
+      const message = error.name === 'TokenExpiredError' ? 'Refresh token expired' : 'Invalid refresh token';
+      return res.status(401).json({ success: false, message });
+    }
+
+    const userId = decoded.userId;
+    const { data: user } = await supabase
+      .from('users')
+      .select('id, is_blocked, block_reason')
+      .eq('id', userId)
+      .maybeSingle();
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (user.is_blocked) {
+      return res.status(403).json({
+        success: false,
+        message: user.block_reason || 'Your account has been blocked'
+      });
+    }
+
+    const newAccessToken = generateToken(userId);
+    const newRefreshToken = generateRefreshToken(userId);
+
+    res.json({
+      success: true,
+      message: 'Token refreshed successfully',
+      data: {
+        token: newAccessToken,
+        refreshToken: newRefreshToken
+      }
+    });
+  } catch (error) {
+    logger.error('Refresh token error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to refresh token'
+    });
+  }
+};
+
 module.exports = {
   register,
   login,
@@ -563,5 +637,6 @@ module.exports = {
   resetPassword,
   changePassword,
   googleCallback,
-  completeOnboarding
+  completeOnboarding,
+  refreshAuthToken
 };

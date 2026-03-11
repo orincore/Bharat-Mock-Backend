@@ -7,6 +7,7 @@ const logger = require('../config/logger');
 const FOLDER_STRUCTURE = {
   EXAM_LOGOS: 'exams/logos',
   EXAM_THUMBNAILS: 'exams/thumbnails',
+  EXAM_PDFS: 'exams/pdfs',
   QUESTION_IMAGES: 'questions/images',
   OPTION_IMAGES: 'options/images',
   USER_AVATARS: 'users/avatars',
@@ -91,6 +92,14 @@ const uploadSubcategoryLogo = async (file) => {
   return uploadFile(file, FOLDER_STRUCTURE.SUBCATEGORY_LOGOS);
 };
 
+const uploadExamPdfEn = async (file) => {
+  return uploadFile(file, FOLDER_STRUCTURE.EXAM_PDFS);
+};
+
+const uploadExamPdfHi = async (file) => {
+  return uploadFile(file, FOLDER_STRUCTURE.EXAM_PDFS);
+};
+
 const extractKeyFromUrl = (url) => {
   if (!url || !url.includes(R2_PUBLIC_URL)) return null;
   return url.replace(`${R2_PUBLIC_URL}/`, '');
@@ -125,6 +134,8 @@ module.exports = {
   deleteFile,
   uploadExamLogo,
   uploadExamThumbnail,
+  uploadExamPdfEn,
+  uploadExamPdfHi,
   uploadQuestionImage,
   uploadOptionImage,
   uploadUserAvatar,

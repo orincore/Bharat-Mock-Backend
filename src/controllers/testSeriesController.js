@@ -184,6 +184,7 @@ const getAllTestSeries = async (req, res) => {
 
     const seriesIds = testSeries.map(series => series.id);
     const statsMap = new Map();
+    const userCountMap = new Map();
 
     const fallbackCategoryMap = new Map();
 
@@ -218,6 +219,32 @@ const getAllTestSeries = async (req, res) => {
             });
           }
         });
+
+        // Calculate user counts for each test series
+        const examIds = examStats.map(e => e.id);
+        if (examIds.length > 0) {
+          const { data: attempts, error: attemptsError } = await supabase
+            .from('exam_attempts')
+            .select('exam_id, user_id')
+            .in('exam_id', examIds);
+
+          if (!attemptsError && attempts) {
+            const examToSeriesMap = new Map();
+            examStats.forEach(exam => {
+              examToSeriesMap.set(exam.id, exam.test_series_id);
+            });
+
+            attempts.forEach(attempt => {
+              const seriesId = examToSeriesMap.get(attempt.exam_id);
+              if (seriesId) {
+                if (!userCountMap.has(seriesId)) {
+                  userCountMap.set(seriesId, new Set());
+                }
+                userCountMap.get(seriesId).add(attempt.user_id);
+              }
+            });
+          }
+        }
       }
     }
 
@@ -232,6 +259,10 @@ const getAllTestSeries = async (req, res) => {
       series.free_tests = stats.free;
       series.languages = languages;
       series.languages_text = languages.join(', ');
+      
+      // Add user count from distinct users who attempted exams
+      const userSet = userCountMap.get(series.id);
+      series.user_count = userSet ? userSet.size : 0;
 
       const fallbackCategory = fallbackCategoryMap.get(series.id) || null;
       await hydrateSeriesCategory(series, fallbackCategory);

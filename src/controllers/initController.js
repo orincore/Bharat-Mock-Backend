@@ -2,6 +2,20 @@ const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { getCache, setCache } = require('../utils/cache');
 
+const normalizePlanRecord = (planData) => {
+  if (!planData) return null;
+  const normalPrice = Number(planData.normal_price_cents ?? planData.price_cents ?? 0);
+  const saleField = planData.sale_price_cents;
+  const salePrice = saleField === null || saleField === undefined ? null : Number(saleField);
+  return {
+    ...planData,
+    normal_price_cents: normalPrice,
+    sale_price_cents: salePrice,
+    price_cents: salePrice !== null ? salePrice : normalPrice,
+    duration_days: Number(planData.duration_days)
+  };
+};
+
 const INIT_CACHE_TTL = 300;
 const INIT_CACHE_KEY = 'app:init:public';
 
@@ -110,16 +124,12 @@ const getAppInit = async (req, res) => {
       if (user?.subscription_plan_id) {
         const { data: planData } = await supabase
           .from('subscription_plans')
-          .select('id, name, description, duration_days, price_cents, currency_code')
+          .select('id, name, description, duration_days, normal_price_cents, sale_price_cents, currency_code')
           .eq('id', user.subscription_plan_id)
           .maybeSingle();
 
         if (planData) {
-          user.subscription_plan = {
-            ...planData,
-            price_cents: Number(planData.price_cents),
-            duration_days: Number(planData.duration_days),
-          };
+          user.subscription_plan = normalizePlanRecord(planData);
         }
       }
       profile = user;

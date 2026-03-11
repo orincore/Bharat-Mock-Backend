@@ -1,6 +1,6 @@
 const supabase = require('../config/database');
 const logger = require('../config/logger');
-const { uploadExamLogo, uploadExamThumbnail, uploadQuestionImage, uploadOptionImage, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
+const { uploadExamLogo, uploadExamThumbnail, uploadExamPdfEn, uploadExamPdfHi, uploadQuestionImage, uploadOptionImage, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 
 const safeAverage = (numbers = []) => {
@@ -180,6 +180,7 @@ const getUserDetails = async (req, res) => {
         role,
         is_verified,
         is_blocked,
+        block_reason,
         is_onboarded,
         auth_provider,
         date_of_birth,
@@ -446,6 +447,8 @@ const getAdminExamById = async (req, res) => {
         is_published,
         logo_url,
         thumbnail_url,
+        pdf_url_en,
+        pdf_url_hi,
         negative_marking,
         negative_mark_value,
         slug,
@@ -1258,7 +1261,7 @@ const getAllUsers = async (req, res) => {
 
     let query = supabase
       .from('users')
-      .select('id, email, name, phone, avatar_url, role, is_verified, is_blocked, created_at', { count: 'exact' })
+      .select('id, email, name, phone, avatar_url, role, is_verified, is_blocked, block_reason, created_at', { count: 'exact' })
       .order('created_at', { ascending: false })
       .range(offset, offset + parseInt(limit) - 1);
 
@@ -1304,10 +1307,12 @@ const updateUserRole = async (req, res) => {
     const { id } = req.params;
     const { role } = req.body;
 
-    if (!['user', 'admin'].includes(role)) {
+    const allowedRoles = ['user', 'admin', 'editor', 'author'];
+
+    if (!allowedRoles.includes(role)) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid role. Must be "user" or "admin"'
+        message: 'Invalid role. Must be one of "user", "admin", "editor", or "author"'
       });
     }
 
@@ -1327,15 +1332,16 @@ const updateUserRole = async (req, res) => {
     }
 
     try {
-      if (role === 'admin') {
+      const elevatedRoles = ['admin', 'editor', 'author'];
+      if (elevatedRoles.includes(role)) {
         const { data: adminRole, error: adminRoleError } = await supabase
           .from('admin_roles')
           .select('id')
-          .eq('name', 'admin')
+          .eq('name', role)
           .single();
 
         if (adminRoleError || !adminRole) {
-          throw new Error('Admin role not found');
+          throw new Error(`${role} role not found`);
         }
 
         await supabase
@@ -1376,6 +1382,7 @@ const updateUserRole = async (req, res) => {
 const toggleUserBlock = async (req, res) => {
   try {
     const { id } = req.params;
+    const { reason } = req.body || {};
 
     const { data: currentUser } = await supabase
       .from('users')
@@ -1383,11 +1390,30 @@ const toggleUserBlock = async (req, res) => {
       .eq('id', id)
       .single();
 
+    if (!currentUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    const nextStatus = !currentUser.is_blocked;
+
+    if (nextStatus && (!reason || !reason.trim())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Block reason is required when blocking a user'
+      });
+    }
+
     const { data: user, error } = await supabase
       .from('users')
-      .update({ is_blocked: !currentUser.is_blocked })
+      .update({ 
+        is_blocked: nextStatus,
+        block_reason: nextStatus ? reason.trim() : null
+      })
       .eq('id', id)
-      .select('id, email, name, is_blocked')
+      .select('id, email, name, is_blocked, block_reason')
       .single();
 
     if (error) {
@@ -2390,6 +2416,268 @@ const removeOptionImage = async (req, res) => {
   }
 };
 
+// Upload English PDF for exam
+const uploadExamPdfEnController = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No PDF file provided'
+      });
+    }
+
+    // Check if exam exists
+    const { data: exam, error: examError } = await supabase
+      .from('exams')
+      .select('id, pdf_url_en')
+      .eq('id', id)
+      .single();
+
+    if (examError || !exam) {
+      logger.error('Exam not found for PDF upload:', { id, error: examError });
+      return res.status(404).json({
+        success: false,
+        message: 'Exam not found'
+      });
+    }
+
+    // Delete old PDF if exists
+    if (exam.pdf_url_en) {
+      const oldPdfKey = extractKeyFromUrl(exam.pdf_url_en);
+      if (oldPdfKey) {
+        try {
+          await deleteFile(oldPdfKey);
+        } catch (deleteError) {
+          logger.warn('Failed to delete old English PDF:', deleteError);
+        }
+      }
+    }
+
+    // Upload new PDF
+    const pdfResult = await uploadExamPdfEn(req.file);
+    
+    // Update exam with new PDF URL
+    const { error: updateError } = await supabase
+      .from('exams')
+      .update({ pdf_url_en: pdfResult.url })
+      .eq('id', id);
+
+    if (updateError) {
+      logger.error('Failed to update exam English PDF URL:', updateError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update exam PDF'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'English PDF uploaded successfully',
+      data: {
+        pdf_url_en: pdfResult.url
+      }
+    });
+  } catch (error) {
+    logger.error('Upload exam English PDF error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while uploading PDF'
+    });
+  }
+};
+
+// Upload Hindi PDF for exam
+const uploadExamPdfHiController = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No PDF file provided'
+      });
+    }
+
+    // Check if exam exists
+    const { data: exam, error: examError } = await supabase
+      .from('exams')
+      .select('id, pdf_url_hi')
+      .eq('id', id)
+      .single();
+
+    if (examError || !exam) {
+      logger.error('Exam not found for PDF upload:', { id, error: examError });
+      return res.status(404).json({
+        success: false,
+        message: 'Exam not found'
+      });
+    }
+
+    // Delete old PDF if exists
+    if (exam.pdf_url_hi) {
+      const oldPdfKey = extractKeyFromUrl(exam.pdf_url_hi);
+      if (oldPdfKey) {
+        try {
+          await deleteFile(oldPdfKey);
+        } catch (deleteError) {
+          logger.warn('Failed to delete old Hindi PDF:', deleteError);
+        }
+      }
+    }
+
+    // Upload new PDF
+    const pdfResult = await uploadExamPdfHi(req.file);
+    
+    // Update exam with new PDF URL
+    const { error: updateError } = await supabase
+      .from('exams')
+      .update({ pdf_url_hi: pdfResult.url })
+      .eq('id', id);
+
+    if (updateError) {
+      logger.error('Failed to update exam Hindi PDF URL:', updateError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to update exam PDF'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Hindi PDF uploaded successfully',
+      data: {
+        pdf_url_hi: pdfResult.url
+      }
+    });
+  } catch (error) {
+    logger.error('Upload exam Hindi PDF error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while uploading PDF'
+    });
+  }
+};
+
+// Remove English PDF from exam
+const removeExamPdfEn = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get current exam
+    const { data: exam, error: examError } = await supabase
+      .from('exams')
+      .select('id, pdf_url_en')
+      .eq('id', id)
+      .single();
+
+    if (examError || !exam) {
+      logger.error('Exam not found for PDF removal:', { id, error: examError });
+      return res.status(404).json({
+        success: false,
+        message: 'Exam not found'
+      });
+    }
+
+    // Delete PDF from storage if exists
+    if (exam.pdf_url_en) {
+      const pdfKey = extractKeyFromUrl(exam.pdf_url_en);
+      if (pdfKey) {
+        try {
+          await deleteFile(pdfKey);
+        } catch (deleteError) {
+          logger.warn('Failed to delete English PDF from storage:', deleteError);
+        }
+      }
+    }
+
+    // Update exam to remove PDF URL
+    const { error: updateError } = await supabase
+      .from('exams')
+      .update({ pdf_url_en: null })
+      .eq('id', id);
+
+    if (updateError) {
+      logger.error('Failed to remove exam English PDF URL:', updateError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to remove exam PDF'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'English PDF removed successfully'
+    });
+  } catch (error) {
+    logger.error('Remove exam English PDF error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while removing PDF'
+    });
+  }
+};
+
+// Remove Hindi PDF from exam
+const removeExamPdfHi = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get current exam
+    const { data: exam, error: examError } = await supabase
+      .from('exams')
+      .select('id, pdf_url_hi')
+      .eq('id', id)
+      .single();
+
+    if (examError || !exam) {
+      logger.error('Exam not found for PDF removal:', { id, error: examError });
+      return res.status(404).json({
+        success: false,
+        message: 'Exam not found'
+      });
+    }
+
+    // Delete PDF from storage if exists
+    if (exam.pdf_url_hi) {
+      const pdfKey = extractKeyFromUrl(exam.pdf_url_hi);
+      if (pdfKey) {
+        try {
+          await deleteFile(pdfKey);
+        } catch (deleteError) {
+          logger.warn('Failed to delete Hindi PDF from storage:', deleteError);
+        }
+      }
+    }
+
+    // Update exam to remove PDF URL
+    const { error: updateError } = await supabase
+      .from('exams')
+      .update({ pdf_url_hi: null })
+      .eq('id', id);
+
+    if (updateError) {
+      logger.error('Failed to remove exam Hindi PDF URL:', updateError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to remove exam PDF'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Hindi PDF removed successfully'
+    });
+  } catch (error) {
+    logger.error('Remove exam Hindi PDF error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while removing PDF'
+    });
+  }
+};
+
 module.exports = {
   getAdminExams,
   getAdminExamById,
@@ -2412,6 +2700,10 @@ module.exports = {
   removeQuestionImage,
   uploadOptionImage: uploadOptionImageController,
   removeOptionImage,
+  uploadExamPdfEn: uploadExamPdfEnController,
+  uploadExamPdfHi: uploadExamPdfHiController,
+  removeExamPdfEn,
+  removeExamPdfHi,
   getUserDetails,
   getAllUsers,
   updateUserRole,

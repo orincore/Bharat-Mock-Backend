@@ -3,9 +3,16 @@ const logger = require('../config/logger');
 
 const normalizePlan = (plan) => {
   if (!plan) return null;
+  const normalPrice = Number(plan.normal_price_cents);
+  const salePrice = plan.sale_price_cents !== null && plan.sale_price_cents !== undefined
+    ? Number(plan.sale_price_cents)
+    : null;
+  const effectivePrice = salePrice !== null ? salePrice : normalPrice;
   return {
     ...plan,
-    price_cents: Number(plan.price_cents),
+    normal_price_cents: normalPrice,
+    sale_price_cents: salePrice,
+    price_cents: effectivePrice,
     duration_days: Number(plan.duration_days)
   };
 };
@@ -23,7 +30,8 @@ const listPlans = async ({ includeInactive = false } = {}) => {
   let query = supabase
     .from('subscription_plans')
     .select('*')
-    .order('price_cents');
+    .order('sale_price_cents', { ascending: true, nullsFirst: false })
+    .order('normal_price_cents');
 
   if (!includeInactive) {
     query = query.eq('is_active', true);
@@ -102,7 +110,7 @@ const listSubscriptionTransactions = async ({ status, planId, search, limit = 50
     .select(`
       *,
       user:users ( id, name, email ),
-      plan:subscription_plans ( id, name, price_cents, currency_code ),
+      plan:subscription_plans ( id, name, normal_price_cents, sale_price_cents, currency_code ),
       promocode:promocodes ( id, code, discount_type, discount_value )
     `)
     .order('created_at', { ascending: false })
@@ -313,7 +321,7 @@ const getSubscriptionsForRenewalReminder = async (windowHours = 72) => {
       status,
       renewal_reminder_sent_at,
       user:users!inner ( id, email, name ),
-      plan:subscription_plans!inner ( id, name, price_cents, duration_days )
+      plan:subscription_plans!inner ( id, name, normal_price_cents, sale_price_cents, duration_days )
     `)
     .eq('status', 'active')
     .eq('auto_renew', true)
@@ -346,7 +354,7 @@ const getSubscriptionsForExpiryReminder = async (windowHours = 72) => {
       status,
       expiry_reminder_sent_at,
       user:users!inner ( id, email, name ),
-      plan:subscription_plans!inner ( id, name, price_cents, duration_days )
+      plan:subscription_plans!inner ( id, name, normal_price_cents, sale_price_cents, duration_days )
     `)
     .eq('status', 'active')
     .eq('auto_renew', false)
