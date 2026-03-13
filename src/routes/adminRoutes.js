@@ -52,6 +52,7 @@ const { adminGetContact, adminUpsertContact } = require('../controllers/contactC
 const { adminGetAbout, adminUpsertAbout } = require('../controllers/aboutController');
 const { adminGetPrivacyPolicy, adminUpsertPrivacyPolicy } = require('../controllers/privacyController');
 const { adminGetDisclaimer, adminUpsertDisclaimer } = require('../controllers/disclaimerController');
+const { adminGetRefundPolicy, adminUpsertRefundPolicy } = require('../controllers/refundController');
 
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -134,6 +135,9 @@ router.put('/privacy', requireRole('admin'), adminUpsertPrivacyPolicy);
 
 router.get('/disclaimer', requireRole('admin'), adminGetDisclaimer);
 router.put('/disclaimer', requireRole('admin'), adminUpsertDisclaimer);
+
+router.get('/refund-policy', requireRole('admin'), adminGetRefundPolicy);
+router.put('/refund-policy', requireRole('admin'), adminUpsertRefundPolicy);
 
 router.post('/questions', checkPermission('exams', 'create'), activityLogger('CREATE_QUESTION', 'question'), upload.single('image'), createQuestion);
 router.put('/questions/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_QUESTION', 'question'), upload.single('image'), updateQuestion);
