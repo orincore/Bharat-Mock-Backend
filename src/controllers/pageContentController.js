@@ -13,6 +13,8 @@ const debugLog = (label, payload) => {
   }
 };
 
+const isTempId = (value) => typeof value === 'string' && value.startsWith('temp-');
+
 const pageContentController = {
   // Get all content for a subcategory page
   getPageContent: async (req, res) => {
@@ -212,9 +214,25 @@ const pageContentController = {
 
         const providedBlocks = Array.isArray(rawSection.blocks) ? rawSection.blocks : [];
         const upsertedBlockIds = [];
+        const blockIdMap = new Map();
+
+        // Seed map with existing ids so children referencing persisted blocks remain intact
+        providedBlocks.forEach((block) => {
+          if (block?.id && !isTempId(block.id)) {
+            blockIdMap.set(block.id, block.id);
+          }
+        });
 
         for (const rawBlock of providedBlocks) {
           if (!rawBlock) continue;
+
+          const resolveParentId = (parentId) => {
+            if (!parentId) return null;
+            const mapped = blockIdMap.get(parentId);
+            if (mapped) return mapped;
+            if (isTempId(parentId)) return null;
+            return parentId;
+          };
 
           const blockPayload = {
             section_id: sectionId,
@@ -222,13 +240,13 @@ const pageContentController = {
             content: rawBlock.content || {},
             settings: rawBlock.settings || {},
             display_order: rawBlock.display_order ?? 0,
-            parent_block_id: rawBlock.parent_block_id || null,
+            parent_block_id: resolveParentId(rawBlock.parent_block_id),
             updated_by: req.user?.id || null
           };
 
           let blockId = rawBlock.id;
 
-          if (!blockId || blockId.toString().startsWith('temp-')) {
+          if (!blockId || isTempId(blockId.toString())) {
             const { data, error } = await supabase
               .from('page_content_blocks')
               .insert([{ ...blockPayload, subcategory_id: subcategoryId, created_by: req.user?.id || null }])
@@ -251,6 +269,7 @@ const pageContentController = {
             }
           }
 
+          blockIdMap.set(rawBlock.id, blockId);
           upsertedBlockIds.push(blockId);
         }
 
