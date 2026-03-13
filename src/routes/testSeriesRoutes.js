@@ -14,7 +14,10 @@ const {
   updateTopic,
   deleteTopic,
   getSectionsByTestSeries,
-  getTopicsBySection
+  getTopicsBySection,
+  reorderSections,
+  reorderTopics,
+  reorderExams
 } = require('../controllers/testSeriesController');
 const { authenticate, adminAuth } = require('../middleware/auth');
 
@@ -37,5 +40,10 @@ router.delete('/sections/:id', authenticate, adminAuth, deleteSection);
 router.post('/topics', authenticate, adminAuth, createTopic);
 router.put('/topics/:id', authenticate, adminAuth, updateTopic);
 router.delete('/topics/:id', authenticate, adminAuth, deleteTopic);
+
+// Reorder routes
+router.post('/sections/reorder', authenticate, adminAuth, reorderSections);
+router.post('/topics/reorder', authenticate, adminAuth, reorderTopics);
+router.post('/exams/reorder', authenticate, adminAuth, reorderExams);
 
 module.exports = router;

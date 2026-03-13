@@ -945,6 +945,138 @@ const getTopicsBySection = async (req, res) => {
   }
 };
 
+const reorderSections = async (req, res) => {
+  try {
+    const { orderedIds } = req.body;
+
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'orderedIds must be a non-empty array' 
+      });
+    }
+
+    // Update display_order for each section
+    const updates = orderedIds.map((id, index) => 
+      supabase
+        .from('test_series_sections')
+        .update({ display_order: index })
+        .eq('id', id)
+    );
+
+    const results = await Promise.all(updates);
+    
+    // Check for errors
+    const failed = results.find(result => result.error);
+    if (failed) {
+      logger.error('Reorder sections error:', failed.error);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to reorder sections' 
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Sections reordered successfully' 
+    });
+  } catch (error) {
+    logger.error('Reorder sections error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while reordering sections' 
+    });
+  }
+};
+
+const reorderTopics = async (req, res) => {
+  try {
+    const { orderedIds } = req.body;
+
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'orderedIds must be a non-empty array' 
+      });
+    }
+
+    // Update display_order for each topic
+    const updates = orderedIds.map((id, index) => 
+      supabase
+        .from('test_series_topics')
+        .update({ display_order: index })
+        .eq('id', id)
+    );
+
+    const results = await Promise.all(updates);
+    
+    // Check for errors
+    const failed = results.find(result => result.error);
+    if (failed) {
+      logger.error('Reorder topics error:', failed.error);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to reorder topics' 
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Topics reordered successfully' 
+    });
+  } catch (error) {
+    logger.error('Reorder topics error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while reordering topics' 
+    });
+  }
+};
+
+const reorderExams = async (req, res) => {
+  try {
+    const { orderedIds } = req.body;
+
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'orderedIds must be a non-empty array' 
+      });
+    }
+
+    // Update display_order for each exam
+    const updates = orderedIds.map((id, index) => 
+      supabase
+        .from('exams')
+        .update({ display_order: index })
+        .eq('id', id)
+    );
+
+    const results = await Promise.all(updates);
+    
+    // Check for errors
+    const failed = results.find(result => result.error);
+    if (failed) {
+      logger.error('Reorder exams error:', failed.error);
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Failed to reorder exams' 
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Exams reordered successfully' 
+    });
+  } catch (error) {
+    logger.error('Reorder exams error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error while reordering exams' 
+    });
+  }
+};
+
 module.exports = {
   getAllTestSeries,
   getTestSeriesById,
@@ -959,5 +1091,8 @@ module.exports = {
   updateTopic,
   deleteTopic,
   getSectionsByTestSeries,
-  getTopicsBySection
+  getTopicsBySection,
+  reorderSections,
+  reorderTopics,
+  reorderExams
 };
