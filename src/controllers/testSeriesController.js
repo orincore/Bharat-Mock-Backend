@@ -66,6 +66,7 @@ const getAllTestSeries = async (req, res) => {
     let resolvedCategoryId = null;
     let resolvedCategorySlug = null;
     let categorySeriesIds = null;
+    let subcategorySeriesIds = null;
 
     if (category) {
       if (isValidUuid(category)) {
@@ -142,6 +143,97 @@ const getAllTestSeries = async (req, res) => {
       }
     }
 
+    // Handle subcategory filtering similar to category filtering
+    if (subcategory) {
+      let resolvedSubcategoryId = null;
+      let resolvedSubcategorySlug = null;
+
+      if (isValidUuid(subcategory)) {
+        resolvedSubcategoryId = subcategory;
+        // Fetch subcategory details to get slug
+        const { data: subcategoryDetails } = await supabase
+          .from('exam_subcategories')
+          .select('slug')
+          .eq('id', subcategory)
+          .single();
+        if (subcategoryDetails?.slug) {
+          resolvedSubcategorySlug = slugify(subcategoryDetails.slug);
+        }
+      } else {
+        const normalizedSlug = slugify(subcategory);
+        resolvedSubcategorySlug = normalizedSlug;
+        // Fetch subcategory details to get ID
+        const { data: subcategoryDetails } = await supabase
+          .from('exam_subcategories')
+          .select('id')
+          .eq('slug', normalizedSlug)
+          .single();
+        if (subcategoryDetails?.id) {
+          resolvedSubcategoryId = subcategoryDetails.id;
+        }
+      }
+
+      subcategorySeriesIds = new Set();
+
+      // Check direct test series subcategory matches
+      if (resolvedSubcategoryId) {
+        const { data: directSeries, error: directSubcategoryError } = await supabase
+          .from('test_series')
+          .select('id')
+          .eq('subcategory_id', resolvedSubcategoryId)
+          .is('deleted_at', null);
+
+        if (directSubcategoryError) {
+          logger.error('Error fetching direct subcategory matches for test series:', directSubcategoryError);
+        } else if (directSeries) {
+          directSeries.forEach(series => {
+            if (series?.id) {
+              subcategorySeriesIds.add(series.id);
+            }
+          });
+        }
+      }
+
+      // Check exam subcategory mappings
+      const examSubcategoryConditions = [];
+      if (resolvedSubcategoryId) {
+        examSubcategoryConditions.push(`subcategory_id.eq.${resolvedSubcategoryId}`);
+      }
+      if (resolvedSubcategorySlug) {
+        examSubcategoryConditions.push(`subcategory.eq.${resolvedSubcategorySlug}`);
+      }
+
+      if (examSubcategoryConditions.length > 0) {
+        const { data: examSeries, error: subcategoryExamError } = await supabase
+          .from('exams')
+          .select('test_series_id')
+          .is('deleted_at', null)
+          .not('test_series_id', 'is', null)
+          .or(examSubcategoryConditions.join(','));
+
+        if (subcategoryExamError) {
+          logger.error('Error fetching exam subcategory mappings for test series:', subcategoryExamError);
+        } else if (examSeries) {
+          examSeries.forEach(exam => {
+            if (exam?.test_series_id) {
+              subcategorySeriesIds.add(exam.test_series_id);
+            }
+          });
+        }
+      }
+
+      // If no subcategory matches found, return empty result
+      if (subcategorySeriesIds.size === 0) {
+        return res.json({
+          data: [],
+          total: 0,
+          page: pageNumber,
+          limit: limitNumber,
+          totalPages: 0
+        });
+      }
+    }
+
     let query = supabase
       .from('test_series')
       .select(`
@@ -155,16 +247,33 @@ const getAllTestSeries = async (req, res) => {
       .order('created_at', { ascending: false })
       .range(offset, offset + limitNumber - 1);
 
+    // Apply category filter
     if (categorySeriesIds && categorySeriesIds.size > 0) {
       query = query.in('id', Array.from(categorySeriesIds));
     }
 
-    if (search) {
-      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
+    // Apply subcategory filter (intersect with category results if both are present)
+    if (subcategorySeriesIds && subcategorySeriesIds.size > 0) {
+      if (categorySeriesIds && categorySeriesIds.size > 0) {
+        // Intersect category and subcategory results
+        const intersection = Array.from(categorySeriesIds).filter(id => subcategorySeriesIds.has(id));
+        if (intersection.length === 0) {
+          return res.json({
+            data: [],
+            total: 0,
+            page: pageNumber,
+            limit: limitNumber,
+            totalPages: 0
+          });
+        }
+        query = query.in('id', intersection);
+      } else {
+        query = query.in('id', Array.from(subcategorySeriesIds));
+      }
     }
 
-    if (subcategory) {
-      query = query.eq('subcategory_id', subcategory);
+    if (search) {
+      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
     }
 
     if (difficulty) {

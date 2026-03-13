@@ -723,6 +723,27 @@ const getExamQuestions = async (req, res) => {
   try {
     const { examId, attemptId } = req.params;
 
+    // Debug logging
+    logger.info('getExamQuestions called:', {
+      examId,
+      attemptId,
+      userId: req.user?.id,
+      userEmail: req.user?.email
+    });
+
+    // First, let's check if the attempt exists at all
+    const { data: attemptCheck, error: attemptCheckError } = await supabase
+      .from('exam_attempts')
+      .select('id, exam_id, user_id, is_submitted, language')
+      .eq('id', attemptId)
+      .single();
+
+    logger.info('Attempt check result:', {
+      attemptCheck,
+      attemptCheckError,
+      attemptExists: !!attemptCheck
+    });
+
     const { data: attempt, error: attemptError } = await supabase
       .from('exam_attempts')
       .select('id, exam_id, user_id, is_submitted, language')
@@ -731,10 +752,29 @@ const getExamQuestions = async (req, res) => {
       .eq('user_id', req.user.id)
       .single();
 
+    logger.info('Full attempt query result:', {
+      attempt,
+      attemptError,
+      queryConditions: {
+        attemptId,
+        examId,
+        userId: req.user.id
+      }
+    });
+
     if (attemptError || !attempt) {
       return res.status(404).json({
         success: false,
-        message: 'Exam attempt not found'
+        message: 'Exam attempt not found',
+        debug: {
+          attemptExists: !!attemptCheck,
+          attemptBelongsToUser: attemptCheck?.user_id === req.user.id,
+          attemptBelongsToExam: attemptCheck?.exam_id === examId,
+          userId: req.user.id,
+          attemptUserId: attemptCheck?.user_id,
+          examId: examId,
+          attemptExamId: attemptCheck?.exam_id
+        }
       });
     }
 
