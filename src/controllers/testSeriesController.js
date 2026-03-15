@@ -1,6 +1,7 @@
 const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
+const { uploadFile, deleteFile, extractKeyFromUrl, FOLDER_STRUCTURE } = require('../services/uploadService');
 
 const isValidUuid = (value = '') => {
   const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
@@ -1077,6 +1078,242 @@ const reorderExams = async (req, res) => {
   }
 };
 
+const uploadTestSeriesLogo = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const file = req.file;
+
+    if (!file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Check if test series exists
+    const { data: testSeries, error: fetchError } = await supabase
+      .from('test_series')
+      .select('id, logo_url')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !testSeries) {
+      return res.status(404).json({ error: 'Test series not found' });
+    }
+
+    // Delete old logo if exists
+    if (testSeries.logo_url) {
+      const oldKey = extractKeyFromUrl(testSeries.logo_url);
+      if (oldKey) {
+        try {
+          await deleteFile(oldKey);
+        } catch (deleteError) {
+          logger.warn('Failed to delete old logo:', deleteError);
+        }
+      }
+    }
+
+    // Upload new logo
+    const uploadResult = await uploadFile(file, 'test-series/logos');
+
+    // Update test series with new logo URL
+    const { data: updatedSeries, error: updateError } = await supabase
+      .from('test_series')
+      .update({ 
+        logo_url: uploadResult.url,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) {
+      logger.error('Error updating test series logo:', updateError);
+      return res.status(500).json({ error: 'Failed to update test series logo' });
+    }
+
+    res.json({
+      success: true,
+      logo_url: uploadResult.url,
+      test_series: updatedSeries
+    });
+  } catch (error) {
+    logger.error('Error uploading test series logo:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+const uploadTestSeriesThumbnail = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const file = req.file;
+
+    if (!file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Check if test series exists
+    const { data: testSeries, error: fetchError } = await supabase
+      .from('test_series')
+      .select('id, thumbnail_url')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !testSeries) {
+      return res.status(404).json({ error: 'Test series not found' });
+    }
+
+    // Delete old thumbnail if exists
+    if (testSeries.thumbnail_url) {
+      const oldKey = extractKeyFromUrl(testSeries.thumbnail_url);
+      if (oldKey) {
+        try {
+          await deleteFile(oldKey);
+        } catch (deleteError) {
+          logger.warn('Failed to delete old thumbnail:', deleteError);
+        }
+      }
+    }
+
+    // Upload new thumbnail
+    const uploadResult = await uploadFile(file, 'test-series/thumbnails');
+
+    // Update test series with new thumbnail URL
+    const { data: updatedSeries, error: updateError } = await supabase
+      .from('test_series')
+      .update({ 
+        thumbnail_url: uploadResult.url,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) {
+      logger.error('Error updating test series thumbnail:', updateError);
+      return res.status(500).json({ error: 'Failed to update test series thumbnail' });
+    }
+
+    res.json({
+      success: true,
+      thumbnail_url: uploadResult.url,
+      test_series: updatedSeries
+    });
+  } catch (error) {
+    logger.error('Error uploading test series thumbnail:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+const deleteTestSeriesLogo = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get current test series
+    const { data: testSeries, error: fetchError } = await supabase
+      .from('test_series')
+      .select('id, logo_url')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !testSeries) {
+      return res.status(404).json({ error: 'Test series not found' });
+    }
+
+    if (!testSeries.logo_url) {
+      return res.status(400).json({ error: 'No logo to delete' });
+    }
+
+    // Delete file from storage
+    const fileKey = extractKeyFromUrl(testSeries.logo_url);
+    if (fileKey) {
+      try {
+        await deleteFile(fileKey);
+      } catch (deleteError) {
+        logger.warn('Failed to delete logo file:', deleteError);
+      }
+    }
+
+    // Update test series to remove logo URL
+    const { data: updatedSeries, error: updateError } = await supabase
+      .from('test_series')
+      .update({ 
+        logo_url: null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) {
+      logger.error('Error removing test series logo:', updateError);
+      return res.status(500).json({ error: 'Failed to remove test series logo' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Logo deleted successfully',
+      test_series: updatedSeries
+    });
+  } catch (error) {
+    logger.error('Error deleting test series logo:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+const deleteTestSeriesThumbnail = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Get current test series
+    const { data: testSeries, error: fetchError } = await supabase
+      .from('test_series')
+      .select('id, thumbnail_url')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !testSeries) {
+      return res.status(404).json({ error: 'Test series not found' });
+    }
+
+    if (!testSeries.thumbnail_url) {
+      return res.status(400).json({ error: 'No thumbnail to delete' });
+    }
+
+    // Delete file from storage
+    const fileKey = extractKeyFromUrl(testSeries.thumbnail_url);
+    if (fileKey) {
+      try {
+        await deleteFile(fileKey);
+      } catch (deleteError) {
+        logger.warn('Failed to delete thumbnail file:', deleteError);
+      }
+    }
+
+    // Update test series to remove thumbnail URL
+    const { data: updatedSeries, error: updateError } = await supabase
+      .from('test_series')
+      .update({ 
+        thumbnail_url: null,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (updateError) {
+      logger.error('Error removing test series thumbnail:', updateError);
+      return res.status(500).json({ error: 'Failed to remove test series thumbnail' });
+    }
+
+    res.json({
+      success: true,
+      message: 'Thumbnail deleted successfully',
+      test_series: updatedSeries
+    });
+  } catch (error) {
+    logger.error('Error deleting test series thumbnail:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 module.exports = {
   getAllTestSeries,
   getTestSeriesById,
@@ -1094,5 +1331,9 @@ module.exports = {
   getTopicsBySection,
   reorderSections,
   reorderTopics,
-  reorderExams
+  reorderExams,
+  uploadTestSeriesLogo,
+  uploadTestSeriesThumbnail,
+  deleteTestSeriesLogo,
+  deleteTestSeriesThumbnail
 };

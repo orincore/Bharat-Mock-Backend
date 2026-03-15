@@ -67,6 +67,76 @@ router.get('/:examId/download-pdf',
   examController.getExamForPDF
 );
 
+// Debug endpoint to check exam by path
+router.get('/debug/path/*', async (req, res) => {
+  try {
+    const fullPath = req.params[0];
+    const path = fullPath.startsWith('/') ? fullPath : `/${fullPath}`;
+    
+    console.log('Debug path lookup:', path);
+    
+    // Check if exam exists by url_path (without is_published filter)
+    const { data: examByPathAll, error: pathErrorAll } = await supabase
+      .from('exams')
+      .select('id, title, url_path, slug, status, is_published, deleted_at')
+      .eq('url_path', path);
+    
+    // Check if exam exists by url_path (with is_published filter)
+    const { data: examByPath, error: pathError } = await supabase
+      .from('exams')
+      .select('id, title, url_path, slug, status, is_published, deleted_at')
+      .eq('url_path', path)
+      .eq('is_published', true)
+      .is('deleted_at', null)
+      .single();
+    
+    // Check if exam exists by slug (fallback)
+    const slugFallback = path.split('/').filter(Boolean).pop();
+    const { data: examBySlug, error: slugError } = await supabase
+      .from('exams')
+      .select('id, title, url_path, slug, status, is_published, deleted_at')
+      .eq('slug', slugFallback)
+      .eq('is_published', true)
+      .is('deleted_at', null)
+      .single();
+    
+    // Get all exams with similar paths or slugs
+    const { data: similarExams, error: similarError } = await supabase
+      .from('exams')
+      .select('id, title, url_path, slug, status, is_published, deleted_at')
+      .or(`url_path.ilike.%${slugFallback}%,slug.ilike.%${slugFallback}%`)
+      .limit(10);
+    
+    res.json({
+      success: true,
+      data: {
+        searchPath: path,
+        slugFallback,
+        examByPathAll: examByPathAll || [],
+        pathErrorAll: pathErrorAll?.message,
+        examByPath,
+        pathError: pathError?.message,
+        examBySlug,
+        slugError: slugError?.message,
+        similarExams: similarExams || [],
+        similarError: similarError?.message,
+        explanation: {
+          examByPathAll: 'All exams matching the path (ignoring is_published and deleted_at)',
+          examByPath: 'Published, non-deleted exam matching the path',
+          examBySlug: 'Published, non-deleted exam matching the slug fallback',
+          similarExams: 'Exams with similar paths or slugs'
+        }
+      }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message,
+      stack: error.stack
+    });
+  }
+});
+
 // Debug endpoint to check exam attempts
 router.get('/debug/attempts/:examId', authenticate, async (req, res) => {
   try {

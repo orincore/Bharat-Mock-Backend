@@ -9,6 +9,8 @@ router.get('/', authenticate, resultController.getResults);
 
 router.get('/stats', authenticate, resultController.getUserStats);
 
+router.get('/incomplete', authenticate, resultController.getIncompleteAttempts);
+
 router.get('/attempt/:attemptId',
   authenticate,
   [

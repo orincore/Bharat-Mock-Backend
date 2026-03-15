@@ -536,9 +536,68 @@ const getAnswerReview = async (req, res) => {
   }
 };
 
+const getIncompleteAttempts = async (req, res) => {
+  try {
+    const { data: attempts, error } = await supabase
+      .from('exam_attempts')
+      .select(`
+        id,
+        exam_id,
+        language,
+        created_at,
+        updated_at,
+        exams (
+          id,
+          title,
+          total_questions,
+          duration,
+          image_url
+        )
+      `)
+      .eq('user_id', req.user.id)
+      .eq('is_submitted', false)
+      .order('updated_at', { ascending: false });
+
+    if (error) {
+      logger.error('Get incomplete attempts error:', error);
+      return res.status(500).json({ success: false, message: 'Failed to fetch incomplete attempts' });
+    }
+
+    // For each attempt, count how many questions have been answered
+    const attemptsWithProgress = await Promise.all(
+      (attempts || []).map(async (attempt) => {
+        const { count } = await supabase
+          .from('user_answers')
+          .select('id', { count: 'exact', head: true })
+          .eq('attempt_id', attempt.id)
+          .not('answer', 'is', null);
+
+        return {
+          attemptId: attempt.id,
+          examId: attempt.exam_id,
+          examTitle: attempt.exams?.title || 'Unknown Exam',
+          examImage: attempt.exams?.image_url || null,
+          totalQuestions: attempt.exams?.total_questions || 0,
+          duration: attempt.exams?.duration || 0,
+          answeredQuestions: count || 0,
+          language: attempt.language || 'en',
+          startedAt: attempt.created_at,
+          lastActivity: attempt.updated_at,
+        };
+      })
+    );
+
+    res.json({ success: true, data: attemptsWithProgress });
+  } catch (error) {
+    logger.error('Get incomplete attempts error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch incomplete attempts' });
+  }
+};
+
 module.exports = {
   getResults,
   getUserStats,
+  getIncompleteAttempts,
   getResultByAttemptId,
   getResultById,
   getAnswerReview

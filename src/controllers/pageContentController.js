@@ -98,13 +98,16 @@ const pageContentController = {
         sidebarsByTab[tabKey].push(sidebar);
       });
 
+      const tocOrder = (seo?.structured_data?.toc_order) || {};
+
       res.json({
         sections: groupedBlocks,
         orphanBlocks,
         seo: seo || null,
         customTabs: customTabs || [],
         tabConfig: tabConfig || [],
-        sidebarsByTab
+        sidebarsByTab,
+        tocOrder
       });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch page content', error);

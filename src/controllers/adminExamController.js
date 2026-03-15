@@ -87,7 +87,8 @@ const getAdminExams = async (req, res) => {
       .range(offset, offset + limitNumber - 1);
 
     if (search) {
-      query = query.or(`title.ilike.%${search}%`);
+      const searchTerm = search.trim();
+      query = query.or(`title.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%`);
     }
 
     if (status) {

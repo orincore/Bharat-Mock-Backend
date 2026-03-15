@@ -438,7 +438,8 @@ const resolvers = {
         .range(offset, offset + limit - 1);
 
       if (filter.search) {
-        query = query.or(`title.ilike.%${filter.search}%`);
+        const searchTerm = filter.search.trim();
+        query = query.or(`title.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%`);
       }
       if (filter.status) query = query.eq('status', filter.status);
       if (filter.category) query = query.eq('category', filter.category);

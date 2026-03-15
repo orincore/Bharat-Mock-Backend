@@ -17,9 +17,14 @@ const {
   getTopicsBySection,
   reorderSections,
   reorderTopics,
-  reorderExams
+  reorderExams,
+  uploadTestSeriesLogo,
+  uploadTestSeriesThumbnail,
+  deleteTestSeriesLogo,
+  deleteTestSeriesThumbnail
 } = require('../controllers/testSeriesController');
 const { authenticate, adminAuth } = require('../middleware/auth');
+const { upload } = require('../utils/fileUpload');
 
 // Public routes
 router.get('/', getAllTestSeries);
@@ -45,5 +50,11 @@ router.delete('/topics/:id', authenticate, adminAuth, deleteTopic);
 router.post('/sections/reorder', authenticate, adminAuth, reorderSections);
 router.post('/topics/reorder', authenticate, adminAuth, reorderTopics);
 router.post('/exams/reorder', authenticate, adminAuth, reorderExams);
+
+// Icon upload routes
+router.post('/:id/logo', authenticate, adminAuth, upload.single('logo'), uploadTestSeriesLogo);
+router.post('/:id/thumbnail', authenticate, adminAuth, upload.single('thumbnail'), uploadTestSeriesThumbnail);
+router.delete('/:id/logo', authenticate, adminAuth, deleteTestSeriesLogo);
+router.delete('/:id/thumbnail', authenticate, adminAuth, deleteTestSeriesThumbnail);
 
 module.exports = router;

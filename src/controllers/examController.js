@@ -80,7 +80,54 @@ const getExams = async (req, res) => {
       .order('created_at', { ascending: false });
 
     if (search) {
-      query = query.or(`title.ilike.%${search}%`);
+      // Enhanced search: title, syllabus topics, category names, and subcategory names
+      const searchTerm = search.trim();
+      
+      // First, get category and subcategory IDs that match the search term
+      const { data: matchingCategories } = await supabase
+        .from('exam_categories')
+        .select('id')
+        .or(`name.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%`);
+      
+      const { data: matchingSubcategories } = await supabase
+        .from('exam_subcategories')
+        .select('id')
+        .or(`name.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%`);
+      
+      // Get exam IDs that have matching syllabus topics
+      const { data: matchingSyllabusExams } = await supabase
+        .from('exam_syllabus')
+        .select('exam_id')
+        .ilike('topic', `%${searchTerm}%`);
+      
+      // Build the search query with multiple OR conditions
+      const searchConditions = [
+        `title.ilike.%${searchTerm}%`,
+        `slug.ilike.%${searchTerm}%`,
+        `url_path.ilike.%${searchTerm}%`
+      ];
+      
+      // Add category ID matches
+      if (matchingCategories?.length > 0) {
+        const categoryIds = matchingCategories.map(c => c.id);
+        searchConditions.push(`category_id.in.(${categoryIds.join(',')})`);
+      }
+      
+      // Add subcategory ID matches
+      if (matchingSubcategories?.length > 0) {
+        const subcategoryIds = matchingSubcategories.map(s => s.id);
+        searchConditions.push(`subcategory_id.in.(${subcategoryIds.join(',')})`);
+      }
+      
+      // Add syllabus matches
+      if (matchingSyllabusExams?.length > 0) {
+        const examIds = matchingSyllabusExams.map(e => e.exam_id);
+        searchConditions.push(`id.in.(${examIds.join(',')})`);
+      }
+      
+      if (searchConditions.length > 0) {
+        query = query.or(searchConditions.join(','));
+      }
     }
 
     if (category) {
@@ -391,6 +438,14 @@ const fetchExamByIdentifier = async (identifier) => {
     return { exam: data, error };
   };
 
+  // Enhanced logging for debugging
+  logger.info('fetchExamByIdentifier called', {
+    identifier: normalizedId,
+    isUUID,
+    isUrlPath,
+    slugFallback
+  });
+
   if (isUUID) {
     const result = await runQuery({ id: normalizedId });
     if (result.exam) {
@@ -401,14 +456,38 @@ const fetchExamByIdentifier = async (identifier) => {
 
   if (isUrlPath) {
     const path = normalizedId.startsWith('/') ? normalizedId : `/${normalizedId}`;
+    
+    // Log the path lookup attempt
+    logger.info('Attempting path lookup', { path });
+    
     let { data: exam, error } = await buildExamQuery().eq('url_path', path).single();
+
+    // Log the result of path lookup
+    logger.info('Path lookup result', { 
+      found: !!exam, 
+      error: error?.message,
+      examId: exam?.id,
+      examTitle: exam?.title 
+    });
 
     if (!error && exam) {
       setCache(cacheKey, exam);
       return { exam, error: null };
     }
 
+    // If path lookup failed, try slug fallback
+    logger.info('Attempting slug fallback lookup', { slug: slugFallback });
+    
     let { exam: slugExam, error: slugError } = await runQuery({ slug: slugFallback });
+    
+    // Log the result of slug lookup
+    logger.info('Slug lookup result', { 
+      found: !!slugExam, 
+      error: slugError?.message,
+      examId: slugExam?.id,
+      examTitle: slugExam?.title 
+    });
+    
     if (slugExam) {
       setCache(cacheKey, slugExam);
     }
@@ -634,18 +713,41 @@ const startExam = async (req, res) => {
     const allowAnytime = exam.allow_anytime === true;
 
     if (!allowAnytime) {
-      if (exam.status !== 'ongoing') {
+      const now = new Date();
+      const normalizedStatus = (exam.status || '').toLowerCase().trim();
+
+      // Live/windowed exams: accept any live-like status and validate the date window
+      const isLiveStatus =
+        normalizedStatus === 'ongoing' ||
+        normalizedStatus === 'live' ||
+        normalizedStatus === 'live now' ||
+        normalizedStatus.includes('live');
+
+      const hasWindow = exam.start_date && exam.end_date;
+      const windowStarted = hasWindow && new Date(exam.start_date) <= now;
+      const windowEnded = hasWindow && new Date(exam.end_date) < now;
+      const withinWindow = hasWindow && windowStarted && !windowEnded;
+
+      // Allow if: status is live-like OR currently within the date window
+      const canAttempt = isLiveStatus || withinWindow;
+
+      if (!canAttempt) {
+        // Give a more specific message based on what's wrong
+        if (hasWindow && !windowStarted) {
+          return res.status(400).json({
+            success: false,
+            message: 'Exam has not started yet'
+          });
+        }
+        if (hasWindow && windowEnded) {
+          return res.status(400).json({
+            success: false,
+            message: 'Exam attempt window has closed'
+          });
+        }
         return res.status(400).json({
           success: false,
           message: 'Exam is not currently available'
-        });
-      }
-
-      const now = new Date();
-      if (new Date(exam.start_date) > now || new Date(exam.end_date) < now) {
-        return res.status(400).json({
-          success: false,
-          message: 'Exam is not within the allowed time window'
         });
       }
     }
