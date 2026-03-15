@@ -957,8 +957,19 @@ const reorderSections = async (req, res) => {
       });
     }
 
+    // Filter out temp/local IDs that are not valid UUIDs
+    const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+    const validIds = orderedIds.filter(id => uuidRegex.test(id));
+
+    if (validIds.length === 0) {
+      return res.json({ 
+        success: true, 
+        message: 'No saved sections to reorder' 
+      });
+    }
+
     // Update display_order for each section
-    const updates = orderedIds.map((id, index) => 
+    const updates = validIds.map((id, index) => 
       supabase
         .from('test_series_sections')
         .update({ display_order: index })
