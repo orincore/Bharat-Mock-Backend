@@ -61,6 +61,9 @@ const deleteSubcategory = async (req, res) => {
       }
     }
 
+    // Null out subcategory_id on exams referencing this subcategory
+    await supabase.from('exams').update({ subcategory_id: null }).eq('subcategory_id', id);
+
     const { error } = await supabase
       .from('exam_subcategories')
       .delete()
@@ -78,7 +81,7 @@ const deleteSubcategory = async (req, res) => {
   }
 };
 
-const deleteCategory = async (req, res) => {
+deleteCategory = async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -92,64 +95,140 @@ const deleteCategory = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
+    // Fetch all subcategories under this category
     const { data: subcategories } = await supabase
       .from('exam_subcategories')
       .select('id, logo_url')
       .eq('category_id', id);
 
-    if (Array.isArray(subcategories) && subcategories.length > 0) {
-      for (const sub of subcategories) {
-        if (sub.logo_url) {
-          const key = extractKeyFromUrl(sub.logo_url);
-          if (key) {
-            try {
-              await deleteFile(key);
-            } catch (err) {
-              logger.warn('Failed to delete subcategory logo during category deletion:', err);
-            }
+    const subIds = (subcategories || []).map((s) => s.id);
+
+    // Fetch all exams belonging to this category (directly or via subcategory)
+    let examQuery = supabase
+      .from('exams')
+      .select('id, logo_url, thumbnail_url')
+      .eq('category_id', id);
+
+    const { data: directExams } = await examQuery;
+
+    let subExams = [];
+    if (subIds.length > 0) {
+      const { data: se } = await supabase
+        .from('exams')
+        .select('id, logo_url, thumbnail_url')
+        .in('subcategory_id', subIds);
+      subExams = se || [];
+    }
+
+    const allExams = [...(directExams || []), ...subExams];
+    const examIds = allExams.map((e) => e.id);
+
+    // --- Delete all exam data in correct FK order ---
+    if (examIds.length > 0) {
+      // Get all question IDs for these exams
+      const { data: questions } = await supabase
+        .from('questions')
+        .select('id, image_url')
+        .in('exam_id', examIds);
+
+      const questionIds = (questions || []).map((q) => q.id);
+
+      // Delete question option images + records
+      if (questionIds.length > 0) {
+        const { data: options } = await supabase
+          .from('question_options')
+          .select('id, image_url')
+          .in('question_id', questionIds);
+
+        for (const opt of options || []) {
+          if (opt.image_url) {
+            try { await deleteFile(extractKeyFromUrl(opt.image_url)); } catch (e) { logger.warn('Failed to delete option image:', e); }
           }
+        }
+
+        await supabase.from('question_options').delete().in('question_id', questionIds);
+      }
+
+      // Delete question images + records
+      for (const q of questions || []) {
+        if (q.image_url) {
+          try { await deleteFile(extractKeyFromUrl(q.image_url)); } catch (e) { logger.warn('Failed to delete question image:', e); }
+        }
+      }
+      await supabase.from('questions').delete().in('exam_id', examIds);
+
+      // Delete exam sections and syllabus
+      await supabase.from('exam_sections').delete().in('exam_id', examIds);
+      await supabase.from('exam_syllabus').delete().in('exam_id', examIds);
+
+      // Delete attempt-related data (section_analysis → results → user_answers → exam_attempts)
+      const { data: attempts } = await supabase
+        .from('exam_attempts')
+        .select('id')
+        .in('exam_id', examIds);
+
+      const attemptIds = (attempts || []).map((a) => a.id);
+
+      if (attemptIds.length > 0) {
+        await supabase.from('section_analysis').delete().in('attempt_id', attemptIds);
+        await supabase.from('results').delete().in('attempt_id', attemptIds);
+        await supabase.from('user_answers').delete().in('attempt_id', attemptIds);
+        await supabase.from('exam_attempts').delete().in('id', attemptIds);
+      }
+
+      // Delete exam media files
+      for (const exam of allExams) {
+        if (exam.logo_url) {
+          try { await deleteFile(extractKeyFromUrl(exam.logo_url)); } catch (e) { logger.warn('Failed to delete exam logo:', e); }
+        }
+        if (exam.thumbnail_url) {
+          try { await deleteFile(extractKeyFromUrl(exam.thumbnail_url)); } catch (e) { logger.warn('Failed to delete exam thumbnail:', e); }
         }
       }
 
-      const subIds = subcategories.map((sub) => sub.id);
-      const { error: subDeleteError } = await supabase
-        .from('exam_subcategories')
-        .delete()
-        .in('id', subIds);
+      // Delete the exams themselves
+      const { error: examsDeleteError } = await supabase.from('exams').delete().in('id', examIds);
+      if (examsDeleteError) {
+        logger.error('Delete exams error:', examsDeleteError);
+        return res.status(500).json({ success: false, message: 'Failed to delete linked exams' });
+      }
+    }
 
+    // Delete subcategory logos + records
+    for (const sub of subcategories || []) {
+      if (sub.logo_url) {
+        try { await deleteFile(extractKeyFromUrl(sub.logo_url)); } catch (e) { logger.warn('Failed to delete subcategory logo:', e); }
+      }
+    }
+    if (subIds.length > 0) {
+      const { error: subDeleteError } = await supabase.from('exam_subcategories').delete().in('id', subIds);
       if (subDeleteError) {
         logger.error('Delete subcategories error:', subDeleteError);
         return res.status(500).json({ success: false, message: 'Failed to delete linked subcategories' });
       }
     }
 
+    // Delete category logo
     if (category.logo_url) {
-      const key = extractKeyFromUrl(category.logo_url);
-      if (key) {
-        try {
-          await deleteFile(key);
-        } catch (err) {
-          logger.warn('Failed to delete category logo during deletion:', err);
-        }
-      }
+      try { await deleteFile(extractKeyFromUrl(category.logo_url)); } catch (e) { logger.warn('Failed to delete category logo:', e); }
     }
 
-    const { error } = await supabase
-      .from('exam_categories')
-      .delete()
-      .eq('id', id);
-
+    // Finally delete the category
+    const { error } = await supabase.from('exam_categories').delete().eq('id', id);
     if (error) {
       logger.error('Delete category error:', error);
       return res.status(500).json({ success: false, message: 'Failed to delete category' });
     }
 
-    res.json({ success: true, message: 'Category deleted successfully' });
+    res.json({
+      success: true,
+      message: `Category deleted along with ${allExams.length} exam(s) and ${subIds.length} subcategory(ies)`
+    });
   } catch (error) {
     logger.error('Delete category error:', error);
     res.status(500).json({ success: false, message: 'Server error while deleting category' });
   }
-};
+}
 
 const getCategories = async (req, res) => {
   try {
