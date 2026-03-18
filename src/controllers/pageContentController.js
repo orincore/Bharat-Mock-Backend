@@ -170,9 +170,10 @@ const pageContentController = {
       for (const rawSection of sections) {
         if (!rawSection || !rawSection.title) continue;
 
+        const rawSectionKey = rawSection.section_key || rawSection.title?.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || null;
         const sectionPayload = {
-          section_key: rawSection.section_key || rawSection.title?.toLowerCase().replace(/\s+/g, '-') || null,
-          title: rawSection.title,
+          section_key: rawSectionKey ? rawSectionKey.slice(0, 500) : null,
+          title: rawSection.title?.slice(0, 500) || rawSection.title,
           subtitle: rawSection.subtitle || null,
           icon: rawSection.icon || null,
           background_color: rawSection.background_color || null,
