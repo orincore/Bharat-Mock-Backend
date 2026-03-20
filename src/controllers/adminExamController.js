@@ -107,7 +107,7 @@ const getAdminExams = async (req, res) => {
       query = query.eq('difficulty', difficulty);
     }
 
-    if (exam_type) {
+    if (exam_type && exam_type !== 'all') {
       query = query.eq('exam_type', exam_type);
     }
 

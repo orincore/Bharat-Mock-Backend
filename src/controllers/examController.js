@@ -242,7 +242,29 @@ const getExams = async (req, res) => {
 
     query = query.range(offset, offset + parseInt(limit) - 1);
 
-    const { data: exams, error, count } = await query;
+    // Fetch all exam_dates (no pagination) in parallel to build the complete year list
+    const yearsQueryBase = supabase
+      .from('exams')
+      .select('exam_date')
+      .eq('is_published', true)
+      .is('deleted_at', null);
+
+    // Re-apply the same filters to the years query
+    let yearsQuery = yearsQueryBase;
+    if (exam_type) {
+      if (exam_type === 'mock_test') {
+        yearsQuery = yearsQuery.or('exam_type.eq.mock_test,and(exam_type.eq.past_paper,show_in_mock_tests.eq.true)');
+      } else if (exam_type !== 'all') {
+        yearsQuery = yearsQuery.eq('exam_type', exam_type);
+      }
+    }
+    if (is_premium === 'true') yearsQuery = yearsQuery.eq('is_premium', true);
+    else if (is_premium === 'false') yearsQuery = yearsQuery.eq('is_premium', false);
+
+    const [{ data: exams, error, count }, { data: allDatesRows }] = await Promise.all([
+      query,
+      yearsQuery,
+    ]);
 
     if (error) {
       logger.error('Get exams error:', error);
@@ -277,13 +299,21 @@ const getExams = async (req, res) => {
     }
 
     const yearSet = new Set();
+    // Build year list from ALL matching records (not just current page)
+    (allDatesRows || []).forEach((row) => {
+      if (row.exam_date) {
+        const parsed = new Date(row.exam_date);
+        if (!Number.isNaN(parsed.getTime())) {
+          yearSet.add(parsed.getFullYear());
+        }
+      }
+    });
+    // Annotate current page exams with their year
     exams.forEach((exam) => {
       if (exam.exam_date) {
         const parsed = new Date(exam.exam_date);
         if (!Number.isNaN(parsed.getTime())) {
-          const year = parsed.getFullYear();
-          exam.exam_year = year;
-          yearSet.add(year);
+          exam.exam_year = parsed.getFullYear();
           return;
         }
       }
