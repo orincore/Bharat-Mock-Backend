@@ -110,7 +110,7 @@ router.delete('/exams/:id', requireRole('admin'), activityLogger('DELETE_EXAM', 
 
 router.post('/sections', checkPermission('exams', 'create'), activityLogger('CREATE_SECTION', 'section'), createSection);
 router.put('/sections/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_SECTION', 'section'), updateSection);
-router.delete('/sections/:id', requireRole('admin'), activityLogger('DELETE_SECTION', 'section'), deleteSection);
+router.delete('/sections/:id', requireRole('admin', 'editor'), activityLogger('DELETE_SECTION', 'section'), deleteSection);
 
 router.get('/navigation', requireRole('admin'), getAdminNavigationLinks);
 router.post('/navigation', requireRole('admin'), activityLogger('CREATE_NAVIGATION', 'navigation'), createNavigationLink);
@@ -141,17 +141,17 @@ router.put('/refund-policy', requireRole('admin'), adminUpsertRefundPolicy);
 
 router.post('/questions', checkPermission('exams', 'create'), activityLogger('CREATE_QUESTION', 'question'), upload.single('image'), createQuestion);
 router.put('/questions/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_QUESTION', 'question'), upload.single('image'), updateQuestion);
-router.delete('/questions/:id', requireRole('admin'), activityLogger('DELETE_QUESTION', 'question'), deleteQuestion);
+router.delete('/questions/:id', requireRole('admin', 'editor'), activityLogger('DELETE_QUESTION', 'question'), deleteQuestion);
 
 // Immediate image upload endpoints
 router.post('/questions/:id/upload-image', checkPermission('exams', 'update'), activityLogger('UPLOAD_QUESTION_IMAGE', 'question'), upload.single('image'), uploadQuestionImage);
-router.delete('/questions/:id/remove-image', requireRole('admin'), activityLogger('REMOVE_QUESTION_IMAGE', 'question'), removeQuestionImage);
+router.delete('/questions/:id/remove-image', requireRole('admin', 'editor'), activityLogger('REMOVE_QUESTION_IMAGE', 'question'), removeQuestionImage);
 
 router.post('/options', checkPermission('exams', 'create'), activityLogger('CREATE_OPTION', 'option'), upload.single('image'), createOption);
 router.put('/options/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_OPTION', 'option'), upload.single('image'), updateOption);
 
 router.post('/options/:id/upload-image', checkPermission('exams', 'update'), activityLogger('UPLOAD_OPTION_IMAGE', 'option'), upload.single('image'), uploadOptionImage);
-router.delete('/options/:id/remove-image', requireRole('admin'), activityLogger('REMOVE_OPTION_IMAGE', 'option'), removeOptionImage);
+router.delete('/options/:id/remove-image', requireRole('admin', 'editor'), activityLogger('REMOVE_OPTION_IMAGE', 'option'), removeOptionImage);
 
 // PDF upload endpoints for exams
 router.post('/exams/:id/upload-pdf-en', checkPermission('exams', 'update'), activityLogger('UPLOAD_EXAM_PDF_EN', 'exam'), uploadPdf.single('pdf'), uploadExamPdfEn);
