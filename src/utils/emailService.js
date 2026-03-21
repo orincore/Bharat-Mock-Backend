@@ -438,6 +438,57 @@ const sendSubscriptionExpiredEmail = async (userEmail, userName, { planName, exp
   }
 };
 
+const sendEmailVerificationOtpEmail = async (userEmail, userName, otpCode) => {
+  if (!hasEmailConfig()) {
+    console.warn('SMTP not configured, skipping email verification OTP');
+    return;
+  }
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: userEmail,
+    subject: 'Verify your Bharat Mock account',
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 24px; }
+          .card { max-width: 520px; margin: 0 auto; background: #fff; border-radius: 16px; border: 1px solid #e5e7eb; box-shadow: 0 20px 35px rgba(15,23,42,0.08); overflow: hidden; }
+          .header { background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); padding: 32px; color: #fff; text-align: center; }
+          .content { padding: 32px; color: #1f2937; }
+          .otp { font-size: 36px; letter-spacing: 10px; font-weight: 700; color: #111827; text-align: center; margin: 24px 0; background: #f3f4f6; border-radius: 12px; padding: 16px; }
+          .info { font-size: 14px; color: #6b7280; line-height: 1.6; text-align: center; }
+          .footer { padding: 24px 32px 32px; text-align: center; font-size: 13px; color: #9ca3af; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="header">
+            <h1 style="margin:0;font-size:26px;">Verify your email</h1>
+          </div>
+          <div class="content">
+            <p>Hi ${userName || 'there'},</p>
+            <p>Use the code below to verify your email and complete your Bharat Mock registration. This code is valid for <strong>10 minutes</strong>.</p>
+            <div class="otp">${otpCode}</div>
+            <div class="info">Didn't request this? You can safely ignore this email.</div>
+          </div>
+          <div class="footer">© ${new Date().getFullYear()} Bharat Mock. All rights reserved.</div>
+        </div>
+      </body>
+      </html>
+    `
+  };
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Email verification OTP sent to ${userEmail}`);
+  } catch (error) {
+    console.error('Error sending email verification OTP:', error);
+    throw error;
+  }
+};
+
 const sendSubscriptionCancelledEmail = async (userEmail, userName, { planName, expiresAt }) => {
   if (!hasEmailConfig()) return;
 
@@ -471,9 +522,61 @@ const sendSubscriptionCancelledEmail = async (userEmail, userName, { planName, e
   }
 };
 
+const sendPasswordChangedEmail = async (userEmail, userName) => {
+  if (!hasEmailConfig()) return;
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: userEmail,
+    subject: 'Your Bharat Mock password was changed',
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 24px; }
+          .card { max-width: 520px; margin: 0 auto; background: #fff; border-radius: 16px; border: 1px solid #e5e7eb; box-shadow: 0 20px 35px rgba(15,23,42,0.08); overflow: hidden; }
+          .header { background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); padding: 32px; color: #fff; text-align: center; }
+          .content { padding: 32px; color: #1f2937; line-height: 1.6; }
+          .alert { background: #fef3c7; border: 1px solid #fcd34d; border-radius: 10px; padding: 16px; margin: 20px 0; font-size: 14px; color: #92400e; }
+          .footer { padding: 24px 32px 32px; text-align: center; font-size: 13px; color: #9ca3af; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="header">
+            <h1 style="margin:0;font-size:24px;">Password changed</h1>
+          </div>
+          <div class="content">
+            <p>Hi ${userName || 'there'},</p>
+            <p>Your Bharat Mock account password was successfully changed on <strong>${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })} IST</strong>.</p>
+            <div class="alert">
+              ⚠️ If you did not make this change, please <a href="${process.env.FRONTEND_URL}/forgot-password" style="color:#b45309;font-weight:600;">reset your password immediately</a> and contact our support team.
+            </div>
+            <p style="color:#6b7280;font-size:14px;">For your security, all active sessions may need to be re-authenticated.</p>
+          </div>
+          <div class="footer">© ${new Date().getFullYear()} Bharat Mock. All rights reserved.</div>
+        </div>
+      </body>
+      </html>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Password changed email sent to ${userEmail}`);
+  } catch (error) {
+    console.error('Error sending password changed email:', error);
+  }
+};
+
 module.exports = {
   sendWelcomeEmail,
   sendPasswordOtpEmail,
+  sendEmailVerificationOtpEmail,
+  sendPasswordChangedEmail,
   sendSubscriptionActivatedEmail,
   sendAutoRenewStatusEmail,
   sendRenewalReminderEmail,

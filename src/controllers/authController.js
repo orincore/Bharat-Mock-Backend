@@ -2,7 +2,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const supabase = require('../config/database');
 const logger = require('../config/logger');
-const { sendWelcomeEmail, sendPasswordOtpEmail } = require('../utils/emailService');
+const { sendWelcomeEmail, sendPasswordOtpEmail, sendEmailVerificationOtpEmail, sendPasswordChangedEmail } = require('../utils/emailService');
 
 const normalizePlanRecord = (planData) => {
   if (!planData) return null;
@@ -96,6 +96,93 @@ const register = async (req, res) => {
       success: false,
       message: 'Server error during registration'
     });
+  }
+};
+
+const sendRegistrationOtp = async (req, res) => {
+  try {
+    const { email, name } = req.body;
+    if (!email || !name) {
+      return res.status(400).json({ success: false, message: 'Email and name are required' });
+    }
+
+    // Check if already registered
+    const { data: existing } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', email)
+      .is('deleted_at', null)
+      .single();
+
+    if (existing) {
+      return res.status(409).json({ success: false, message: 'Email already registered' });
+    }
+
+    const otp = generateNumericOtp();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    // Invalidate any previous OTPs for this email stored in a temp table
+    await supabase
+      .from('email_verification_otps')
+      .update({ is_used: true })
+      .eq('email', email)
+      .eq('is_used', false);
+
+    await supabase
+      .from('email_verification_otps')
+      .insert({ email, otp, expires_at: expiresAt.toISOString(), is_used: false });
+
+    try {
+      await sendEmailVerificationOtpEmail(email, name, otp);
+    } catch (emailError) {
+      logger.error('Failed to send registration OTP email:', emailError);
+    }
+
+    res.json({ success: true, message: 'OTP sent to your email' });
+  } catch (error) {
+    logger.error('Send registration OTP error:', error);
+    res.status(500).json({ success: false, message: 'Failed to send OTP' });
+  }
+};
+
+const verifyRegistrationOtp = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, message: 'Email and OTP are required' });
+    }
+
+    const { data: record, error } = await supabase
+      .from('email_verification_otps')
+      .select('id, otp, expires_at, is_used')
+      .eq('email', email)
+      .eq('is_used', false)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    if (error || !record) {
+      return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
+    }
+
+    if (record.otp !== otp.toString()) {
+      return res.status(400).json({ success: false, message: 'Incorrect OTP' });
+    }
+
+    if (new Date(record.expires_at) < new Date()) {
+      return res.status(400).json({ success: false, message: 'OTP has expired' });
+    }
+
+    // Mark OTP as used
+    await supabase
+      .from('email_verification_otps')
+      .update({ is_used: true })
+      .eq('id', record.id);
+
+    res.json({ success: true, message: 'OTP verified successfully' });
+  } catch (error) {
+    logger.error('Verify registration OTP error:', error);
+    res.status(500).json({ success: false, message: 'Failed to verify OTP' });
   }
 };
 
@@ -377,7 +464,7 @@ const resetPassword = async (req, res) => {
 
     const { data: user } = await supabase
       .from('users')
-      .select('password_hash')
+      .select('password_hash, email, name')
       .eq('id', resetToken.user_id)
       .single();
 
@@ -400,6 +487,12 @@ const resetPassword = async (req, res) => {
       .from('password_reset_tokens')
       .update({ is_used: true })
       .eq('token', token);
+
+    try {
+      await sendPasswordChangedEmail(user.email, user.name);
+    } catch (emailError) {
+      logger.error('Failed to send password changed email:', emailError);
+    }
 
     res.json({
       success: true,
@@ -630,6 +723,8 @@ const refreshAuthToken = async (req, res) => {
 
 module.exports = {
   register,
+  sendRegistrationOtp,
+  verifyRegistrationOtp,
   login,
   getProfile,
   updateProfile,

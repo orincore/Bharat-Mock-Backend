@@ -17,6 +17,24 @@ router.post('/register',
   authController.register
 );
 
+router.post('/send-registration-otp',
+  [
+    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+    body('name').trim().notEmpty().withMessage('Name is required'),
+    validate
+  ],
+  authController.sendRegistrationOtp
+);
+
+router.post('/verify-registration-otp',
+  [
+    body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
+    body('otp').isLength({ min: 6, max: 6 }).withMessage('A valid 6-digit OTP is required'),
+    validate
+  ],
+  authController.verifyRegistrationOtp
+);
+
 router.post('/login',
   [
     body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
