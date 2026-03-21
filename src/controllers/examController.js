@@ -16,9 +16,11 @@ const buildExamCacheKey = (params) => {
     difficulty = '',
     exam_type = '',
     is_premium = '',
-    year = ''
+    year = '',
+    paper_section_id = '',
+    paper_topic_id = ''
   } = params;
-  return `${EXAM_CACHE_VERSION}:exams:${page}:${limit}:${search.toLowerCase().trim()}:${category}:${subcategory}:${status}:${difficulty}:${exam_type}:${is_premium}:${year}`;
+  return `${EXAM_CACHE_VERSION}:exams:${page}:${limit}:${search.toLowerCase().trim()}:${category}:${subcategory}:${status}:${difficulty}:${exam_type}:${is_premium}:${year}:${paper_section_id}:${paper_topic_id}`;
 };
 
 const getExams = async (req, res) => {
@@ -33,7 +35,9 @@ const getExams = async (req, res) => {
       difficulty,
       exam_type,
       is_premium,
-      year
+      year,
+      paper_section_id,
+      paper_topic_id
     } = req.query;
 
     const offset = (page - 1) * limit;
@@ -73,7 +77,11 @@ const getExams = async (req, res) => {
         slug,
         url_path,
         created_at,
-        updated_at
+        updated_at,
+        paper_section_id,
+        paper_topic_id,
+        exam_uid,
+        exam_categories(logo_url, icon)
       `, { count: 'exact' })
       .eq('is_published', true)
       .is('deleted_at', null)
@@ -104,7 +112,8 @@ const getExams = async (req, res) => {
       const searchConditions = [
         `title.ilike.%${searchTerm}%`,
         `slug.ilike.%${searchTerm}%`,
-        `url_path.ilike.%${searchTerm}%`
+        `url_path.ilike.%${searchTerm}%`,
+        `exam_uid.ilike.%${searchTerm}%`
       ];
       
       // Add category ID matches
@@ -238,6 +247,16 @@ const getExams = async (req, res) => {
         });
         query = query.or(orFilters.join(','));
       }
+    }
+
+    // Filter by paper section (for previous year papers)
+    if (paper_section_id) {
+      query = query.eq('paper_section_id', paper_section_id);
+    }
+
+    // Filter by paper topic (for previous year papers)
+    if (paper_topic_id) {
+      query = query.eq('paper_topic_id', paper_topic_id);
     }
 
     query = query.range(offset, offset + parseInt(limit) - 1);
@@ -442,7 +461,9 @@ const buildExamQuery = () => {
       exam_type,
       is_premium,
       slug,
-      url_path
+      url_path,
+      exam_uid,
+      exam_categories(logo_url, icon)
     `)
     .eq('is_published', true)
     .is('deleted_at', null);
@@ -482,6 +503,16 @@ const fetchExamByIdentifier = async (identifier) => {
       setCache(cacheKey, result.exam);
     }
     return result;
+  }
+
+  // Try exam_uid lookup (format: BHMK######X)
+  const isExamUid = /^BHMK[A-Z0-9]+$/i.test(normalizedId);
+  if (isExamUid) {
+    const result = await runQuery({ exam_uid: normalizedId });
+    if (result.exam) {
+      setCache(cacheKey, result.exam);
+      return result;
+    }
   }
 
   if (isUrlPath) {

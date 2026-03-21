@@ -99,6 +99,8 @@ const pageContentController = {
       });
 
       const tocOrder = (seo?.structured_data?.toc_order) || {};
+      const tabHeadings = (seo?.structured_data?.tab_headings) || {};
+      const tabSeo = (seo?.structured_data?.tab_seo) || {};
 
       res.json({
         sections: groupedBlocks,
@@ -107,7 +109,9 @@ const pageContentController = {
         customTabs: customTabs || [],
         tabConfig: tabConfig || [],
         sidebarsByTab,
-        tocOrder
+        tocOrder,
+        tabHeadings,
+        tabSeo
       });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch page content', error);

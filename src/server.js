@@ -42,6 +42,7 @@ const pagePopularTestsRoutes = require('./routes/pagePopularTests');
 const pageBannersRoutes = require('./routes/pageBannersRoutes');
 const testimonialsRoutes = require('./routes/testimonialsRoutes');
 const testSeriesRoutes = require('./routes/testSeriesRoutes');
+const paperSectionsRoutes = require('./routes/paperSectionsRoutes');
 const currentAffairsRoutes = require('./routes/currentAffairsRoutes');
 const activityLogRoutes = require('./routes/activityLogRoutes');
 
@@ -150,6 +151,7 @@ app.use(`/api/${API_VERSION}/page-popular-tests`, pagePopularTestsRoutes);
 app.use(`/api/${API_VERSION}/page-banners`, pageBannersRoutes);
 app.use(`/api/${API_VERSION}/testimonials`, testimonialsRoutes);
 app.use(`/api/${API_VERSION}/test-series`, testSeriesRoutes);
+app.use(`/api/${API_VERSION}/paper-sections`, paperSectionsRoutes);
 app.use(`/api/${API_VERSION}/current-affairs`, currentAffairsRoutes);
 app.use(`/api/${API_VERSION}/init`, initRoutes);
 app.use(`/api/${API_VERSION}/activity`, activityLogRoutes);

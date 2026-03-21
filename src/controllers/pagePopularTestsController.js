@@ -28,15 +28,21 @@ const getPopularTests = async (req, res) => {
           total_questions,
           thumbnail_url,
           logo_url,
+          image_url,
           difficulty,
           category,
           subcategory,
           exam_type,
           is_premium,
+          is_free,
           status,
           allow_anytime,
           start_date,
-          end_date
+          end_date,
+          total_marks,
+          supports_hindi,
+          url_path,
+          exam_categories(logo_url, icon)
         )
       `)
       .eq('page_identifier', pageIdentifier)
@@ -86,12 +92,18 @@ const getPopularTestsAdmin = async (req, res) => {
           total_questions,
           thumbnail_url,
           logo_url,
+          image_url,
           difficulty,
           category,
           subcategory,
           exam_type,
           is_premium,
-          status
+          is_free,
+          status,
+          total_marks,
+          supports_hindi,
+          url_path,
+          exam_categories(logo_url, icon)
         )
       `)
       .eq('page_identifier', pageIdentifier)
@@ -169,12 +181,18 @@ const addPopularTest = async (req, res) => {
           total_questions,
           thumbnail_url,
           logo_url,
+          image_url,
           difficulty,
           category,
           subcategory,
           exam_type,
           is_premium,
-          status
+          is_free,
+          status,
+          total_marks,
+          supports_hindi,
+          url_path,
+          exam_categories(logo_url, icon)
         )
       `)
       .single();

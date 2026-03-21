@@ -573,7 +573,8 @@ const getTestSeriesBySlug = async (req, res) => {
         created_at,
         updated_at,
         exam_type,
-        show_in_mock_tests
+        show_in_mock_tests,
+        exam_categories(logo_url, icon)
       `)
       .eq('test_series_id', testSeries.id)
       .is('deleted_at', null)

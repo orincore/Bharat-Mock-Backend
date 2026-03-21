@@ -9,6 +9,23 @@ const safeAverage = (numbers = []) => {
   return parseFloat((valid.reduce((sum, value) => sum + value, 0) / valid.length).toFixed(1));
 };
 
+// Generate a unique exam UID in BHMK######X format, verified against DB
+const generateUniqueExamUid = async () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const gen = () => {
+    const num = String(Math.floor(Math.random() * 1000000)).padStart(6, '0');
+    const letter = chars[Math.floor(Math.random() * chars.length)];
+    return `BHMK${num}${letter}`;
+  };
+  let uid = gen();
+  for (let i = 0; i < 20; i++) {
+    const { data: existing } = await supabase.from('exams').select('id').eq('exam_uid', uid).maybeSingle();
+    if (!existing) return uid;
+    uid = gen();
+  }
+  throw new Error('Could not generate unique exam_uid after 20 attempts');
+};
+
 const QUESTION_BATCH_SIZE = 25;
 const OPTION_BATCH_SIZE = 50;
 
@@ -80,6 +97,7 @@ const getAdminExams = async (req, res) => {
         exam_type,
         show_in_mock_tests,
         is_premium,
+        exam_uid,
         created_at,
         updated_at
       `, { count: 'exact' })
@@ -88,7 +106,7 @@ const getAdminExams = async (req, res) => {
 
     if (search) {
       const searchTerm = search.trim();
-      query = query.or(`title.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%`);
+      query = query.or(`title.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%,exam_uid.ilike.%${searchTerm}%`);
     }
 
     if (status) {
@@ -461,7 +479,10 @@ const getAdminExamById = async (req, res) => {
         test_series_section_id,
         test_series_topic_id,
         exam_date,
-        display_order
+        display_order,
+        paper_section_id,
+        paper_topic_id,
+        exam_uid
       `)
       .eq('id', id)
       .is('deleted_at', null)
@@ -525,7 +546,9 @@ const createExam = async (req, res) => {
       test_series_section_id,
       test_series_topic_id,
       exam_date,
-      display_order
+      display_order,
+      paper_section_id,
+      paper_topic_id
     } = req.body;
 
     let logoUrl = null;
@@ -566,6 +589,9 @@ const createExam = async (req, res) => {
     const normalizedStartDate = allowAnytimeFlag ? null : (start_date || null);
     const normalizedEndDate = allowAnytimeFlag ? null : (end_date || null);
 
+    // Generate unique exam_uid in BHMK######X format
+    const examUid = await generateUniqueExamUid();
+
     const { data: exam, error } = await supabase
       .from('exams')
       .insert({
@@ -600,7 +626,10 @@ const createExam = async (req, res) => {
         test_series_section_id: test_series_section_id || null,
         test_series_topic_id: test_series_topic_id || null,
         exam_date: exam_date || null,
-        display_order: display_order ? parseInt(display_order) : 0
+        display_order: display_order ? parseInt(display_order) : 0,
+        paper_section_id: paper_section_id || null,
+        paper_topic_id: paper_topic_id || null,
+        exam_uid: examUid
       })
       .select()
       .single();
@@ -645,6 +674,10 @@ const updateExam = async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = { ...req.body };
+    
+    console.log('Update exam - received data:', updateData);
+    console.log('Paper section ID:', updateData.paper_section_id);
+    console.log('Paper topic ID:', updateData.paper_topic_id);
 
     const { data: existingExam } = await supabase
       .from('exams')
@@ -699,6 +732,8 @@ const updateExam = async (req, res) => {
     if (updateData.test_series_topic_id !== undefined) updateData.test_series_topic_id = updateData.test_series_topic_id || null;
     if (updateData.exam_date !== undefined) updateData.exam_date = updateData.exam_date || null;
     if (updateData.display_order !== undefined) updateData.display_order = parseInt(updateData.display_order) || 0;
+    if (updateData.paper_section_id !== undefined) updateData.paper_section_id = updateData.paper_section_id || null;
+    if (updateData.paper_topic_id !== undefined) updateData.paper_topic_id = updateData.paper_topic_id || null;
     let parsedSyllabus = undefined;
     if (updateData.syllabus) {
       if (typeof updateData.syllabus === 'string') {
@@ -1492,6 +1527,10 @@ const bulkCreateExamWithContent = async (req, res) => {
         message: 'Invalid exam payload. Ensure exam data is valid JSON.'
       });
     }
+    
+    console.log('Bulk create - received exam data:', exam);
+    console.log('Paper section ID:', exam.paper_section_id);
+    console.log('Paper topic ID:', exam.paper_topic_id);
 
     try {
       if (rawSections) {
@@ -1545,6 +1584,9 @@ const bulkCreateExamWithContent = async (req, res) => {
     const normalizedStartDate = allowAnytimeFlag ? null : (exam.start_date || null);
     const normalizedEndDate = allowAnytimeFlag ? null : (exam.end_date || null);
 
+    // Generate unique exam_uid in BHMK######X format
+    const bulkExamUid = await generateUniqueExamUid();
+
     const { data: createdExam, error: examError } = await supabase
       .from('exams')
       .insert({
@@ -1581,7 +1623,10 @@ const bulkCreateExamWithContent = async (req, res) => {
         test_series_section_id: exam.test_series_section_id || null,
         test_series_topic_id: exam.test_series_topic_id || null,
         exam_date: exam.exam_date || null,
-        display_order: exam.display_order ? parseInt(exam.display_order) || 0 : 0
+        display_order: exam.display_order ? parseInt(exam.display_order) || 0 : 0,
+        paper_section_id: exam.paper_section_id || null,
+        paper_topic_id: exam.paper_topic_id || null,
+        exam_uid: bulkExamUid
       })
       .select()
       .single();
@@ -1916,8 +1961,13 @@ const updateExamWithContent = async (req, res) => {
       test_series_section_id: normalizedTestSeriesSectionId,
       test_series_topic_id: normalizedTestSeriesTopicId,
       exam_date: examPayload.exam_date || null,
-      display_order: numberOrNull(examPayload.display_order, 0)
+      display_order: numberOrNull(examPayload.display_order, 0),
+      paper_section_id: examPayload.paper_section_id || null,
+      paper_topic_id: examPayload.paper_topic_id || null
     };
+    
+    console.log('Update exam with content - paper_section_id:', examPayload.paper_section_id);
+    console.log('Update exam with content - paper_topic_id:', examPayload.paper_topic_id);
 
     // Parallelize: update exam + delete old content (syllabus, questions, options, sections)
     const [examUpdateResult, , existingQuestionsResult] = await Promise.all([
