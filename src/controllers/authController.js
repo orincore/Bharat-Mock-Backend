@@ -257,6 +257,7 @@ const getProfile = async (req, res) => {
         avatar_url,
         date_of_birth,
         role,
+        bio,
         is_verified,
         is_blocked,
         block_reason,
@@ -320,12 +321,13 @@ const getProfile = async (req, res) => {
 
 const updateProfile = async (req, res) => {
   try {
-    const { name, phone, date_of_birth, education, preferences } = req.body;
+    const { name, phone, date_of_birth, education, preferences, bio } = req.body;
 
     const updateData = {};
     if (name) updateData.name = name;
     if (phone) updateData.phone = phone;
     if (date_of_birth) updateData.date_of_birth = date_of_birth;
+    if (bio !== undefined) updateData.bio = bio;
 
     if (Object.keys(updateData).length > 0) {
       const { error: userError } = await supabase
@@ -721,6 +723,33 @@ const refreshAuthToken = async (req, res) => {
   }
 };
 
+const getPublicProfile = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('id, name, avatar_url, bio, role, created_at')
+      .eq('id', id)
+      .single();
+
+    if (error || !user) {
+      return res.status(404).json({ success: false, message: 'Author not found' });
+    }
+
+    // Count published blogs by this author
+    const { count } = await supabase
+      .from('blogs')
+      .select('id', { count: 'exact', head: true })
+      .eq('author_id', id)
+      .eq('is_published', true);
+
+    res.json({ success: true, data: { ...user, blog_count: count || 0 } });
+  } catch (error) {
+    logger.error('Get public profile error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch author profile' });
+  }
+};
+
 module.exports = {
   register,
   sendRegistrationOtp,
@@ -728,6 +757,7 @@ module.exports = {
   login,
   getProfile,
   updateProfile,
+  getPublicProfile,
   forgotPassword,
   resetPassword,
   changePassword,

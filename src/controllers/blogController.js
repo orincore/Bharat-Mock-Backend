@@ -115,15 +115,13 @@ const blogController = {
     try {
       const { slug } = req.params;
 
-      let query = supabase
+      const { data, error } = await supabase
         .from('blogs')
         .select('*')
         .eq('slug', slug)
         .single();
 
-      const { data, error } = await query;
-
-      if (error) {
+      if (error || !data) {
         return res.status(404).json({ error: 'Blog not found' });
       }
 
@@ -133,7 +131,18 @@ const blogController = {
         .update({ view_count: (data.view_count || 0) + 1 })
         .eq('id', data.id);
 
-      res.json({ success: true, data });
+      // Fetch author separately
+      let author = null;
+      if (data.author_id) {
+        const { data: authorData } = await supabase
+          .from('users')
+          .select('id, name, avatar_url, bio, role')
+          .eq('id', data.author_id)
+          .maybeSingle();
+        author = authorData || null;
+      }
+
+      res.json({ success: true, data: { ...data, author } });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch blog', error);
     }
@@ -299,7 +308,7 @@ const blogController = {
         slug: uniqueSlug,
         excerpt: excerpt || null,
         featured_image_url: featured_image_url || null,
-        author_id: req.user?.id || null,
+        author_id: req.body.author_id || req.user?.id || null,
         category: category || null,
         tags: tags || [],
         status: statusFields.status,
@@ -394,6 +403,7 @@ const blogController = {
       if (canonical_url !== undefined) payload.canonical_url = canonical_url;
       if (is_current_affairs_note !== undefined) payload.is_current_affairs_note = Boolean(is_current_affairs_note);
       if (current_affairs_tag !== undefined) payload.current_affairs_tag = current_affairs_tag || null;
+      if (req.body.author_id !== undefined) payload.author_id = req.body.author_id || null;
 
       const statusFields = buildStatusFields({
         requestedStatus,

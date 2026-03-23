@@ -45,13 +45,15 @@ router.post('/login',
 );
 
 router.get('/profile', authenticate, authController.getProfile);
+router.get('/author/:id', authController.getPublicProfile);
 
 router.put('/profile',
   authenticate,
   [
     body('name').optional().trim().notEmpty().withMessage('Name cannot be empty'),
-    body('phone').optional().isMobilePhone().withMessage('Valid phone number required'),
-    body('date_of_birth').optional().isISO8601().withMessage('Valid date required'),
+    body('phone').optional({ nullable: true, checkFalsy: true }).isString().withMessage('Valid phone number required'),
+    body('date_of_birth').optional({ nullable: true, checkFalsy: true }).isISO8601().withMessage('Valid date required'),
+    body('bio').optional({ nullable: true }).isString().withMessage('Bio must be a string'),
     validate
   ],
   authController.updateProfile
