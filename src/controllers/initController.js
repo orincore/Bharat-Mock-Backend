@@ -77,7 +77,7 @@ const getAppInit = async (req, res) => {
         supabase
           .from('users')
           .select(`
-            id, email, name, phone, avatar_url, date_of_birth, role,
+            id, email, name, phone, avatar_url, date_of_birth, role, bio,
             is_verified, is_premium, auth_provider, is_onboarded,
             subscription_plan_id, subscription_expires_at, subscription_auto_renew,
             created_at,
