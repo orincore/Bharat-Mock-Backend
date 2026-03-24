@@ -496,6 +496,23 @@ const pageContentController = {
         parent_block_id
       } = req.body;
 
+      // Validate section_id exists in page_sections before inserting
+      if (section_id) {
+        const { data: sectionExists, error: sectionCheckError } = await supabase
+          .from('page_sections')
+          .select('id')
+          .eq('id', section_id)
+          .maybeSingle();
+
+        if (sectionCheckError) {
+          return buildErrorResponse(res, 'Failed to validate section', sectionCheckError);
+        }
+
+        if (!sectionExists) {
+          return res.status(400).json({ error: `Section ${section_id} does not exist in page_sections.` });
+        }
+      }
+
       const { data, error } = await supabase
         .from('page_content_blocks')
         .insert([
@@ -1067,8 +1084,10 @@ const pageContentController = {
       for (const section of sections) {
         const sectionAlias = section.id || section.section_key || `temp-${Math.random().toString(36).slice(2)}`;
         const sectionPayload = normalizeSectionPayload(section);
-        let sectionId = section.id;
-        const existingSection = section.id ? existingSectionMap.get(section.id) : null;
+        // Treat temp IDs as new sections — they don't exist in the DB
+        const isTempSectionId = !section.id || isTempId(section.id);
+        let sectionId = isTempSectionId ? null : section.id;
+        const existingSection = !isTempSectionId ? existingSectionMap.get(section.id) : null;
 
         if (existingSection) {
           const existingComparable = normalizeSectionPayload(existingSection);
@@ -1114,12 +1133,20 @@ const pageContentController = {
           processedSectionIds.add(sectionId);
         }
 
-        sectionIdAliasMap.set(sectionAlias, sectionId || section.id);
+        // Always use the persisted sectionId (never a temp/client-side ID)
+        sectionIdAliasMap.set(sectionAlias, sectionId);
 
         const blocks = Array.isArray(section.blocks) ? section.blocks : [];
 
         for (const block of blocks) {
           const resolvedSectionId = sectionIdAliasMap.get(sectionAlias);
+
+          // Skip block if we couldn't resolve a valid persisted section ID
+          if (!resolvedSectionId || isTempId(resolvedSectionId)) {
+            debugLog('[bulkSyncPageContent.skipBlock]', { reason: 'unresolved section_id', blockType: block.block_type });
+            continue;
+          }
+
           const blockPayload = normalizeBlockPayload(block, resolvedSectionId);
 
           if (block.id && existingBlockMap.has(block.id)) {

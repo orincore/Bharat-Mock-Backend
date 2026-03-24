@@ -83,6 +83,11 @@ const sanitizeContentPayload = (payload = {}) => {
     return null;
   }
 
+  // last_updated is NOT NULL in DB — default to today if not provided
+  if (!sanitized.last_updated) {
+    sanitized.last_updated = new Date().toISOString().split('T')[0];
+  }
+
   sanitized.updated_at = new Date().toISOString();
   return sanitized;
 };
@@ -108,7 +113,8 @@ const sanitizePoints = (points = []) => {
     .map((point, index) => ({
       id: point.id,
       section_id: point.section_id,
-      section_title: point.section_title || null,
+      // section_title is kept only for matching new points to sections — not persisted
+      _section_title: point.section_title || null,
       heading: point.heading || null,
       body: point.body || null,
       list_items: Array.isArray(point.list_items) ? point.list_items : null,
@@ -120,14 +126,18 @@ const sanitizePoints = (points = []) => {
 
 const upsertRecords = async (table, items = []) => {
   if (!items.length) return [];
-  const { data, error } = await supabase.from(table).upsert(items, { onConflict: 'id' }).select('*');
+  // Strip undefined id fields to avoid passing null UUIDs
+  const cleaned = items.map(({ id, ...rest }) => (id ? { id, ...rest } : rest));
+  const { data, error } = await supabase.from(table).upsert(cleaned, { onConflict: 'id' }).select('*');
   if (error) throw error;
   return data || [];
 };
 
 const insertRecords = async (table, items = []) => {
   if (!items.length) return [];
-  const { data, error } = await supabase.from(table).insert(items).select('*');
+  // Strip id field entirely for new records
+  const cleaned = items.map(({ id, ...rest }) => rest);
+  const { data, error } = await supabase.from(table).insert(cleaned).select('*');
   if (error) throw error;
   return data || [];
 };
@@ -188,12 +198,13 @@ const adminUpsertRefundPolicy = async (req, res) => {
     const sectionsMap = [...insertedSections, ...upsertedSections];
 
     const pointsWithSections = pointsPayload.map((point) => {
-      if (point.section_id) {
-        return point;
+      const { _section_title, ...pointData } = point;
+      if (pointData.section_id) {
+        return pointData;
       }
-      const matching = sectionsMap.find((section) => section.title === point.section_title);
+      const matching = sectionsMap.find((section) => section.title === _section_title);
       return {
-        ...point,
+        ...pointData,
         section_id: matching?.id || null
       };
     }).filter((point) => point.section_id);
