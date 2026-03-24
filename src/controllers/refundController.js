@@ -97,12 +97,11 @@ const sanitizeSections = (sections = []) => {
   return sections
     .filter((section) => section && section.title)
     .map((section, index) => ({
-      id: section.id,
+      id: section.id || undefined,
       title: section.title,
       description: section.description || null,
       display_order: Number.isFinite(section.display_order) ? section.display_order : index,
-      is_active: typeof section.is_active === 'boolean' ? section.is_active : true,
-      updated_at: new Date().toISOString()
+      is_active: typeof section.is_active === 'boolean' ? section.is_active : true
     }));
 };
 
@@ -111,26 +110,45 @@ const sanitizePoints = (points = []) => {
   return points
     .filter((point) => point && (point.heading || point.body || (Array.isArray(point.list_items) && point.list_items.length)))
     .map((point, index) => ({
-      id: point.id,
-      section_id: point.section_id,
-      // section_title is kept only for matching new points to sections — not persisted
+      id: point.id || undefined,
+      section_id: point.section_id || undefined,
+      // _section_title is kept only for matching new points to sections — not persisted
       _section_title: point.section_title || null,
       heading: point.heading || null,
       body: point.body || null,
       list_items: Array.isArray(point.list_items) ? point.list_items : null,
       display_order: Number.isFinite(point.display_order) ? point.display_order : index,
-      is_active: typeof point.is_active === 'boolean' ? point.is_active : true,
-      updated_at: new Date().toISOString()
+      is_active: typeof point.is_active === 'boolean' ? point.is_active : true
     }));
 };
 
 const upsertRecords = async (table, items = []) => {
   if (!items.length) return [];
-  // Strip undefined id fields to avoid passing null UUIDs
-  const cleaned = items.map(({ id, ...rest }) => (id ? { id, ...rest } : rest));
-  const { data, error } = await supabase.from(table).upsert(cleaned, { onConflict: 'id' }).select('*');
-  if (error) throw error;
-  return data || [];
+  const results = [];
+  for (const item of items) {
+    const { id, ...fields } = item;
+    if (id) {
+      // Existing record — use explicit UPDATE
+      const { data, error } = await supabase
+        .from(table)
+        .update(fields)
+        .eq('id', id)
+        .select('*')
+        .single();
+      if (error) throw error;
+      if (data) results.push(data);
+    } else {
+      // No id — insert as new
+      const { data, error } = await supabase
+        .from(table)
+        .insert(fields)
+        .select('*')
+        .single();
+      if (error) throw error;
+      if (data) results.push(data);
+    }
+  }
+  return results;
 };
 
 const insertRecords = async (table, items = []) => {
@@ -191,7 +209,7 @@ const adminUpsertRefundPolicy = async (req, res) => {
     const pointsPayload = sanitizePoints(req.body.points || []);
 
     const newSections = sectionsPayload.filter((section) => !section.id);
-    const existingSections = sectionsPayload.filter((section) => section.id);
+    const existingSections = sectionsPayload.filter((section) => !!section.id);
 
     const insertedSections = newSections.length ? await insertRecords('refund_policy_sections', newSections) : [];
     const upsertedSections = existingSections.length ? await upsertRecords('refund_policy_sections', existingSections) : [];
@@ -210,7 +228,7 @@ const adminUpsertRefundPolicy = async (req, res) => {
     }).filter((point) => point.section_id);
 
     const newPoints = pointsWithSections.filter((point) => !point.id);
-    const existingPoints = pointsWithSections.filter((point) => point.id);
+    const existingPoints = pointsWithSections.filter((point) => !!point.id);
 
     await Promise.all([
       newPoints.length ? insertRecords('refund_policy_points', newPoints) : Promise.resolve(),
