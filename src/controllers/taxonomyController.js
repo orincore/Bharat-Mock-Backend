@@ -764,6 +764,7 @@ const getExamsByCategory = async (req, res) => {
       .or(`category_id.eq.${category.id},category.ilike.%${slug}%`)
       .eq('is_published', true)
       .is('deleted_at', null)
+      .or('is_current_affair.eq.false,is_current_affair.is.null')
       .order('created_at', { ascending: false })
       .range(offset, offset + limitNumber - 1);
 
@@ -898,6 +899,7 @@ const getExamsBySubcategory = async (req, res) => {
       .eq('subcategory_id', subcategory.id)
       .eq('is_published', true)
       .is('deleted_at', null)
+      .or('is_current_affair.eq.false,is_current_affair.is.null')
       .order('created_at', { ascending: false })
       .range(offset, offset + limitNumber - 1);
 
@@ -1047,6 +1049,7 @@ const getExamsBySubcategorySlug = async (req, res) => {
       .eq('subcategory_id', subcategory.id)
       .eq('is_published', true)
       .is('deleted_at', null)
+      .or('is_current_affair.eq.false,is_current_affair.is.null')
       .order('created_at', { ascending: false })
       .range(offset, offset + limitNumber - 1);
 

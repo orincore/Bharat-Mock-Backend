@@ -482,7 +482,8 @@ const getAdminExamById = async (req, res) => {
         display_order,
         paper_section_id,
         paper_topic_id,
-        exam_uid
+        exam_uid,
+        is_current_affair
       `)
       .eq('id', id)
       .is('deleted_at', null)
@@ -719,6 +720,7 @@ const updateExam = async (req, res) => {
       updateData.end_date = null;
     }
     if (updateData.show_in_mock_tests !== undefined) updateData.show_in_mock_tests = updateData.show_in_mock_tests === 'true' || updateData.show_in_mock_tests === true;
+    if (updateData.is_current_affair !== undefined) updateData.is_current_affair = updateData.is_current_affair === 'true' || updateData.is_current_affair === true;
     if (updateData.is_test_series !== undefined) {
       updateData.is_test_series = updateData.is_test_series === 'true' || updateData.is_test_series === true;
       if (!updateData.is_test_series) {
@@ -778,6 +780,24 @@ const updateExam = async (req, res) => {
         if (insertError) {
           logger.error('Insert syllabus error:', insertError);
         }
+      }
+    }
+
+    // Auto-sync current_affairs_quizzes when is_current_affair changes on a short_quiz
+    if (updateData.is_current_affair !== undefined && exam.exam_type === 'short_quiz') {
+      if (updateData.is_current_affair) {
+        // Upsert into current_affairs_quizzes (unique constraint on exam_id handles duplicates)
+        const { error: caError } = await supabase
+          .from('current_affairs_quizzes')
+          .upsert({ exam_id: id, is_published: true }, { onConflict: 'exam_id' });
+        if (caError) logger.error('Auto-link current affairs quiz error:', caError);
+      } else {
+        // Remove from current_affairs_quizzes
+        const { error: caError } = await supabase
+          .from('current_affairs_quizzes')
+          .delete()
+          .eq('exam_id', id);
+        if (caError) logger.error('Auto-unlink current affairs quiz error:', caError);
       }
     }
 
@@ -1626,6 +1646,7 @@ const bulkCreateExamWithContent = async (req, res) => {
         display_order: exam.display_order ? parseInt(exam.display_order) || 0 : 0,
         paper_section_id: exam.paper_section_id || null,
         paper_topic_id: exam.paper_topic_id || null,
+        is_current_affair: exam.exam_type === 'short_quiz' ? (exam.is_current_affair === 'true' || exam.is_current_affair === true) : false,
         exam_uid: bulkExamUid
       })
       .select()
@@ -1963,7 +1984,8 @@ const updateExamWithContent = async (req, res) => {
       exam_date: examPayload.exam_date || null,
       display_order: numberOrNull(examPayload.display_order, 0),
       paper_section_id: examPayload.paper_section_id || null,
-      paper_topic_id: examPayload.paper_topic_id || null
+      paper_topic_id: examPayload.paper_topic_id || null,
+      is_current_affair: examPayload.exam_type === 'short_quiz' ? bool(examPayload.is_current_affair) : false
     };
     
     console.log('Update exam with content - paper_section_id:', examPayload.paper_section_id);
@@ -2151,6 +2173,22 @@ const updateExamWithContent = async (req, res) => {
       logger.error(`Update exam verification FAILED: expected ${expectedQuestions} questions, DB has ${dbQuestionCount} for exam ${id}`);
     } else {
       logger.info(`Update exam verification OK: ${dbQuestionCount}/${expectedQuestions} questions for exam ${id}`);
+    }
+
+    // Auto-sync current_affairs_quizzes when is_current_affair changes on a short_quiz
+    if (updatePayload.exam_type === 'short_quiz') {
+      if (updatePayload.is_current_affair) {
+        const { error: caError } = await supabase
+          .from('current_affairs_quizzes')
+          .upsert({ exam_id: id, is_published: true }, { onConflict: 'exam_id' });
+        if (caError) logger.error('Auto-link current affairs quiz error (updateExamWithContent):', caError);
+      } else {
+        const { error: caError } = await supabase
+          .from('current_affairs_quizzes')
+          .delete()
+          .eq('exam_id', id);
+        if (caError) logger.error('Auto-unlink current affairs quiz error (updateExamWithContent):', caError);
+      }
     }
 
     res.json({

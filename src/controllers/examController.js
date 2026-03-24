@@ -85,6 +85,7 @@ const getExams = async (req, res) => {
       `, { count: 'exact' })
       .eq('is_published', true)
       .is('deleted_at', null)
+      .or('is_current_affair.eq.false,is_current_affair.is.null')
       .order('created_at', { ascending: false });
 
     if (search) {
@@ -266,7 +267,8 @@ const getExams = async (req, res) => {
       .from('exams')
       .select('exam_date')
       .eq('is_published', true)
-      .is('deleted_at', null);
+      .is('deleted_at', null)
+      .or('is_current_affair.eq.false,is_current_affair.is.null');
 
     // Re-apply the same filters to the years query
     let yearsQuery = yearsQueryBase;

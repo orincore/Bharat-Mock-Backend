@@ -221,6 +221,7 @@ const getHomepageData = async (req, res) => {
         .select('id, title, duration, total_marks, total_questions, category, category_id, subcategory, subcategory_id, difficulty, status, start_date, end_date, pass_percentage, is_free, image_url, logo_url, thumbnail_url, negative_marking, negative_mark_value, allow_anytime, slug, url_path, exam_type, show_in_mock_tests, supports_hindi, is_premium, exam_categories(logo_url, icon)')
         .eq('is_published', true)
         .is('deleted_at', null)
+        .or('is_current_affair.eq.false,is_current_affair.is.null')
         .or('status.eq.ongoing,status.eq.anytime,allow_anytime.eq.true')
         .limit(4),
       supabase
