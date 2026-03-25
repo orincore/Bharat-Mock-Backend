@@ -1,29 +1,18 @@
 const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
-const { uploadFile, deleteFile, extractKeyFromUrl, FOLDER_STRUCTURE } = require('../services/uploadService');
-
-const isValidUuid = (value = '') => {
-  const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/;
-  return uuidRegex.test(value);
-};
+const { uploadFile, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
+const { redisCache, CACHE_TTL, buildCacheKey } = require('../utils/redisCache');
 
 const fetchCategoryDetails = async ({ id, slug }) => {
   if (!id && !slug) return null;
-
   const normalizedSlug = slug ? slugify(slug) : null;
-
-  let query = supabase
-    .from('exam_categories')
-    .select('id, name, slug, logo_url')
-    .limit(1);
-
+  let query = supabase.from('exam_categories').select('id, name, slug, logo_url').limit(1);
   if (id) {
     query = query.eq('id', id);
   } else {
     query = query.eq('slug', normalizedSlug);
   }
-
   const { data } = await query.single();
   return data || null;
 };
@@ -36,252 +25,177 @@ const hydrateSeriesCategory = async (series, fallbackCategory = null) => {
   const hasLogo = series.category && series.category.logo_url;
   if (hasLogo) return;
   if (!preferredCategoryId && !preferredCategorySlug) return;
-
-  const categoryDetails = await fetchCategoryDetails({
-    id: preferredCategoryId,
-    slug: preferredCategorySlug
-  });
-
+  const categoryDetails = await fetchCategoryDetails({ id: preferredCategoryId, slug: preferredCategorySlug });
   if (categoryDetails) {
     series.category = categoryDetails;
     series.category_id = categoryDetails.id;
   }
 };
 
+// Batch load all metadata to avoid N+1 queries
+const batchLoadTestSeriesMetadata = async () => {
+  const cacheKey = buildCacheKey('test_series_metadata');
+  const cached = await redisCache.get(cacheKey);
+  if (cached) return cached;
+
+  const [categoriesResult, subcategoriesResult, difficultiesResult] = await Promise.all([
+    supabase.from('exam_categories').select('id, name, slug, logo_url'),
+    supabase.from('exam_subcategories').select('id, name, slug, category_id'),
+    supabase.from('exam_difficulties').select('id, name, slug'),
+  ]);
+
+  const metadata = {
+    categories: categoriesResult.data || [],
+    subcategories: subcategoriesResult.data || [],
+    difficulties: difficultiesResult.data || [],
+    categoriesMap: {},
+    subcategoriesMap: {},
+    difficultiesMap: {},
+  };
+
+  metadata.categories.forEach(cat => {
+    metadata.categoriesMap[cat.id] = cat;
+    metadata.categoriesMap[cat.slug] = cat;
+  });
+  metadata.subcategories.forEach(sub => {
+    metadata.subcategoriesMap[sub.id] = sub;
+    metadata.subcategoriesMap[sub.slug] = sub;
+  });
+  metadata.difficulties.forEach(diff => {
+    metadata.difficultiesMap[diff.id] = diff;
+    metadata.difficultiesMap[diff.slug] = diff;
+  });
+
+  await redisCache.set(cacheKey, metadata, CACHE_TTL.CATEGORIES);
+  return metadata;
+};
+
+// Batch load exam counts and user counts for test series
+const batchLoadTestSeriesStats = async (testSeriesIds) => {
+  if (!testSeriesIds.length) return {};
+
+  const cacheKeys = testSeriesIds.map(id => buildCacheKey('test_series_stats', id));
+  const cachedStats = await redisCache.mget(cacheKeys);
+
+  const uncachedIds = [];
+  const statsMap = {};
+
+  testSeriesIds.forEach((id, index) => {
+    const cached = cachedStats[cacheKeys[index]];
+    if (cached) {
+      statsMap[id] = cached;
+    } else {
+      uncachedIds.push(id);
+    }
+  });
+
+  if (uncachedIds.length > 0) {
+    const { data: examCounts } = await supabase
+      .from('exams')
+      .select('test_series_id, id, is_free, supports_hindi')
+      .in('test_series_id', uncachedIds)
+      .eq('is_published', true)
+      .is('deleted_at', null);
+
+    const examIds = examCounts?.map(e => e.id) || [];
+    const userCounts = {};
+
+    if (examIds.length > 0) {
+      const { data: attempts } = await supabase
+        .from('exam_attempts')
+        .select('exam_id, user_id')
+        .in('exam_id', examIds);
+
+      const examUserCounts = {};
+      attempts?.forEach(attempt => {
+        if (!examUserCounts[attempt.exam_id]) {
+          examUserCounts[attempt.exam_id] = new Set();
+        }
+        examUserCounts[attempt.exam_id].add(attempt.user_id);
+      });
+
+      examCounts?.forEach(exam => {
+        const tsId = exam.test_series_id;
+        if (!userCounts[tsId]) userCounts[tsId] = new Set();
+        const examUsers = examUserCounts[exam.id];
+        if (examUsers) examUsers.forEach(uid => userCounts[tsId].add(uid));
+      });
+
+      Object.keys(userCounts).forEach(sid => {
+        userCounts[sid] = userCounts[sid].size;
+      });
+    }
+
+    uncachedIds.forEach(seriesId => {
+      const seriesExams = examCounts?.filter(e => e.test_series_id === seriesId) || [];
+      const supportsHindi = seriesExams.some(e => e.supports_hindi);
+      const languages = supportsHindi ? ['English', 'Hindi'] : ['English'];
+      statsMap[seriesId] = {
+        total_tests: seriesExams.length,
+        free_tests: seriesExams.filter(e => e.is_free).length,
+        user_count: userCounts[seriesId] || 0,
+        languages,
+        languages_text: languages.join(', '),
+      };
+    });
+
+    const cacheEntries = uncachedIds.map(id => [buildCacheKey('test_series_stats', id), statsMap[id]]);
+    await redisCache.mset(cacheEntries, CACHE_TTL.TEST_SERIES);
+  }
+
+  return statsMap;
+};
+
 const getAllTestSeries = async (req, res) => {
   try {
-    const {
-      page = 1,
-      limit = 10,
-      search,
-      category,
-      subcategory,
-      difficulty,
-      is_published
-    } = req.query;
+    const { page = 1, limit = 10, search, category, subcategory, difficulty, is_published } = req.query;
 
-    const pageNumber = parseInt(page, 10) || 1;
-    const limitNumber = parseInt(limit, 10) || 10;
+    const pageNumber = Math.max(1, parseInt(page, 10));
+    const limitNumber = Math.min(50, Math.max(1, parseInt(limit, 10)));
     const offset = (pageNumber - 1) * limitNumber;
 
-    let resolvedCategoryId = null;
-    let resolvedCategorySlug = null;
-    let categorySeriesIds = null;
-    let subcategorySeriesIds = null;
+    const cacheKey = buildCacheKey(
+      'test_series_list', pageNumber, limitNumber,
+      search || '', category || '', subcategory || '', difficulty || '', is_published || ''
+    );
 
-    if (category) {
-      if (isValidUuid(category)) {
-        resolvedCategoryId = category;
-        const categoryDetails = await fetchCategoryDetails({ id: category });
-        if (categoryDetails?.slug) {
-          resolvedCategorySlug = slugify(categoryDetails.slug);
-        }
-      } else {
-        const normalizedSlug = slugify(category);
-        resolvedCategorySlug = normalizedSlug;
-        const categoryDetails = await fetchCategoryDetails({ slug: normalizedSlug });
-        if (categoryDetails?.id) {
-          resolvedCategoryId = categoryDetails.id;
-          resolvedCategorySlug = slugify(categoryDetails.slug);
-        }
-      }
+    const cachedResponse = await redisCache.get(cacheKey);
+    if (cachedResponse) return res.json(cachedResponse);
 
-      categorySeriesIds = new Set();
-
-      if (resolvedCategoryId) {
-        const { data: directSeries, error: directCategoryError } = await supabase
-          .from('test_series')
-          .select('id')
-          .eq('category_id', resolvedCategoryId)
-          .is('deleted_at', null);
-
-        if (directCategoryError) {
-          logger.error('Error fetching direct category matches for test series:', directCategoryError);
-        } else if (directSeries) {
-          directSeries.forEach(series => {
-            if (series?.id) {
-              categorySeriesIds.add(series.id);
-            }
-          });
-        }
-      }
-
-      const examConditions = [];
-      if (resolvedCategoryId) {
-        examConditions.push(`category_id.eq.${resolvedCategoryId}`);
-      }
-      if (resolvedCategorySlug) {
-        examConditions.push(`category.eq.${resolvedCategorySlug}`);
-      }
-
-      if (examConditions.length > 0) {
-        const { data: examSeries, error: categoryExamError } = await supabase
-          .from('exams')
-          .select('test_series_id')
-          .is('deleted_at', null)
-          .not('test_series_id', 'is', null)
-          .or(examConditions.join(','));
-
-        if (categoryExamError) {
-          logger.error('Error fetching exam category mappings for test series:', categoryExamError);
-        } else if (examSeries) {
-          examSeries.forEach(exam => {
-            if (exam?.test_series_id) {
-              categorySeriesIds.add(exam.test_series_id);
-            }
-          });
-        }
-      }
-
-      if (categorySeriesIds.size === 0) {
-        return res.json({
-          data: [],
-          total: 0,
-          page: pageNumber,
-          limit: limitNumber,
-          totalPages: 0
-        });
-      }
-    }
-
-    // Handle subcategory filtering similar to category filtering
-    if (subcategory) {
-      let resolvedSubcategoryId = null;
-      let resolvedSubcategorySlug = null;
-
-      if (isValidUuid(subcategory)) {
-        resolvedSubcategoryId = subcategory;
-        // Fetch subcategory details to get slug
-        const { data: subcategoryDetails } = await supabase
-          .from('exam_subcategories')
-          .select('slug')
-          .eq('id', subcategory)
-          .single();
-        if (subcategoryDetails?.slug) {
-          resolvedSubcategorySlug = slugify(subcategoryDetails.slug);
-        }
-      } else {
-        const normalizedSlug = slugify(subcategory);
-        resolvedSubcategorySlug = normalizedSlug;
-        // Fetch subcategory details to get ID
-        const { data: subcategoryDetails } = await supabase
-          .from('exam_subcategories')
-          .select('id')
-          .eq('slug', normalizedSlug)
-          .single();
-        if (subcategoryDetails?.id) {
-          resolvedSubcategoryId = subcategoryDetails.id;
-        }
-      }
-
-      subcategorySeriesIds = new Set();
-
-      // Check direct test series subcategory matches
-      if (resolvedSubcategoryId) {
-        const { data: directSeries, error: directSubcategoryError } = await supabase
-          .from('test_series')
-          .select('id')
-          .eq('subcategory_id', resolvedSubcategoryId)
-          .is('deleted_at', null);
-
-        if (directSubcategoryError) {
-          logger.error('Error fetching direct subcategory matches for test series:', directSubcategoryError);
-        } else if (directSeries) {
-          directSeries.forEach(series => {
-            if (series?.id) {
-              subcategorySeriesIds.add(series.id);
-            }
-          });
-        }
-      }
-
-      // Check exam subcategory mappings
-      const examSubcategoryConditions = [];
-      if (resolvedSubcategoryId) {
-        examSubcategoryConditions.push(`subcategory_id.eq.${resolvedSubcategoryId}`);
-      }
-      if (resolvedSubcategorySlug) {
-        examSubcategoryConditions.push(`subcategory.eq.${resolvedSubcategorySlug}`);
-      }
-
-      if (examSubcategoryConditions.length > 0) {
-        const { data: examSeries, error: subcategoryExamError } = await supabase
-          .from('exams')
-          .select('test_series_id')
-          .is('deleted_at', null)
-          .not('test_series_id', 'is', null)
-          .or(examSubcategoryConditions.join(','));
-
-        if (subcategoryExamError) {
-          logger.error('Error fetching exam subcategory mappings for test series:', subcategoryExamError);
-        } else if (examSeries) {
-          examSeries.forEach(exam => {
-            if (exam?.test_series_id) {
-              subcategorySeriesIds.add(exam.test_series_id);
-            }
-          });
-        }
-      }
-
-      // If no subcategory matches found, return empty result
-      if (subcategorySeriesIds.size === 0) {
-        return res.json({
-          data: [],
-          total: 0,
-          page: pageNumber,
-          limit: limitNumber,
-          totalPages: 0
-        });
-      }
-    }
+    const metadata = await batchLoadTestSeriesMetadata();
 
     let query = supabase
       .from('test_series')
-      .select(`
-        *,
-        category:exam_categories(id, name, slug, logo_url),
-        subcategory:exam_subcategories(id, name, slug),
-        difficulty:exam_difficulties(id, name, slug)
-      `, { count: 'exact' })
+      .select(
+        'id, title, description, category_id, subcategory_id, difficulty_id, logo_url, slug, is_published, display_order, created_at, updated_at',
+        { count: 'exact' }
+      )
       .is('deleted_at', null)
       .order('display_order', { ascending: true })
       .order('created_at', { ascending: false })
       .range(offset, offset + limitNumber - 1);
 
-    // Apply category filter
-    if (categorySeriesIds && categorySeriesIds.size > 0) {
-      query = query.in('id', Array.from(categorySeriesIds));
-    }
-
-    // Apply subcategory filter (intersect with category results if both are present)
-    if (subcategorySeriesIds && subcategorySeriesIds.size > 0) {
-      if (categorySeriesIds && categorySeriesIds.size > 0) {
-        // Intersect category and subcategory results
-        const intersection = Array.from(categorySeriesIds).filter(id => subcategorySeriesIds.has(id));
-        if (intersection.length === 0) {
-          return res.json({
-            data: [],
-            total: 0,
-            page: pageNumber,
-            limit: limitNumber,
-            totalPages: 0
-          });
-        }
-        query = query.in('id', intersection);
-      } else {
-        query = query.in('id', Array.from(subcategorySeriesIds));
-      }
-    }
-
     if (search) {
-      query = query.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
+      const searchTerm = search.trim();
+      query = query.or(`title.ilike.%${searchTerm}%,description.ilike.%${searchTerm}%`);
+    }
+
+    if (category) {
+      const categoryData = metadata.categoriesMap[category];
+      if (categoryData) query = query.eq('category_id', categoryData.id);
+    }
+
+    if (subcategory) {
+      const subcategoryData = metadata.subcategoriesMap[subcategory];
+      if (subcategoryData) query = query.eq('subcategory_id', subcategoryData.id);
     }
 
     if (difficulty) {
-      query = query.eq('difficulty_id', difficulty);
+      const difficultyData = metadata.difficultiesMap[difficulty];
+      if (difficultyData) query = query.eq('difficulty_id', difficultyData.id);
     }
 
-    if (is_published !== undefined) {
+    if (is_published !== undefined && is_published !== '') {
       query = query.eq('is_published', is_published === 'true');
     }
 
@@ -289,105 +203,33 @@ const getAllTestSeries = async (req, res) => {
 
     if (error) {
       logger.error('Error fetching test series:', error);
-      return res.status(500).json({ error: 'Failed to fetch test series' });
+      return res.status(500).json({ success: false, message: 'Failed to fetch test series', error: error.message });
     }
 
-    const seriesIds = testSeries.map(series => series.id);
-    const statsMap = new Map();
-    const userCountMap = new Map();
+    const testSeriesIds = testSeries.map(s => s.id);
+    const statsMap = await batchLoadTestSeriesStats(testSeriesIds);
 
-    const fallbackCategoryMap = new Map();
+    const enrichedTestSeries = testSeries.map(series => ({
+      ...series,
+      category: series.category_id ? metadata.categoriesMap[series.category_id] : null,
+      subcategory: series.subcategory_id ? metadata.subcategoriesMap[series.subcategory_id] : null,
+      difficulty: series.difficulty_id ? metadata.difficultiesMap[series.difficulty_id] : null,
+      ...(statsMap[series.id] || {}),
+    }));
 
-    if (seriesIds.length > 0) {
-      const { data: examStats, error: examStatsError } = await supabase
-        .from('exams')
-        .select('id, test_series_id, is_free, supports_hindi, category, category_id')
-        .in('test_series_id', seriesIds)
-        .is('deleted_at', null);
-
-      if (examStatsError) {
-        logger.error('Error fetching exam stats for test series:', examStatsError);
-      } else if (examStats) {
-        examStats.forEach(exam => {
-          const existing = statsMap.get(exam.test_series_id) || {
-            total: 0,
-            free: 0,
-            supportsHindi: false
-          };
-          existing.total += 1;
-          if (exam.is_free) {
-            existing.free += 1;
-          }
-          existing.supportsHindi = existing.supportsHindi || Boolean(exam.supports_hindi);
-          statsMap.set(exam.test_series_id, existing);
-
-          const hasFallback = fallbackCategoryMap.has(exam.test_series_id);
-          if (!hasFallback && (exam.category_id || exam.category)) {
-            fallbackCategoryMap.set(exam.test_series_id, {
-              id: exam.category_id || null,
-              slug: exam.category || null
-            });
-          }
-        });
-
-        // Calculate user counts for each test series
-        const examIds = examStats.map(e => e.id);
-        if (examIds.length > 0) {
-          const { data: attempts, error: attemptsError } = await supabase
-            .from('exam_attempts')
-            .select('exam_id, user_id')
-            .in('exam_id', examIds);
-
-          if (!attemptsError && attempts) {
-            const examToSeriesMap = new Map();
-            examStats.forEach(exam => {
-              examToSeriesMap.set(exam.id, exam.test_series_id);
-            });
-
-            attempts.forEach(attempt => {
-              const seriesId = examToSeriesMap.get(attempt.exam_id);
-              if (seriesId) {
-                if (!userCountMap.has(seriesId)) {
-                  userCountMap.set(seriesId, new Set());
-                }
-                userCountMap.get(seriesId).add(attempt.user_id);
-              }
-            });
-          }
-        }
-      }
-    }
-
-    for (const series of testSeries) {
-      const stats = statsMap.get(series.id) || { total: 0, free: 0, supportsHindi: false };
-      const languages = ['English'];
-      if (stats.supportsHindi) {
-        languages.push('Hindi');
-      }
-
-      series.total_tests = stats.total;
-      series.free_tests = stats.free;
-      series.languages = languages;
-      series.languages_text = languages.join(', ');
-      
-      // Add user count from distinct users who attempted exams
-      const userSet = userCountMap.get(series.id);
-      series.user_count = userSet ? userSet.size : 0;
-
-      const fallbackCategory = fallbackCategoryMap.get(series.id) || null;
-      await hydrateSeriesCategory(series, fallbackCategory);
-    }
-
-    res.json({
-      data: testSeries,
-      total: count,
+    const response = {
+      data: enrichedTestSeries,
+      total: count || 0,
       page: pageNumber,
       limit: limitNumber,
-      totalPages: Math.ceil(count / limitNumber)
-    });
+      totalPages: Math.ceil((count || 0) / limitNumber),
+    };
+
+    await redisCache.set(cacheKey, response, CACHE_TTL.TEST_SERIES);
+    res.json(response);
   } catch (error) {
     logger.error('Error in getAllTestSeries:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
   }
 };
 
@@ -426,47 +268,18 @@ const getTestSeriesById = async (req, res) => {
         .select('*')
         .eq('section_id', section.id)
         .order('display_order', { ascending: true });
-      
       section.topics = topics || [];
     }
 
     const { data: exams } = await supabase
       .from('exams')
       .select(`
-        id,
-        title,
-        duration,
-        total_marks,
-        total_questions,
-        status,
-        exam_date,
-        is_free,
-        logo_url,
-        thumbnail_url,
-        test_series_section_id,
-        test_series_topic_id,
-        display_order,
-        slug,
-        url_path,
-        category,
-        category_id,
-        subcategory,
-        subcategory_id,
-        difficulty,
-        difficulty_id,
-        is_published,
-        allow_anytime,
-        start_date,
-        end_date,
-        supports_hindi,
-        is_premium,
-        pass_percentage,
-        negative_marking,
-        negative_mark_value,
-        created_at,
-        updated_at,
-        exam_type,
-        show_in_mock_tests
+        id, title, duration, total_marks, total_questions, status, exam_date,
+        is_free, logo_url, thumbnail_url, test_series_section_id, test_series_topic_id,
+        display_order, slug, url_path, category, category_id, subcategory, subcategory_id,
+        difficulty, difficulty_id, is_published, allow_anytime, start_date, end_date,
+        supports_hindi, is_premium, pass_percentage, negative_marking, negative_mark_value,
+        created_at, updated_at, exam_type, show_in_mock_tests
       `)
       .eq('test_series_id', id)
       .is('deleted_at', null)
@@ -475,18 +288,22 @@ const getTestSeriesById = async (req, res) => {
 
     testSeries.exams = exams || [];
 
-    const fallbackCategorySource = exams.find(exam => exam.category_id || exam.category) || null;
+    const fallbackCategorySource = (exams || []).find(e => e.category_id || e.category) || null;
     const fallbackCategory = fallbackCategorySource
       ? { id: fallbackCategorySource.category_id, slug: fallbackCategorySource.category }
       : null;
     await hydrateSeriesCategory(testSeries, fallbackCategory);
 
-    const { count: attemptCount } = await supabase
-      .from('exam_attempts')
-      .select('id', { count: 'exact', head: true })
-      .in('exam_id', exams.map(e => e.id));
-
-    testSeries.total_attempts = attemptCount || 0;
+    const examIds = (exams || []).map(e => e.id);
+    let attemptCount = 0;
+    if (examIds.length > 0) {
+      const { count } = await supabase
+        .from('exam_attempts')
+        .select('id', { count: 'exact', head: true })
+        .in('exam_id', examIds);
+      attemptCount = count || 0;
+    }
+    testSeries.total_attempts = attemptCount;
 
     res.json(testSeries);
   } catch (error) {
@@ -533,47 +350,18 @@ const getTestSeriesBySlug = async (req, res) => {
         .select('*')
         .eq('section_id', section.id)
         .order('display_order', { ascending: true });
-      
       section.topics = topics || [];
     }
 
     const { data: exams } = await supabase
       .from('exams')
       .select(`
-        id,
-        title,
-        duration,
-        total_marks,
-        total_questions,
-        status,
-        exam_date,
-        is_free,
-        logo_url,
-        thumbnail_url,
-        test_series_section_id,
-        test_series_topic_id,
-        display_order,
-        slug,
-        url_path,
-        category,
-        category_id,
-        subcategory,
-        subcategory_id,
-        difficulty,
-        difficulty_id,
-        is_published,
-        allow_anytime,
-        start_date,
-        end_date,
-        supports_hindi,
-        is_premium,
-        pass_percentage,
-        negative_marking,
-        negative_mark_value,
-        created_at,
-        updated_at,
-        exam_type,
-        show_in_mock_tests,
+        id, title, duration, total_marks, total_questions, status, exam_date,
+        is_free, logo_url, thumbnail_url, test_series_section_id, test_series_topic_id,
+        display_order, slug, url_path, category, category_id, subcategory, subcategory_id,
+        difficulty, difficulty_id, is_published, allow_anytime, start_date, end_date,
+        supports_hindi, is_premium, pass_percentage, negative_marking, negative_mark_value,
+        created_at, updated_at, exam_type, show_in_mock_tests,
         exam_categories(logo_url, icon)
       `)
       .eq('test_series_id', testSeries.id)
@@ -584,7 +372,7 @@ const getTestSeriesBySlug = async (req, res) => {
     const safeExams = exams || [];
     testSeries.exams = safeExams;
 
-    const fallbackCategorySource = safeExams.find(exam => exam.category_id || exam.category) || null;
+    const fallbackCategorySource = safeExams.find(e => e.category_id || e.category) || null;
     const fallbackCategory = fallbackCategorySource
       ? { id: fallbackCategorySource.category_id, slug: fallbackCategorySource.category }
       : null;
@@ -598,7 +386,6 @@ const getTestSeriesBySlug = async (req, res) => {
         .in('exam_id', safeExams.map(e => e.id));
       attemptCount = count || 0;
     }
-
     testSeries.total_attempts = attemptCount;
 
     res.json(testSeries);
@@ -611,22 +398,11 @@ const getTestSeriesBySlug = async (req, res) => {
 const createTestSeries = async (req, res) => {
   try {
     const {
-      title,
-      description,
-      category_id,
-      subcategory_id,
-      difficulty_id,
-      is_published,
-      is_free,
-      price,
-      display_order,
-      logo_url,
-      thumbnail_url
+      title, description, category_id, subcategory_id, difficulty_id,
+      is_published, is_free, price, display_order, logo_url, thumbnail_url,
     } = req.body;
 
-    if (!title) {
-      return res.status(400).json({ error: 'Title is required' });
-    }
+    if (!title) return res.status(400).json({ error: 'Title is required' });
 
     const baseSlug = slugify(title);
     const slug = await ensureUniqueSlug(supabase, 'test_series', baseSlug);
@@ -634,18 +410,12 @@ const createTestSeries = async (req, res) => {
     const { data: testSeries, error } = await supabase
       .from('test_series')
       .insert({
-        title,
-        description,
-        slug,
-        category_id,
-        subcategory_id,
-        difficulty_id,
+        title, description, slug, category_id, subcategory_id, difficulty_id,
         is_published: is_published || false,
         is_free: is_free !== undefined ? is_free : true,
         price: price || 0,
         display_order: display_order || 0,
-        logo_url,
-        thumbnail_url
+        logo_url, thumbnail_url,
       })
       .select()
       .single();
@@ -666,29 +436,16 @@ const updateTestSeries = async (req, res) => {
   try {
     const { id } = req.params;
     const {
-      title,
-      description,
-      category_id,
-      subcategory_id,
-      difficulty_id,
-      is_published,
-      is_free,
-      price,
-      display_order,
-      logo_url,
-      thumbnail_url
+      title, description, category_id, subcategory_id, difficulty_id,
+      is_published, is_free, price, display_order, logo_url, thumbnail_url,
     } = req.body;
 
-    const updateData = {
-      updated_at: new Date().toISOString()
-    };
+    const updateData = { updated_at: new Date().toISOString() };
 
     if (title !== undefined) {
       updateData.title = title;
       const baseSlug = slugify(title);
-      updateData.slug = await ensureUniqueSlug(supabase, 'test_series', baseSlug, {
-        excludeId: id
-      });
+      updateData.slug = await ensureUniqueSlug(supabase, 'test_series', baseSlug, { excludeId: id });
     }
     if (description !== undefined) updateData.description = description;
     if (category_id !== undefined) updateData.category_id = category_id;
@@ -744,19 +501,11 @@ const deleteTestSeries = async (req, res) => {
 const createSection = async (req, res) => {
   try {
     const { test_series_id, name, description, display_order } = req.body;
-
-    if (!test_series_id || !name) {
-      return res.status(400).json({ error: 'Test series ID and name are required' });
-    }
+    if (!test_series_id || !name) return res.status(400).json({ error: 'Test series ID and name are required' });
 
     const { data: section, error } = await supabase
       .from('test_series_sections')
-      .insert({
-        test_series_id,
-        name,
-        description,
-        display_order: display_order || 0
-      })
+      .insert({ test_series_id, name, description, display_order: display_order || 0 })
       .select()
       .single();
 
@@ -764,7 +513,6 @@ const createSection = async (req, res) => {
       logger.error('Error creating section:', error);
       return res.status(500).json({ error: 'Failed to create section' });
     }
-
     res.status(201).json(section);
   } catch (error) {
     logger.error('Error in createSection:', error);
@@ -776,7 +524,6 @@ const updateSection = async (req, res) => {
   try {
     const { id } = req.params;
     const { name, description, display_order } = req.body;
-
     const updateData = { updated_at: new Date().toISOString() };
     if (name !== undefined) updateData.name = name;
     if (description !== undefined) updateData.description = description;
@@ -793,7 +540,6 @@ const updateSection = async (req, res) => {
       logger.error('Error updating section:', error);
       return res.status(500).json({ error: 'Failed to update section' });
     }
-
     res.json(section);
   } catch (error) {
     logger.error('Error in updateSection:', error);
@@ -804,17 +550,11 @@ const updateSection = async (req, res) => {
 const deleteSection = async (req, res) => {
   try {
     const { id } = req.params;
-
-    const { error } = await supabase
-      .from('test_series_sections')
-      .delete()
-      .eq('id', id);
-
+    const { error } = await supabase.from('test_series_sections').delete().eq('id', id);
     if (error) {
       logger.error('Error deleting section:', error);
       return res.status(500).json({ error: 'Failed to delete section' });
     }
-
     res.json({ message: 'Section deleted successfully' });
   } catch (error) {
     logger.error('Error in deleteSection:', error);
@@ -825,19 +565,11 @@ const deleteSection = async (req, res) => {
 const createTopic = async (req, res) => {
   try {
     const { section_id, name, description, display_order } = req.body;
-
-    if (!section_id || !name) {
-      return res.status(400).json({ error: 'Section ID and name are required' });
-    }
+    if (!section_id || !name) return res.status(400).json({ error: 'Section ID and name are required' });
 
     const { data: topic, error } = await supabase
       .from('test_series_topics')
-      .insert({
-        section_id,
-        name,
-        description,
-        display_order: display_order || 0
-      })
+      .insert({ section_id, name, description, display_order: display_order || 0 })
       .select()
       .single();
 
@@ -845,7 +577,6 @@ const createTopic = async (req, res) => {
       logger.error('Error creating topic:', error);
       return res.status(500).json({ error: 'Failed to create topic' });
     }
-
     res.status(201).json(topic);
   } catch (error) {
     logger.error('Error in createTopic:', error);
@@ -857,7 +588,6 @@ const updateTopic = async (req, res) => {
   try {
     const { id } = req.params;
     const { name, description, display_order } = req.body;
-
     const updateData = { updated_at: new Date().toISOString() };
     if (name !== undefined) updateData.name = name;
     if (description !== undefined) updateData.description = description;
@@ -874,7 +604,6 @@ const updateTopic = async (req, res) => {
       logger.error('Error updating topic:', error);
       return res.status(500).json({ error: 'Failed to update topic' });
     }
-
     res.json(topic);
   } catch (error) {
     logger.error('Error in updateTopic:', error);
@@ -885,17 +614,11 @@ const updateTopic = async (req, res) => {
 const deleteTopic = async (req, res) => {
   try {
     const { id } = req.params;
-
-    const { error } = await supabase
-      .from('test_series_topics')
-      .delete()
-      .eq('id', id);
-
+    const { error } = await supabase.from('test_series_topics').delete().eq('id', id);
     if (error) {
       logger.error('Error deleting topic:', error);
       return res.status(500).json({ error: 'Failed to delete topic' });
     }
-
     res.json({ message: 'Topic deleted successfully' });
   } catch (error) {
     logger.error('Error in deleteTopic:', error);
@@ -906,7 +629,6 @@ const deleteTopic = async (req, res) => {
 const getSectionsByTestSeries = async (req, res) => {
   try {
     const { test_series_id } = req.params;
-
     const { data: sections, error } = await supabase
       .from('test_series_sections')
       .select('*')
@@ -917,7 +639,6 @@ const getSectionsByTestSeries = async (req, res) => {
       logger.error('Error fetching sections:', error);
       return res.status(500).json({ error: 'Failed to fetch sections' });
     }
-
     res.json(sections);
   } catch (error) {
     logger.error('Error in getSectionsByTestSeries:', error);
@@ -928,7 +649,6 @@ const getSectionsByTestSeries = async (req, res) => {
 const getTopicsBySection = async (req, res) => {
   try {
     const { section_id } = req.params;
-
     const { data: topics, error } = await supabase
       .from('test_series_topics')
       .select('*')
@@ -939,7 +659,6 @@ const getTopicsBySection = async (req, res) => {
       logger.error('Error fetching topics:', error);
       return res.status(500).json({ error: 'Failed to fetch topics' });
     }
-
     res.json(topics);
   } catch (error) {
     logger.error('Error in getTopicsBySection:', error);
@@ -950,143 +669,76 @@ const getTopicsBySection = async (req, res) => {
 const reorderSections = async (req, res) => {
   try {
     const { orderedIds } = req.body;
-
     if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'orderedIds must be a non-empty array' 
-      });
+      return res.status(400).json({ success: false, message: 'orderedIds must be a non-empty array' });
     }
 
-    // Filter out temp/local IDs that are not valid UUIDs
     const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
     const validIds = orderedIds.filter(id => uuidRegex.test(id));
 
     if (validIds.length === 0) {
-      return res.json({ 
-        success: true, 
-        message: 'No saved sections to reorder' 
-      });
+      return res.json({ success: true, message: 'No saved sections to reorder' });
     }
 
-    // Update display_order for each section
-    const updates = validIds.map((id, index) => 
-      supabase
-        .from('test_series_sections')
-        .update({ display_order: index })
-        .eq('id', id)
+    const updates = validIds.map((id, index) =>
+      supabase.from('test_series_sections').update({ display_order: index }).eq('id', id)
     );
-
     const results = await Promise.all(updates);
-    
-    // Check for errors
-    const failed = results.find(result => result.error);
+    const failed = results.find(r => r.error);
     if (failed) {
       logger.error('Reorder sections error:', failed.error);
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Failed to reorder sections' 
-      });
+      return res.status(500).json({ success: false, message: 'Failed to reorder sections' });
     }
-
-    res.json({ 
-      success: true, 
-      message: 'Sections reordered successfully' 
-    });
+    res.json({ success: true, message: 'Sections reordered successfully' });
   } catch (error) {
     logger.error('Reorder sections error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while reordering sections' 
-    });
+    res.status(500).json({ success: false, message: 'Server error while reordering sections' });
   }
 };
 
 const reorderTopics = async (req, res) => {
   try {
     const { orderedIds } = req.body;
-
     if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'orderedIds must be a non-empty array' 
-      });
+      return res.status(400).json({ success: false, message: 'orderedIds must be a non-empty array' });
     }
 
-    // Update display_order for each topic
-    const updates = orderedIds.map((id, index) => 
-      supabase
-        .from('test_series_topics')
-        .update({ display_order: index })
-        .eq('id', id)
+    const updates = orderedIds.map((id, index) =>
+      supabase.from('test_series_topics').update({ display_order: index }).eq('id', id)
     );
-
     const results = await Promise.all(updates);
-    
-    // Check for errors
-    const failed = results.find(result => result.error);
+    const failed = results.find(r => r.error);
     if (failed) {
       logger.error('Reorder topics error:', failed.error);
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Failed to reorder topics' 
-      });
+      return res.status(500).json({ success: false, message: 'Failed to reorder topics' });
     }
-
-    res.json({ 
-      success: true, 
-      message: 'Topics reordered successfully' 
-    });
+    res.json({ success: true, message: 'Topics reordered successfully' });
   } catch (error) {
     logger.error('Reorder topics error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while reordering topics' 
-    });
+    res.status(500).json({ success: false, message: 'Server error while reordering topics' });
   }
 };
 
 const reorderExams = async (req, res) => {
   try {
     const { orderedIds } = req.body;
-
     if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'orderedIds must be a non-empty array' 
-      });
+      return res.status(400).json({ success: false, message: 'orderedIds must be a non-empty array' });
     }
 
-    // Update display_order for each exam
-    const updates = orderedIds.map((id, index) => 
-      supabase
-        .from('exams')
-        .update({ display_order: index })
-        .eq('id', id)
+    const updates = orderedIds.map((id, index) =>
+      supabase.from('exams').update({ display_order: index }).eq('id', id)
     );
-
     const results = await Promise.all(updates);
-    
-    // Check for errors
-    const failed = results.find(result => result.error);
+    const failed = results.find(r => r.error);
     if (failed) {
       logger.error('Reorder exams error:', failed.error);
-      return res.status(500).json({ 
-        success: false, 
-        message: 'Failed to reorder exams' 
-      });
+      return res.status(500).json({ success: false, message: 'Failed to reorder exams' });
     }
-
-    res.json({ 
-      success: true, 
-      message: 'Exams reordered successfully' 
-    });
+    res.json({ success: true, message: 'Exams reordered successfully' });
   } catch (error) {
     logger.error('Reorder exams error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Server error while reordering exams' 
-    });
+    res.status(500).json({ success: false, message: 'Server error while reordering exams' });
   }
 };
 
@@ -1094,58 +746,32 @@ const uploadTestSeriesLogo = async (req, res) => {
   try {
     const { id } = req.params;
     const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file uploaded' });
 
-    if (!file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    // Check if test series exists
     const { data: testSeries, error: fetchError } = await supabase
-      .from('test_series')
-      .select('id, logo_url')
-      .eq('id', id)
-      .single();
+      .from('test_series').select('id, logo_url').eq('id', id).single();
 
-    if (fetchError || !testSeries) {
-      return res.status(404).json({ error: 'Test series not found' });
-    }
+    if (fetchError || !testSeries) return res.status(404).json({ error: 'Test series not found' });
 
-    // Delete old logo if exists
     if (testSeries.logo_url) {
       const oldKey = extractKeyFromUrl(testSeries.logo_url);
       if (oldKey) {
-        try {
-          await deleteFile(oldKey);
-        } catch (deleteError) {
-          logger.warn('Failed to delete old logo:', deleteError);
-        }
+        try { await deleteFile(oldKey); } catch (e) { logger.warn('Failed to delete old logo:', e); }
       }
     }
 
-    // Upload new logo
     const uploadResult = await uploadFile(file, 'test-series/logos');
 
-    // Update test series with new logo URL
     const { data: updatedSeries, error: updateError } = await supabase
       .from('test_series')
-      .update({ 
-        logo_url: uploadResult.url,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', id)
-      .select()
-      .single();
+      .update({ logo_url: uploadResult.url, updated_at: new Date().toISOString() })
+      .eq('id', id).select().single();
 
     if (updateError) {
       logger.error('Error updating test series logo:', updateError);
       return res.status(500).json({ error: 'Failed to update test series logo' });
     }
-
-    res.json({
-      success: true,
-      logo_url: uploadResult.url,
-      test_series: updatedSeries
-    });
+    res.json({ success: true, logo_url: uploadResult.url, test_series: updatedSeries });
   } catch (error) {
     logger.error('Error uploading test series logo:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -1156,58 +782,32 @@ const uploadTestSeriesThumbnail = async (req, res) => {
   try {
     const { id } = req.params;
     const file = req.file;
+    if (!file) return res.status(400).json({ error: 'No file uploaded' });
 
-    if (!file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    // Check if test series exists
     const { data: testSeries, error: fetchError } = await supabase
-      .from('test_series')
-      .select('id, thumbnail_url')
-      .eq('id', id)
-      .single();
+      .from('test_series').select('id, thumbnail_url').eq('id', id).single();
 
-    if (fetchError || !testSeries) {
-      return res.status(404).json({ error: 'Test series not found' });
-    }
+    if (fetchError || !testSeries) return res.status(404).json({ error: 'Test series not found' });
 
-    // Delete old thumbnail if exists
     if (testSeries.thumbnail_url) {
       const oldKey = extractKeyFromUrl(testSeries.thumbnail_url);
       if (oldKey) {
-        try {
-          await deleteFile(oldKey);
-        } catch (deleteError) {
-          logger.warn('Failed to delete old thumbnail:', deleteError);
-        }
+        try { await deleteFile(oldKey); } catch (e) { logger.warn('Failed to delete old thumbnail:', e); }
       }
     }
 
-    // Upload new thumbnail
     const uploadResult = await uploadFile(file, 'test-series/thumbnails');
 
-    // Update test series with new thumbnail URL
     const { data: updatedSeries, error: updateError } = await supabase
       .from('test_series')
-      .update({ 
-        thumbnail_url: uploadResult.url,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', id)
-      .select()
-      .single();
+      .update({ thumbnail_url: uploadResult.url, updated_at: new Date().toISOString() })
+      .eq('id', id).select().single();
 
     if (updateError) {
       logger.error('Error updating test series thumbnail:', updateError);
       return res.status(500).json({ error: 'Failed to update test series thumbnail' });
     }
-
-    res.json({
-      success: true,
-      thumbnail_url: uploadResult.url,
-      test_series: updatedSeries
-    });
+    res.json({ success: true, thumbnail_url: uploadResult.url, test_series: updatedSeries });
   } catch (error) {
     logger.error('Error uploading test series thumbnail:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -1217,53 +817,27 @@ const uploadTestSeriesThumbnail = async (req, res) => {
 const deleteTestSeriesLogo = async (req, res) => {
   try {
     const { id } = req.params;
-
-    // Get current test series
     const { data: testSeries, error: fetchError } = await supabase
-      .from('test_series')
-      .select('id, logo_url')
-      .eq('id', id)
-      .single();
+      .from('test_series').select('id, logo_url').eq('id', id).single();
 
-    if (fetchError || !testSeries) {
-      return res.status(404).json({ error: 'Test series not found' });
-    }
+    if (fetchError || !testSeries) return res.status(404).json({ error: 'Test series not found' });
+    if (!testSeries.logo_url) return res.status(400).json({ error: 'No logo to delete' });
 
-    if (!testSeries.logo_url) {
-      return res.status(400).json({ error: 'No logo to delete' });
-    }
-
-    // Delete file from storage
     const fileKey = extractKeyFromUrl(testSeries.logo_url);
     if (fileKey) {
-      try {
-        await deleteFile(fileKey);
-      } catch (deleteError) {
-        logger.warn('Failed to delete logo file:', deleteError);
-      }
+      try { await deleteFile(fileKey); } catch (e) { logger.warn('Failed to delete logo file:', e); }
     }
 
-    // Update test series to remove logo URL
     const { data: updatedSeries, error: updateError } = await supabase
       .from('test_series')
-      .update({ 
-        logo_url: null,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', id)
-      .select()
-      .single();
+      .update({ logo_url: null, updated_at: new Date().toISOString() })
+      .eq('id', id).select().single();
 
     if (updateError) {
       logger.error('Error removing test series logo:', updateError);
       return res.status(500).json({ error: 'Failed to remove test series logo' });
     }
-
-    res.json({
-      success: true,
-      message: 'Logo deleted successfully',
-      test_series: updatedSeries
-    });
+    res.json({ success: true, message: 'Logo deleted successfully', test_series: updatedSeries });
   } catch (error) {
     logger.error('Error deleting test series logo:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -1273,53 +847,27 @@ const deleteTestSeriesLogo = async (req, res) => {
 const deleteTestSeriesThumbnail = async (req, res) => {
   try {
     const { id } = req.params;
-
-    // Get current test series
     const { data: testSeries, error: fetchError } = await supabase
-      .from('test_series')
-      .select('id, thumbnail_url')
-      .eq('id', id)
-      .single();
+      .from('test_series').select('id, thumbnail_url').eq('id', id).single();
 
-    if (fetchError || !testSeries) {
-      return res.status(404).json({ error: 'Test series not found' });
-    }
+    if (fetchError || !testSeries) return res.status(404).json({ error: 'Test series not found' });
+    if (!testSeries.thumbnail_url) return res.status(400).json({ error: 'No thumbnail to delete' });
 
-    if (!testSeries.thumbnail_url) {
-      return res.status(400).json({ error: 'No thumbnail to delete' });
-    }
-
-    // Delete file from storage
     const fileKey = extractKeyFromUrl(testSeries.thumbnail_url);
     if (fileKey) {
-      try {
-        await deleteFile(fileKey);
-      } catch (deleteError) {
-        logger.warn('Failed to delete thumbnail file:', deleteError);
-      }
+      try { await deleteFile(fileKey); } catch (e) { logger.warn('Failed to delete thumbnail file:', e); }
     }
 
-    // Update test series to remove thumbnail URL
     const { data: updatedSeries, error: updateError } = await supabase
       .from('test_series')
-      .update({ 
-        thumbnail_url: null,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', id)
-      .select()
-      .single();
+      .update({ thumbnail_url: null, updated_at: new Date().toISOString() })
+      .eq('id', id).select().single();
 
     if (updateError) {
       logger.error('Error removing test series thumbnail:', updateError);
       return res.status(500).json({ error: 'Failed to remove test series thumbnail' });
     }
-
-    res.json({
-      success: true,
-      message: 'Thumbnail deleted successfully',
-      test_series: updatedSeries
-    });
+    res.json({ success: true, message: 'Thumbnail deleted successfully', test_series: updatedSeries });
   } catch (error) {
     logger.error('Error deleting test series thumbnail:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -1347,5 +895,5 @@ module.exports = {
   uploadTestSeriesLogo,
   uploadTestSeriesThumbnail,
   deleteTestSeriesLogo,
-  deleteTestSeriesThumbnail
+  deleteTestSeriesThumbnail,
 };

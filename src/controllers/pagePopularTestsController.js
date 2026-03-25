@@ -1,48 +1,27 @@
 const supabase = require('../config/database');
+const { redisCache, CACHE_TTL, buildCacheKey } = require('../utils/redisCache');
 
-const buildErrorResponse = (message, statusCode = 500) => ({
-  success: false,
-  message,
-  statusCode
-});
+const buildErrorResponse = (message, statusCode = 500) => ({ success: false, message, statusCode });
 
 const getPopularTests = async (req, res) => {
   try {
     const { pageIdentifier } = req.params;
-    
+
+    const cacheKey = buildCacheKey('popular_tests', pageIdentifier);
+    const cachedResponse = await redisCache.get(cacheKey);
+    if (cachedResponse) return res.json(cachedResponse);
+
     const { data, error } = await supabase
       .from('page_popular_tests')
       .select(`
         id,
-        page_identifier,
-        exam_id,
         display_order,
-        is_active,
-        created_at,
-        updated_at,
         exams (
-          id,
-          title,
-          slug,
-          duration,
-          total_questions,
-          thumbnail_url,
-          logo_url,
-          image_url,
-          difficulty,
-          category,
-          subcategory,
-          exam_type,
-          is_premium,
-          is_free,
-          status,
-          allow_anytime,
-          start_date,
-          end_date,
-          total_marks,
-          supports_hindi,
-          url_path,
-          exam_categories(logo_url, icon)
+          id, title, slug, duration, total_questions, total_marks,
+          thumbnail_url, logo_url, image_url, difficulty,
+          category_id, subcategory_id, exam_type, is_premium, is_free,
+          status, allow_anytime, start_date, end_date, supports_hindi,
+          url_path, exam_categories(logo_url, icon)
         )
       `)
       .eq('page_identifier', pageIdentifier)
@@ -54,56 +33,36 @@ const getPopularTests = async (req, res) => {
       return res.status(500).json(buildErrorResponse('Failed to fetch popular tests'));
     }
 
-    const formattedData = data.map(item => ({
-      id: item.id,
-      displayOrder: item.display_order,
-      exam: item.exams
-    }));
+    if (!data || data.length === 0) {
+      const response = { success: true, data: [], message: 'No popular tests found for this page' };
+      await redisCache.set(cacheKey, response, CACHE_TTL.POPULAR_TESTS / 2);
+      return res.json(response);
+    }
 
-    return res.status(200).json({
-      success: true,
-      data: formattedData
-    });
+    const validData = data.filter(item => item.exams);
+    const response = { success: true, data: validData, total: validData.length };
+    await redisCache.set(cacheKey, response, CACHE_TTL.POPULAR_TESTS);
+    res.json(response);
   } catch (err) {
     console.error('Error in getPopularTests:', err);
-    return res.status(500).json(buildErrorResponse('Internal server error'));
+    res.status(500).json(buildErrorResponse('Internal server error'));
   }
 };
 
 const getPopularTestsAdmin = async (req, res) => {
   try {
     const { pageIdentifier } = req.params;
-    
+
     const { data, error } = await supabase
       .from('page_popular_tests')
       .select(`
-        id,
-        page_identifier,
-        exam_id,
-        display_order,
-        is_active,
-        created_at,
-        updated_at,
+        id, page_identifier, exam_id, display_order, is_active,
+        created_at, updated_at,
         exams (
-          id,
-          title,
-          slug,
-          duration,
-          total_questions,
-          thumbnail_url,
-          logo_url,
-          image_url,
-          difficulty,
-          category,
-          subcategory,
-          exam_type,
-          is_premium,
-          is_free,
-          status,
-          total_marks,
-          supports_hindi,
-          url_path,
-          exam_categories(logo_url, icon)
+          id, title, slug, duration, total_questions, thumbnail_url,
+          logo_url, image_url, difficulty, category, subcategory,
+          exam_type, is_premium, is_free, status, total_marks,
+          supports_hindi, url_path, exam_categories(logo_url, icon)
         )
       `)
       .eq('page_identifier', pageIdentifier)
@@ -122,13 +81,10 @@ const getPopularTestsAdmin = async (req, res) => {
       isActive: item.is_active,
       createdAt: item.created_at,
       updatedAt: item.updated_at,
-      exam: item.exams
+      exam: item.exams,
     }));
 
-    return res.status(200).json({
-      success: true,
-      data: formattedData
-    });
+    return res.status(200).json({ success: true, data: formattedData });
   } catch (err) {
     console.error('Error in getPopularTestsAdmin:', err);
     return res.status(500).json(buildErrorResponse('Internal server error'));
@@ -159,40 +115,15 @@ const addPopularTest = async (req, res) => {
 
     const { data, error } = await supabase
       .from('page_popular_tests')
-      .insert({
-        page_identifier: pageIdentifier,
-        exam_id: examId,
-        display_order: nextOrder,
-        is_active: true
-      })
+      .insert({ page_identifier: pageIdentifier, exam_id: examId, display_order: nextOrder, is_active: true })
       .select(`
-        id,
-        page_identifier,
-        exam_id,
-        display_order,
-        is_active,
-        created_at,
-        updated_at,
+        id, page_identifier, exam_id, display_order, is_active,
+        created_at, updated_at,
         exams (
-          id,
-          title,
-          slug,
-          duration,
-          total_questions,
-          thumbnail_url,
-          logo_url,
-          image_url,
-          difficulty,
-          category,
-          subcategory,
-          exam_type,
-          is_premium,
-          is_free,
-          status,
-          total_marks,
-          supports_hindi,
-          url_path,
-          exam_categories(logo_url, icon)
+          id, title, slug, duration, total_questions, thumbnail_url,
+          logo_url, image_url, difficulty, category, subcategory,
+          exam_type, is_premium, is_free, status, total_marks,
+          supports_hindi, url_path, exam_categories(logo_url, icon)
         )
       `)
       .single();
@@ -216,8 +147,8 @@ const addPopularTest = async (req, res) => {
         isActive: data.is_active,
         createdAt: data.created_at,
         updatedAt: data.updated_at,
-        exam: data.exams
-      }
+        exam: data.exams,
+      },
     });
   } catch (err) {
     console.error('Error in addPopularTest:', err);
@@ -228,21 +159,14 @@ const addPopularTest = async (req, res) => {
 const removePopularTest = async (req, res) => {
   try {
     const { id } = req.params;
-
-    const { error } = await supabase
-      .from('page_popular_tests')
-      .delete()
-      .eq('id', id);
+    const { error } = await supabase.from('page_popular_tests').delete().eq('id', id);
 
     if (error) {
       console.error('Error removing popular test:', error);
       return res.status(500).json(buildErrorResponse('Failed to remove popular test'));
     }
 
-    return res.status(200).json({
-      success: true,
-      message: 'Popular test removed successfully'
-    });
+    return res.status(200).json({ success: true, message: 'Popular test removed successfully' });
   } catch (err) {
     console.error('Error in removePopularTest:', err);
     return res.status(500).json(buildErrorResponse('Internal server error'));
@@ -258,26 +182,20 @@ const reorderPopularTests = async (req, res) => {
       return res.status(400).json(buildErrorResponse('Ordered IDs array is required', 400));
     }
 
-    const updates = orderedIds.map((id, index) => 
-      supabase
-        .from('page_popular_tests')
+    const updates = orderedIds.map((id, index) =>
+      supabase.from('page_popular_tests')
         .update({ display_order: index })
         .eq('id', id)
         .eq('page_identifier', pageIdentifier)
     );
 
     const results = await Promise.all(updates);
-    
-    const hasError = results.some(result => result.error);
-    if (hasError) {
+    if (results.some(r => r.error)) {
       console.error('Error reordering popular tests');
       return res.status(500).json(buildErrorResponse('Failed to reorder popular tests'));
     }
 
-    return res.status(200).json({
-      success: true,
-      message: 'Popular tests reordered successfully'
-    });
+    return res.status(200).json({ success: true, message: 'Popular tests reordered successfully' });
   } catch (err) {
     console.error('Error in reorderPopularTests:', err);
     return res.status(500).json(buildErrorResponse('Internal server error'));
@@ -308,10 +226,7 @@ const togglePopularTestStatus = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'Popular test status updated successfully',
-      data: {
-        id: data.id,
-        isActive: data.is_active
-      }
+      data: { id: data.id, isActive: data.is_active },
     });
   } catch (err) {
     console.error('Error in togglePopularTestStatus:', err);
@@ -325,5 +240,5 @@ module.exports = {
   addPopularTest,
   removePopularTest,
   reorderPopularTests,
-  togglePopularTestStatus
+  togglePopularTestStatus,
 };
