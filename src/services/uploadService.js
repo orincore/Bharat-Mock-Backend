@@ -40,52 +40,64 @@ const IMAGE_MIME_TYPES = new Set([
 ]);
 
 /**
- * Compress an image buffer using sharp.
- * Returns { buffer, mimeType, extension } of the compressed image.
- * Falls back to original if sharp is unavailable or file is a PDF/SVG/GIF.
+ * Convert and compress any image to WebP using sharp.
+ * Always outputs WebP regardless of input format.
+ * Falls back to original only if sharp is unavailable or file is PDF/SVG/GIF.
  */
 const compressImage = async (file, folder) => {
-  if (!sharp || !IMAGE_MIME_TYPES.has(file.mimetype)) {
-    return { buffer: file.buffer, mimeType: file.mimetype, extension: path.extname(file.originalname) };
+  const originalExt = path.extname(file.originalname).toLowerCase();
+
+  // Skip non-image files entirely (PDFs, SVGs, etc.)
+  if (!IMAGE_MIME_TYPES.has(file.mimetype)) {
+    return { buffer: file.buffer, mimeType: file.mimetype, extension: originalExt };
   }
 
-  // Don't compress GIFs (would lose animation)
+  // Skip GIFs — converting loses animation
   if (file.mimetype === 'image/gif') {
     return { buffer: file.buffer, mimeType: file.mimetype, extension: '.gif' };
   }
 
-  const config = RESIZE_CONFIG[folder] || { width: 1200, height: 1200, quality: 82 };
+  // Skip if already WebP and small enough (< 50KB) — no benefit
+  if (file.mimetype === 'image/webp' && file.buffer.length < 50 * 1024) {
+    return { buffer: file.buffer, mimeType: 'image/webp', extension: '.webp' };
+  }
+
+  if (!sharp) {
+    return { buffer: file.buffer, mimeType: file.mimetype, extension: originalExt };
+  }
+
+  const config = RESIZE_CONFIG[folder] || { width: 1920, height: 1080, quality: 82 };
 
   try {
-    const compressed = await sharp(file.buffer)
+    const webpBuffer = await sharp(file.buffer)
       .resize(config.width, config.height, {
-        fit: 'inside',          // never upscale, preserve aspect ratio
+        fit: 'inside',
         withoutEnlargement: true,
       })
-      .webp({ quality: config.quality, effort: 4 })
+      .webp({ quality: config.quality, effort: 4, smartSubsample: true })
       .toBuffer();
 
-    // Only use compressed version if it's actually smaller
-    if (compressed.length < file.buffer.length) {
-      logger.info(`Compressed ${file.originalname}: ${(file.buffer.length / 1024).toFixed(0)}KB → ${(compressed.length / 1024).toFixed(0)}KB`);
-      return { buffer: compressed, mimeType: 'image/webp', extension: '.webp' };
-    }
+    const savedKB = ((file.buffer.length - webpBuffer.length) / 1024).toFixed(0);
+    logger.info(`WebP converted ${file.originalname}: ${(file.buffer.length / 1024).toFixed(0)}KB → ${(webpBuffer.length / 1024).toFixed(0)}KB (saved ${savedKB}KB)`);
 
-    // Fall back to original if compression didn't help (e.g. already tiny)
-    return { buffer: file.buffer, mimeType: file.mimetype, extension: path.extname(file.originalname) };
+    return { buffer: webpBuffer, mimeType: 'image/webp', extension: '.webp' };
   } catch (err) {
-    logger.warn(`Image compression failed for ${file.originalname}, uploading original:`, err.message);
-    return { buffer: file.buffer, mimeType: file.mimetype, extension: path.extname(file.originalname) };
+    logger.warn(`WebP conversion failed for ${file.originalname}, uploading original:`, err.message);
+    return { buffer: file.buffer, mimeType: file.mimetype, extension: originalExt };
   }
 };
 
 const uploadFile = async (file, folder, customFileName = null) => {
   try {
-    // Compress image before uploading
+    const originalSize = file.buffer.length;
     const { buffer, mimeType, extension } = await compressImage(file, folder);
+    const compressedSize = buffer.length;
+    const savedPct = originalSize > 0
+      ? Math.round(((originalSize - compressedSize) / originalSize) * 100)
+      : 0;
 
     const fileName = customFileName
-      ? customFileName.replace(/\.[^.]+$/, extension) // keep custom name, swap extension
+      ? customFileName.replace(/\.[^.]+$/, extension)
       : `${uuidv4()}${extension}`;
     const key = `${folder}/${fileName}`;
 
@@ -94,7 +106,6 @@ const uploadFile = async (file, folder, customFileName = null) => {
       Key: key,
       Body: buffer,
       ContentType: mimeType,
-      // Cache for 1 year — images are content-addressed by UUID
       CacheControl: 'public, max-age=31536000, immutable',
     };
 
@@ -103,7 +114,17 @@ const uploadFile = async (file, folder, customFileName = null) => {
     const fileUrl = `${R2_PUBLIC_URL}/${key}`;
     logger.info(`File uploaded successfully: ${key}`);
 
-    return { success: true, url: fileUrl, key, fileName };
+    return {
+      success: true,
+      url: fileUrl,
+      key,
+      fileName,
+      original_size: originalSize,
+      compressed_size: compressedSize,
+      saved_pct: savedPct,
+      mime_type: mimeType,
+      original_name: file.originalname,
+    };
   } catch (error) {
     logger.error('File upload error:', error);
     throw new Error('Failed to upload file to R2 storage');
@@ -171,20 +192,35 @@ const extractKeyFromUrl = (url) => {
 
 const uploadBuffer = async (buffer, filename, mimeType, folder = 'uploads') => {
   try {
-    const key = `${folder}/${filename}`;
-    
+    let finalBuffer = buffer;
+    let finalMimeType = mimeType;
+    let finalFilename = filename;
+
+    // Compress image buffers to WebP
+    const fakeFile = { buffer, mimetype: mimeType, originalname: filename };
+    const compressed = await compressImage(fakeFile, folder);
+
+    if (compressed.extension === '.webp') {
+      finalBuffer = compressed.buffer;
+      finalMimeType = 'image/webp';
+      // Replace extension in filename
+      finalFilename = filename.replace(/\.[^.]+$/, '.webp');
+    }
+
+    const key = `${folder}/${finalFilename}`;
     const command = new PutObjectCommand({
       Bucket: R2_BUCKET_NAME,
       Key: key,
-      Body: buffer,
-      ContentType: mimeType,
+      Body: finalBuffer,
+      ContentType: finalMimeType,
+      CacheControl: 'public, max-age=31536000, immutable',
     });
 
     await r2Client.send(command);
-    
+
     const publicUrl = `${R2_PUBLIC_URL}/${key}`;
     logger.info(`Buffer uploaded successfully: ${publicUrl}`);
-    
+
     return { url: publicUrl, key };
   } catch (error) {
     logger.error('Buffer upload error:', error);
