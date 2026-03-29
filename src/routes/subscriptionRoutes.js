@@ -8,6 +8,7 @@ const subscriptionController = require('../controllers/subscriptionController');
 router.get('/plans', subscriptionController.getPlans);
 
 // Authenticated user endpoints
+router.get('/my', authenticate, subscriptionController.getMySubscription);
 router.post('/checkout/preview', authenticate, subscriptionController.previewSubscriptionCheckout);
 router.post('/checkout/start', authenticate, subscriptionController.startSubscriptionCheckout);
 router.post('/checkout/confirm', authenticate, subscriptionController.confirmSubscriptionPayment);

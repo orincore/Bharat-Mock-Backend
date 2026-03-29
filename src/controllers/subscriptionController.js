@@ -596,7 +596,31 @@ const cancelSubscription = async (req, res) => {
   }
 };
 
+const getMySubscription = async (req, res) => {
+  try {
+    const subscription = await getLatestSubscriptionForUser(req.user.id);
+    // Also check for cancelled-but-still-active subscriptions
+    let result = subscription;
+    if (!result) {
+      const { data } = await require('../config/database').supabase
+        .from('user_subscriptions')
+        .select('*, plan:subscription_plans(id, name)')
+        .eq('user_id', req.user.id)
+        .in('status', ['active', 'canceled'])
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      result = data;
+    }
+    res.json({ success: true, data: result || null });
+  } catch (error) {
+    logger.error('Failed to fetch user subscription:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch subscription' });
+  }
+};
+
 module.exports = {
+  getMySubscription,
   getPlans,
   adminListPlans,
   adminCreatePlan,

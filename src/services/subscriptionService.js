@@ -384,12 +384,48 @@ const getSubscriptionsToExpire = async () => {
       user:users!inner ( id, email, name ),
       plan:subscription_plans!inner ( id, name )
     `)
-    .eq('status', 'active')
+    .in('status', ['active', 'canceled'])
     .not('expires_at', 'is', null)
     .lte('expires_at', nowIso);
 
   if (error) {
     logger.error('Failed to fetch subscriptions to expire:', error);
+    return [];
+  }
+  return data || [];
+};
+
+const getMidnightExpiredSubscriptions = async () => {
+  // Find all active/canceled subscriptions whose expires_at is before start of today (IST midnight)
+  // This catches any that the hourly job may have missed
+  const now = new Date();
+  // Start of today in IST (UTC+5:30)
+  const istOffsetMs = 5.5 * 60 * 60 * 1000;
+  const nowIST = new Date(now.getTime() + istOffsetMs);
+  const startOfTodayIST = new Date(Date.UTC(
+    nowIST.getUTCFullYear(),
+    nowIST.getUTCMonth(),
+    nowIST.getUTCDate(),
+    0, 0, 0, 0
+  ) - istOffsetMs); // convert back to UTC
+
+  const { data, error } = await supabase
+    .from('user_subscriptions')
+    .select(`
+      id,
+      user_id,
+      plan_id,
+      expires_at,
+      status,
+      user:users!inner ( id, email, name, is_premium ),
+      plan:subscription_plans!inner ( id, name )
+    `)
+    .in('status', ['active', 'canceled'])
+    .not('expires_at', 'is', null)
+    .lt('expires_at', startOfTodayIST.toISOString());
+
+  if (error) {
+    logger.error('[MidnightJob] Failed to fetch expired subscriptions:', error);
     return [];
   }
   return data || [];
@@ -545,6 +581,20 @@ const updateUserAutoRenewFlag = async (userId, autoRenew) => {
 
 const cancelSubscription = async (subscriptionId, userId) => {
   const timestamp = new Date().toISOString();
+
+  // Fetch current subscription to get expires_at
+  const { data: existing, error: fetchError } = await supabase
+    .from('user_subscriptions')
+    .select('expires_at')
+    .eq('id', subscriptionId)
+    .single();
+
+  if (fetchError) {
+    logger.error('Failed to fetch subscription for cancellation:', fetchError, { subscriptionId });
+    throw new Error('Unable to cancel subscription');
+  }
+
+  // Mark as cancelled but keep premium active until expiry date
   const { data, error } = await supabase
     .from('user_subscriptions')
     .update({
@@ -561,7 +611,15 @@ const cancelSubscription = async (subscriptionId, userId) => {
     throw new Error('Unable to cancel subscription');
   }
 
-  await revokePremiumIfNeeded(userId);
+  // Only disable auto-renew on the user record — keep is_premium true until expires_at
+  await supabase
+    .from('users')
+    .update({ subscription_auto_renew: false })
+    .eq('id', userId);
+
+  // Premium access remains active until the expiry date.
+  // The scheduled job (subscriptionJobs) will call revokePremiumIfNeeded when expires_at passes.
+
   return data;
 };
 
@@ -592,6 +650,7 @@ module.exports = {
   markRenewalReminderSent,
   markExpiryReminderSent,
   getSubscriptionsToExpire,
+  getMidnightExpiredSubscriptions,
   markSubscriptionExpired,
   cancelSubscription
 };
