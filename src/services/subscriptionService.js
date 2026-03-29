@@ -623,7 +623,25 @@ const cancelSubscription = async (subscriptionId, userId) => {
   return data;
 };
 
+const getUserLatestSubscriptionWithPlan = async (userId) => {
+  const { data, error } = await supabase
+    .from('user_subscriptions')
+    .select('id, status, expires_at, auto_renew, plan:subscription_plans(id, name)')
+    .eq('user_id', userId)
+    .in('status', ['active', 'canceled', 'pending'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    logger.error('Failed to fetch user subscription with plan:', error, { userId });
+    return null;
+  }
+  return data || null;
+};
+
 module.exports = {
+  getUserLatestSubscriptionWithPlan,
   listPlans,
   getPlanById,
   createPlan,

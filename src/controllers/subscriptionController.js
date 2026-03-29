@@ -567,8 +567,22 @@ const toggleAutoRenew = async (req, res) => {
 
 const cancelSubscription = async (req, res) => {
   try {
-    const subscription = await getLatestSubscriptionForUser(req.user.id);
-    if (!subscription || subscription.status !== 'active') {
+    const { getUserLatestSubscriptionWithPlan } = require('../services/subscriptionService');
+    const subscription = await getUserLatestSubscriptionWithPlan(req.user.id);
+
+    if (!subscription) {
+      return res.status(404).json({ success: false, message: 'No subscription found' });
+    }
+
+    if (subscription.status === 'canceled') {
+      return res.json({
+        success: true,
+        message: 'Subscription is already cancelled. Premium access remains active until expiry.',
+        data: subscription
+      });
+    }
+
+    if (subscription.status !== 'active') {
       return res.status(404).json({ success: false, message: 'No active subscription found' });
     }
 
@@ -598,20 +612,9 @@ const cancelSubscription = async (req, res) => {
 
 const getMySubscription = async (req, res) => {
   try {
-    const subscription = await getLatestSubscriptionForUser(req.user.id);
-    // Also check for cancelled-but-still-active subscriptions
-    let result = subscription;
-    if (!result) {
-      const { data } = await require('../config/database').supabase
-        .from('user_subscriptions')
-        .select('*, plan:subscription_plans(id, name)')
-        .eq('user_id', req.user.id)
-        .in('status', ['active', 'canceled'])
-        .order('created_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      result = data;
-    }
+    // Fetch latest subscription including cancelled ones
+    const { getUserLatestSubscriptionWithPlan } = require('../services/subscriptionService');
+    const result = await getUserLatestSubscriptionWithPlan(req.user.id);
     res.json({ success: true, data: result || null });
   } catch (error) {
     logger.error('Failed to fetch user subscription:', error);
