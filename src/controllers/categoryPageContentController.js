@@ -19,6 +19,9 @@ const categoryPageContentController = {
     try {
       const { categoryId } = req.params;
 
+      // Check if user is admin or editor - they should see ALL content including inactive
+      const isAdminOrEditor = req.user?.role && ['admin', 'editor'].includes(req.user.role.toLowerCase());
+
       const { data: customTabs, error: tabsError } = await supabase
         .from('category_custom_tabs')
         .select('*')
@@ -31,22 +34,35 @@ const categoryPageContentController = {
         return buildErrorResponse(res, 'Failed to fetch custom tabs', tabsError);
       }
 
-      const { data: sections, error: sectionsError } = await supabase
+      // For admin/editor: fetch ALL sections (including inactive)
+      // For public: fetch only active sections
+      let sectionsQuery = supabase
         .from('page_sections')
         .select('*')
-        .eq('category_id', categoryId)
-        .eq('is_active', true)
-        .order('display_order', { ascending: true });
+        .eq('category_id', categoryId);
+      
+      if (!isAdminOrEditor) {
+        sectionsQuery = sectionsQuery.eq('is_active', true);
+      }
+      
+      const { data: sections, error: sectionsError } = await sectionsQuery.order('display_order', { ascending: true });
 
       if (sectionsError) {
         return buildErrorResponse(res, 'Failed to fetch sections', sectionsError);
       }
 
-      const { data: blocks, error: blocksError } = await supabase
+      // For admin/editor: fetch ALL blocks (including inactive)
+      // For public: fetch only active blocks
+      let blocksQuery = supabase
         .from('page_content_blocks')
         .select('*')
-        .eq('category_id', categoryId)
-        .eq('is_active', true)
+        .eq('category_id', categoryId);
+      
+      if (!isAdminOrEditor) {
+        blocksQuery = blocksQuery.eq('is_active', true);
+      }
+      
+      const { data: blocks, error: blocksError } = await blocksQuery
         .order('section_id', { ascending: true })
         .order('display_order', { ascending: true });
 
@@ -71,11 +87,18 @@ const categoryPageContentController = {
 
       const orphanBlocks = (blocks || []).filter(block => !block.section_id);
 
+      const tocOrder = (seo?.structured_data?.toc_order) || {};
+      const tabHeadings = (seo?.structured_data?.tab_headings) || {};
+      const tabSeo = (seo?.structured_data?.tab_seo) || {};
+
       res.json({
         sections: groupedBlocks,
         orphanBlocks,
         seo: seo || null,
-        customTabs: customTabs || []
+        customTabs: customTabs || [],
+        tocOrder,
+        tabHeadings,
+        tabSeo
       });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch page content', error);
@@ -217,6 +240,7 @@ const categoryPageContentController = {
         sectionIdAliasMap.set(sectionAlias, sectionId || section.id);
 
         const blocks = Array.isArray(section.blocks) ? section.blocks : [];
+        const blocksToProcess = [];
 
         for (const block of blocks) {
           const resolvedSectionId = sectionIdAliasMap.get(sectionAlias);
@@ -227,63 +251,71 @@ const categoryPageContentController = {
             const comparableExisting = normalizeBlockPayload(existingBlock, existingBlock.section_id);
 
             if (hasChanged(blockPayload, comparableExisting)) {
-              const { error } = await supabase
-                .from('page_content_blocks')
-                .update({
-                  ...blockPayload,
-                  updated_by: req.user?.id || null
-                })
-                .eq('id', block.id);
-
-              if (error) {
-                return buildErrorResponse(res, 'Failed to update block during bulk sync', error);
-              }
-              operations.blocksUpdated += 1;
+              blocksToProcess.push({ 
+                type: 'update', 
+                id: block.id, 
+                payload: { ...blockPayload, updated_by: req.user?.id || null } 
+              });
             } else {
               operations.blocksSkipped += 1;
             }
           } else {
-            const insertPayload = {
-              ...blockPayload,
-              created_by: req.user?.id || null,
-              updated_by: req.user?.id || null
-            };
+            blocksToProcess.push({ 
+              type: 'insert', 
+              payload: { 
+                ...blockPayload, 
+                created_by: req.user?.id || null, 
+                updated_by: req.user?.id || null 
+              } 
+            });
+          }
+        }
 
-            const { error } = await supabase
-              .from('page_content_blocks')
-              .insert([insertPayload]);
+        // Batch process blocks for this section
+        const updateBlocks = blocksToProcess.filter(b => b.type === 'update');
+        const insertBlocks = blocksToProcess.filter(b => b.type === 'insert');
 
-            if (error) {
-              return buildErrorResponse(res, 'Failed to create block during bulk sync', error);
-            }
-            operations.blocksCreated += 1;
+        const blockOps = [];
+        
+        if (updateBlocks.length > 0) {
+          const upsertPayloads = updateBlocks.map(b => ({ id: b.id, ...b.payload }));
+          blockOps.push(
+            supabase.from('page_content_blocks').upsert(upsertPayloads, { onConflict: 'id' })
+          );
+          operations.blocksUpdated += updateBlocks.length;
+        }
+
+        if (insertBlocks.length > 0) {
+          blockOps.push(
+            supabase.from('page_content_blocks').insert(insertBlocks.map(b => b.payload))
+          );
+          operations.blocksCreated += insertBlocks.length;
+        }
+
+        if (blockOps.length > 0) {
+          const results = await Promise.all(blockOps);
+          const error = results.find(r => r.error);
+          if (error?.error) {
+            return buildErrorResponse(res, 'Failed to sync blocks', error.error);
           }
         }
       }
 
-      // Soft-delete sections that were removed (not present in the incoming payload)
+      // Batch soft-delete removed sections
       const incomingSectionIds = new Set(
         sections.filter((s) => s.id && existingSectionMap.has(s.id)).map((s) => s.id)
       );
-      for (const [existingId] of existingSectionMap) {
-        if (!incomingSectionIds.has(existingId)) {
-          await supabase
-            .from('page_sections')
-            .update({ is_active: false, updated_by: req.user?.id || null })
-            .eq('id', existingId);
-
-          // Also soft-delete blocks belonging to the removed section
-          await supabase
-            .from('page_content_blocks')
-            .update({ is_active: false, updated_by: req.user?.id || null })
-            .eq('section_id', existingId)
-            .eq('category_id', categoryId);
-
-          operations.sectionsDeleted = (operations.sectionsDeleted || 0) + 1;
-        }
+      const sectionsToDeactivate = Array.from(existingSectionMap.keys()).filter(id => !incomingSectionIds.has(id));
+      
+      if (sectionsToDeactivate.length > 0) {
+        await Promise.all([
+          supabase.from('page_sections').update({ is_active: false, updated_by: req.user?.id || null }).in('id', sectionsToDeactivate),
+          supabase.from('page_content_blocks').update({ is_active: false, updated_by: req.user?.id || null }).in('section_id', sectionsToDeactivate).eq('category_id', categoryId)
+        ]);
+        operations.sectionsDeleted = sectionsToDeactivate.length;
       }
 
-      // Soft-delete blocks that were removed from surviving sections
+      // Batch soft-delete removed blocks
       const incomingBlockIds = new Set();
       for (const section of sections) {
         const blocks = Array.isArray(section.blocks) ? section.blocks : [];
@@ -293,43 +325,35 @@ const categoryPageContentController = {
           }
         }
       }
+      
+      const blocksToDeactivate = [];
       for (const [existingBlockId, existingBlock] of existingBlockMap) {
-        // Only delete blocks whose parent section is still active (surviving sections)
         if (!incomingBlockIds.has(existingBlockId) && incomingSectionIds.has(existingBlock.section_id)) {
-          await supabase
-            .from('page_content_blocks')
-            .update({ is_active: false, updated_by: req.user?.id || null })
-            .eq('id', existingBlockId);
-
-          operations.blocksDeleted = (operations.blocksDeleted || 0) + 1;
+          blocksToDeactivate.push(existingBlockId);
         }
       }
 
-      const { data: refreshedSections, error: refreshedSectionsError } = await supabase
-        .from('page_sections')
-        .select('*')
-        .eq('category_id', categoryId)
-        .eq('is_active', true)
-        .order('display_order', { ascending: true });
-
-      if (refreshedSectionsError) {
-        return buildErrorResponse(res, 'Failed to fetch refreshed sections', refreshedSectionsError);
+      if (blocksToDeactivate.length > 0) {
+        await supabase.from('page_content_blocks').update({ is_active: false, updated_by: req.user?.id || null }).in('id', blocksToDeactivate);
+        operations.blocksDeleted = blocksToDeactivate.length;
       }
 
-      const { data: refreshedBlocks, error: refreshedBlocksError } = await supabase
-        .from('page_content_blocks')
-        .select('*')
-        .eq('category_id', categoryId)
-        .eq('is_active', true)
-        .order('display_order', { ascending: true });
+      // Fetch refreshed data in parallel
+      const [refreshedSectionsResult, refreshedBlocksResult] = await Promise.all([
+        supabase.from('page_sections').select('*').eq('category_id', categoryId).eq('is_active', true).order('display_order', { ascending: true }),
+        supabase.from('page_content_blocks').select('*').eq('category_id', categoryId).eq('is_active', true).order('display_order', { ascending: true })
+      ]);
 
-      if (refreshedBlocksError) {
-        return buildErrorResponse(res, 'Failed to fetch refreshed blocks', refreshedBlocksError);
+      if (refreshedSectionsResult.error) {
+        return buildErrorResponse(res, 'Failed to fetch refreshed sections', refreshedSectionsResult.error);
+      }
+      if (refreshedBlocksResult.error) {
+        return buildErrorResponse(res, 'Failed to fetch refreshed blocks', refreshedBlocksResult.error);
       }
 
-      const grouped = (refreshedSections || []).map((section) => ({
+      const grouped = (refreshedSectionsResult.data || []).map((section) => ({
         ...section,
-        blocks: (refreshedBlocks || []).filter((block) => block.section_id === section.id)
+        blocks: (refreshedBlocksResult.data || []).filter((block) => block.section_id === section.id)
       }));
 
       res.json({
@@ -604,7 +628,7 @@ const categoryPageContentController = {
       const {
         meta_title, meta_description, meta_keywords,
         og_title, og_description, og_image_url,
-        canonical_url, robots_meta, structured_data
+        canonical_url, robots_meta, structured_data, author_name
       } = req.body;
 
       const seoPayload = {
@@ -617,7 +641,8 @@ const categoryPageContentController = {
         og_image_url: og_image_url || null,
         canonical_url: canonical_url || null,
         robots_meta: robots_meta || null,
-        structured_data: structured_data || {}
+        structured_data: structured_data || {},
+        author_name: author_name || null
       };
 
       // Check if SEO record exists for this category

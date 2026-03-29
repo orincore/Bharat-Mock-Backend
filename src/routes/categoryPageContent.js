@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const categoryPageContentController = require('../controllers/categoryPageContentController');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, optionalAuth } = require('../middleware/auth');
 const { requireAdminOrEditor } = require('../middleware/adminAuth');
 const { upload } = require('../utils/fileUpload');
 
-router.get('/:categoryId', categoryPageContentController.getPageContent);
+router.get('/:categoryId', optionalAuth, categoryPageContentController.getPageContent);
 
 router.post('/:categoryId/bulk-sync', authenticate, requireAdminOrEditor, categoryPageContentController.bulkSyncPageContent);
 

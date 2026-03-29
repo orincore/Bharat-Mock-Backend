@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const pageContentController = require('../controllers/pageContentController');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, optionalAuth } = require('../middleware/auth');
 const { requireAdmin, requireAdminOrEditor } = require('../middleware/adminAuth');
 const { upload } = require('../utils/fileUpload');
 
-router.get('/:subcategoryId', pageContentController.getPageContent);
+router.get('/:subcategoryId', optionalAuth, pageContentController.getPageContent);
 
 router.post('/:subcategoryId/sections', authenticate, requireAdminOrEditor, pageContentController.createSection);
 router.put('/sections/:sectionId', authenticate, requireAdminOrEditor, pageContentController.updateSection);

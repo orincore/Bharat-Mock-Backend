@@ -98,6 +98,9 @@ const getAdminExams = async (req, res) => {
         show_in_mock_tests,
         is_premium,
         exam_uid,
+        supports_hindi,
+        pdf_url_en,
+        pdf_url_hi,
         created_at,
         updated_at
       `, { count: 'exact' })
