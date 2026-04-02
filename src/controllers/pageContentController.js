@@ -62,7 +62,9 @@ const pageContentController = {
         sectionsQuery = sectionsQuery.eq('is_active', true);
       }
       
-      const { data: sections, error: sectionsError } = await sectionsQuery.order('display_order', { ascending: true });
+      const { data: sections, error: sectionsError } = await sectionsQuery
+        .order('display_order', { ascending: true })
+        .limit(10000);
 
       if (sectionsError) {
         return buildErrorResponse(res, 'Failed to fetch sections', sectionsError);
@@ -90,7 +92,8 @@ const pageContentController = {
       
       const { data: blocks, error: blocksError } = await blocksQuery
         .order('section_id', { ascending: true })
-        .order('display_order', { ascending: true });
+        .order('display_order', { ascending: true })
+        .limit(50000);
 
       if (blocksError) {
         return buildErrorResponse(res, 'Failed to fetch blocks', blocksError);
@@ -170,16 +173,18 @@ const pageContentController = {
         ]);
       }
 
-      // Fetch existing data in parallel
+      // Fetch existing data in parallel — use high limit to avoid Supabase's default 1000-row cap
       const [existingSectionsResult, existingBlocksResult] = await Promise.all([
         supabase
           .from('page_sections')
           .select('id')
-          .eq('subcategory_id', subcategoryId),
+          .eq('subcategory_id', subcategoryId)
+          .limit(10000),
         supabase
           .from('page_content_blocks')
           .select('id, section_id')
           .eq('subcategory_id', subcategoryId)
+          .limit(50000)
       ]);
 
       if (existingSectionsResult.error) {
@@ -373,18 +378,20 @@ const pageContentController = {
         ]);
       }
 
-      // Fetch refreshed data in parallel
+      // Fetch refreshed data in parallel — use high limit to avoid Supabase's default 1000-row cap
       const [refreshedSectionsResult, refreshedBlocksResult] = await Promise.all([
         supabase
           .from('page_sections')
           .select('*')
           .eq('subcategory_id', subcategoryId)
-          .order('display_order', { ascending: true }),
+          .order('display_order', { ascending: true })
+          .limit(10000),
         supabase
           .from('page_content_blocks')
           .select('*')
           .eq('subcategory_id', subcategoryId)
           .order('display_order', { ascending: true })
+          .limit(50000)
       ]);
 
       if (refreshedSectionsResult.error) {
