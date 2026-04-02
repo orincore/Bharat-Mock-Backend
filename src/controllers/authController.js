@@ -18,8 +18,8 @@ const normalizePlanRecord = (planData) => {
   };
 };
 
-const generateToken = (userId) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET, {
+const generateToken = (userId, role) => {
+  return jwt.sign({ userId, role: role || 'user' }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || '7d'
   });
 };
@@ -78,7 +78,7 @@ const register = async (req, res) => {
       exam_reminders: true
     });
 
-    const token = generateToken(user.id);
+    const token = generateToken(user.id, user.role);
     const refreshToken = generateRefreshToken(user.id);
 
     res.status(201).json({
@@ -221,7 +221,7 @@ const login = async (req, res) => {
       });
     }
 
-    const token = generateToken(user.id);
+    const token = generateToken(user.id, user.role);
     const refreshToken = generateRefreshToken(user.id);
 
     // eslint-disable-next-line no-unused-vars
@@ -560,7 +560,7 @@ const googleCallback = async (req, res) => {
   try {
     const user = req.user;
     
-    const token = generateToken(user.id);
+    const token = generateToken(user.id, user.role);
     const refreshToken = generateRefreshToken(user.id);
 
     const redirectUrl = user.is_onboarded 
@@ -685,7 +685,7 @@ const refreshAuthToken = async (req, res) => {
     const userId = decoded.userId;
     const { data: user } = await supabase
       .from('users')
-      .select('id, is_blocked, block_reason')
+      .select('id, role, is_blocked, block_reason')
       .eq('id', userId)
       .maybeSingle();
 
@@ -703,7 +703,7 @@ const refreshAuthToken = async (req, res) => {
       });
     }
 
-    const newAccessToken = generateToken(userId);
+    const newAccessToken = generateToken(userId, user.role);
     const newRefreshToken = generateRefreshToken(userId);
 
     res.json({
