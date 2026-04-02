@@ -40,4 +40,41 @@ router.post('/:subcategoryId/revisions', authenticate, requireAdminOrEditor, pag
 router.get('/:subcategoryId/revisions', authenticate, requireAdminOrEditor, pageContentController.getRevisions);
 router.post('/:subcategoryId/revisions/:revisionId/restore', authenticate, requireAdminOrEditor, pageContentController.restoreRevision);
 
+// Repair endpoint: fixes blocks where subcategory_id was nulled by upsert bug
+router.post('/:subcategoryId/repair-blocks', authenticate, requireAdminOrEditor, async (req, res) => {
+  const supabase = require('../config/database');
+  const { subcategoryId } = req.params;
+  try {
+    // Get all sections for this subcategory
+    const { data: sections } = await supabase
+      .from('page_sections')
+      .select('id')
+      .eq('subcategory_id', subcategoryId);
+
+    if (!sections?.length) return res.json({ success: true, fixed: 0 });
+
+    const sectionIds = sections.map(s => s.id);
+
+    // Find blocks belonging to these sections but with wrong/null subcategory_id
+    const { data: brokenBlocks } = await supabase
+      .from('page_content_blocks')
+      .select('id')
+      .in('section_id', sectionIds)
+      .neq('subcategory_id', subcategoryId);
+
+    if (!brokenBlocks?.length) return res.json({ success: true, fixed: 0 });
+
+    const { error } = await supabase
+      .from('page_content_blocks')
+      .update({ subcategory_id: subcategoryId })
+      .in('id', brokenBlocks.map(b => b.id));
+
+    if (error) return res.status(500).json({ success: false, message: error.message });
+
+    res.json({ success: true, fixed: brokenBlocks.length });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;

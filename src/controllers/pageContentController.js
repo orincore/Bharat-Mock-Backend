@@ -70,10 +70,19 @@ const pageContentController = {
 
       // For admin/editor: fetch ALL blocks (including inactive)
       // For public: fetch only active blocks
+      // Also fetch blocks that may have lost subcategory_id (via section_id join as fallback)
+      const sectionIds = (sections || []).map(s => s.id).filter(Boolean);
+
       let blocksQuery = supabase
         .from('page_content_blocks')
-        .select('*')
-        .eq('subcategory_id', subcategoryId);
+        .select('*');
+
+      if (sectionIds.length > 0) {
+        // Fetch by subcategory_id OR by section_id (covers blocks where subcategory_id was nulled by upsert bug)
+        blocksQuery = blocksQuery.or(`subcategory_id.eq.${subcategoryId},section_id.in.(${sectionIds.join(',')})`);
+      } else {
+        blocksQuery = blocksQuery.eq('subcategory_id', subcategoryId);
+      }
       
       if (!isAdminOrEditor) {
         blocksQuery = blocksQuery.eq('is_active', true);
@@ -287,6 +296,7 @@ const pageContentController = {
 
           const blockPayload = {
             section_id: actualSectionId,
+            subcategory_id: subcategoryId,
             block_type: rawBlock.block_type,
             content: rawBlock.content || {},
             settings: rawBlock.settings || {},
