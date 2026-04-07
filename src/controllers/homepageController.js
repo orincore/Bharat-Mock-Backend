@@ -217,13 +217,21 @@ const getHomepageData = async (req, res) => {
         .or('is_active.eq.true,is_active.is.null')
         .order('display_order', { ascending: true }),
       supabase
-        .from('exams')
-        .select('id, title, duration, total_marks, total_questions, category, category_id, subcategory, subcategory_id, difficulty, status, start_date, end_date, pass_percentage, is_free, image_url, logo_url, thumbnail_url, negative_marking, negative_mark_value, allow_anytime, slug, url_path, exam_type, show_in_mock_tests, supports_hindi, is_premium, exam_categories(logo_url, icon)')
-        .eq('is_published', true)
-        .is('deleted_at', null)
-        .or('is_current_affair.eq.false,is_current_affair.is.null')
-        .or('status.eq.ongoing,status.eq.anytime,allow_anytime.eq.true')
-        .limit(4),
+        .from('page_popular_tests')
+        .select(`
+          id, display_order,
+          exams (
+            id, title, duration, total_marks, total_questions, category, category_id,
+            subcategory, subcategory_id, difficulty, status, start_date, end_date,
+            pass_percentage, is_free, image_url, logo_url, thumbnail_url,
+            negative_marking, negative_mark_value, allow_anytime, slug, url_path,
+            exam_type, show_in_mock_tests, supports_hindi, is_premium,
+            exam_categories(logo_url, icon)
+          )
+        `)
+        .eq('page_identifier', 'homepage')
+        .eq('is_active', true)
+        .order('display_order', { ascending: true }),
       supabase
         .from('blogs')
         .select('id, title, slug, excerpt, featured_image_url, category, tags, author_id, is_published, is_featured, published_at, created_at, view_count, read_time')
@@ -232,6 +240,23 @@ const getHomepageData = async (req, res) => {
         .limit(10),
       fetchBanners(true),
     ]);
+
+    // Use curated exams from page_popular_tests if available, otherwise fall back to dynamic fetch
+    let featuredExams = [];
+    const curatedTests = examsResult.data?.filter(item => item.exams) || [];
+    if (curatedTests.length > 0) {
+      featuredExams = curatedTests.map(item => item.exams);
+    } else {
+      const { data: dynamicExams } = await supabase
+        .from('exams')
+        .select('id, title, duration, total_marks, total_questions, category, category_id, subcategory, subcategory_id, difficulty, status, start_date, end_date, pass_percentage, is_free, image_url, logo_url, thumbnail_url, negative_marking, negative_mark_value, allow_anytime, slug, url_path, exam_type, show_in_mock_tests, supports_hindi, is_premium, exam_categories(logo_url, icon)')
+        .eq('is_published', true)
+        .is('deleted_at', null)
+        .or('is_current_affair.eq.false,is_current_affair.is.null')
+        .or('status.eq.ongoing,status.eq.anytime,allow_anytime.eq.true')
+        .limit(4);
+      featuredExams = dynamicExams || [];
+    }
 
     let featuredArticles = blogsResult.data || [];
 
@@ -281,7 +306,7 @@ const getHomepageData = async (req, res) => {
           ...cat,
           subcategories: subcategoriesByCategory[cat.id] || []
         })),
-        featuredExams: examsResult.data || [],
+        featuredExams,
         featuredArticles
       }
     });

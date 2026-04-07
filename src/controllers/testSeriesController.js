@@ -4,6 +4,14 @@ const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 const { uploadFile, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
 const { redisCache, CACHE_TTL, buildCacheKey } = require('../utils/redisCache');
 
+const invalidateTestSeriesCaches = async (testSeriesId) => {
+  await redisCache.deleteByPattern(buildCacheKey('test_series_list', '*'));
+
+  if (testSeriesId) {
+    await redisCache.del(buildCacheKey('test_series_stats', testSeriesId));
+  }
+};
+
 const fetchCategoryDetails = async ({ id, slug }) => {
   if (!id && !slug) return null;
   const normalizedSlug = slug ? slugify(slug) : null;
@@ -146,6 +154,57 @@ const batchLoadTestSeriesStats = async (testSeriesIds) => {
   return statsMap;
 };
 
+const resolveFilteredTestSeriesIds = async ({ metadata, category, subcategory, difficulty, is_published }) => {
+  const hasTaxonomyFilters = Boolean(category || subcategory || difficulty);
+  if (!hasTaxonomyFilters) return null;
+
+  const categoryData = category ? metadata.categoriesMap[category] : null;
+  const subcategoryData = subcategory ? metadata.subcategoriesMap[subcategory] : null;
+  const difficultyData = difficulty ? metadata.difficultiesMap[difficulty] : null;
+
+  if ((category && !categoryData) || (subcategory && !subcategoryData) || (difficulty && !difficultyData)) {
+    return [];
+  }
+
+  let directQuery = supabase
+    .from('test_series')
+    .select('id')
+    .is('deleted_at', null);
+
+  if (categoryData) directQuery = directQuery.eq('category_id', categoryData.id);
+  if (subcategoryData) directQuery = directQuery.eq('subcategory_id', subcategoryData.id);
+  if (difficultyData) directQuery = directQuery.eq('difficulty_id', difficultyData.id);
+  if (is_published !== undefined && is_published !== '') {
+    directQuery = directQuery.eq('is_published', is_published === 'true');
+  }
+
+  let examQuery = supabase
+    .from('exams')
+    .select('test_series_id')
+    .not('test_series_id', 'is', null)
+    .is('deleted_at', null);
+
+  if (categoryData) examQuery = examQuery.eq('category_id', categoryData.id);
+  if (subcategoryData) examQuery = examQuery.eq('subcategory_id', subcategoryData.id);
+  if (difficultyData) examQuery = examQuery.eq('difficulty_id', difficultyData.id);
+  if (is_published !== undefined && is_published !== '') {
+    examQuery = examQuery.eq('is_published', is_published === 'true');
+  }
+
+  const [{ data: directMatches, error: directError }, { data: examMatches, error: examError }] = await Promise.all([
+    directQuery,
+    examQuery,
+  ]);
+
+  if (directError) throw directError;
+  if (examError) throw examError;
+
+  return Array.from(new Set([
+    ...(directMatches || []).map(series => series.id),
+    ...(examMatches || []).map(exam => exam.test_series_id).filter(Boolean),
+  ]));
+};
+
 const getAllTestSeries = async (req, res) => {
   try {
     const { page = 1, limit = 10, search, category, subcategory, difficulty, is_published } = req.query;
@@ -160,9 +219,32 @@ const getAllTestSeries = async (req, res) => {
     );
 
     const cachedResponse = await redisCache.get(cacheKey);
-    if (cachedResponse) return res.json(cachedResponse);
+    if (cachedResponse && Array.isArray(cachedResponse.data) && cachedResponse.data.length > 0) {
+      return res.json(cachedResponse);
+    }
 
     const metadata = await batchLoadTestSeriesMetadata();
+
+    const filteredSeriesIds = await resolveFilteredTestSeriesIds({
+      metadata,
+      category,
+      subcategory,
+      difficulty,
+      is_published,
+    });
+
+    if (Array.isArray(filteredSeriesIds) && filteredSeriesIds.length === 0) {
+      const emptyResponse = {
+        data: [],
+        total: 0,
+        page: pageNumber,
+        limit: limitNumber,
+        totalPages: 0,
+      };
+
+      await redisCache.set(cacheKey, emptyResponse, CACHE_TTL.TEST_SERIES);
+      return res.json(emptyResponse);
+    }
 
     let query = supabase
       .from('test_series')
@@ -175,24 +257,13 @@ const getAllTestSeries = async (req, res) => {
       .order('created_at', { ascending: false })
       .range(offset, offset + limitNumber - 1);
 
+    if (Array.isArray(filteredSeriesIds)) {
+      query = query.in('id', filteredSeriesIds);
+    }
+
     if (search) {
       const searchTerm = search.trim();
       query = query.or(`title.ilike.%${searchTerm}%,description.ilike.%${searchTerm}%`);
-    }
-
-    if (category) {
-      const categoryData = metadata.categoriesMap[category];
-      if (categoryData) query = query.eq('category_id', categoryData.id);
-    }
-
-    if (subcategory) {
-      const subcategoryData = metadata.subcategoriesMap[subcategory];
-      if (subcategoryData) query = query.eq('subcategory_id', subcategoryData.id);
-    }
-
-    if (difficulty) {
-      const difficultyData = metadata.difficultiesMap[difficulty];
-      if (difficultyData) query = query.eq('difficulty_id', difficultyData.id);
     }
 
     if (is_published !== undefined && is_published !== '') {
@@ -425,6 +496,7 @@ const createTestSeries = async (req, res) => {
       return res.status(500).json({ error: 'Failed to create test series' });
     }
 
+    await invalidateTestSeriesCaches(testSeries.id);
     res.status(201).json(testSeries);
   } catch (error) {
     logger.error('Error in createTestSeries:', error);
@@ -470,6 +542,7 @@ const updateTestSeries = async (req, res) => {
       return res.status(500).json({ error: 'Failed to update test series' });
     }
 
+    await invalidateTestSeriesCaches(id);
     res.json(testSeries);
   } catch (error) {
     logger.error('Error in updateTestSeries:', error);
@@ -491,6 +564,7 @@ const deleteTestSeries = async (req, res) => {
       return res.status(500).json({ error: 'Failed to delete test series' });
     }
 
+    await invalidateTestSeriesCaches(id);
     res.json({ message: 'Test series deleted successfully' });
   } catch (error) {
     logger.error('Error in deleteTestSeries:', error);
@@ -689,6 +763,7 @@ const reorderSections = async (req, res) => {
       logger.error('Reorder sections error:', failed.error);
       return res.status(500).json({ success: false, message: 'Failed to reorder sections' });
     }
+    await invalidateTestSeriesCaches();
     res.json({ success: true, message: 'Sections reordered successfully' });
   } catch (error) {
     logger.error('Reorder sections error:', error);
@@ -712,6 +787,7 @@ const reorderTopics = async (req, res) => {
       logger.error('Reorder topics error:', failed.error);
       return res.status(500).json({ success: false, message: 'Failed to reorder topics' });
     }
+    await invalidateTestSeriesCaches();
     res.json({ success: true, message: 'Topics reordered successfully' });
   } catch (error) {
     logger.error('Reorder topics error:', error);
@@ -735,6 +811,7 @@ const reorderExams = async (req, res) => {
       logger.error('Reorder exams error:', failed.error);
       return res.status(500).json({ success: false, message: 'Failed to reorder exams' });
     }
+    await invalidateTestSeriesCaches();
     res.json({ success: true, message: 'Exams reordered successfully' });
   } catch (error) {
     logger.error('Reorder exams error:', error);
@@ -771,6 +848,7 @@ const uploadTestSeriesLogo = async (req, res) => {
       logger.error('Error updating test series logo:', updateError);
       return res.status(500).json({ error: 'Failed to update test series logo' });
     }
+    await invalidateTestSeriesCaches(id);
     res.json({ success: true, logo_url: uploadResult.url, test_series: updatedSeries });
   } catch (error) {
     logger.error('Error uploading test series logo:', error);
@@ -807,6 +885,7 @@ const uploadTestSeriesThumbnail = async (req, res) => {
       logger.error('Error updating test series thumbnail:', updateError);
       return res.status(500).json({ error: 'Failed to update test series thumbnail' });
     }
+    await invalidateTestSeriesCaches(id);
     res.json({ success: true, thumbnail_url: uploadResult.url, test_series: updatedSeries });
   } catch (error) {
     logger.error('Error uploading test series thumbnail:', error);
@@ -837,6 +916,7 @@ const deleteTestSeriesLogo = async (req, res) => {
       logger.error('Error removing test series logo:', updateError);
       return res.status(500).json({ error: 'Failed to remove test series logo' });
     }
+    await invalidateTestSeriesCaches(id);
     res.json({ success: true, message: 'Logo deleted successfully', test_series: updatedSeries });
   } catch (error) {
     logger.error('Error deleting test series logo:', error);
@@ -867,6 +947,7 @@ const deleteTestSeriesThumbnail = async (req, res) => {
       logger.error('Error removing test series thumbnail:', updateError);
       return res.status(500).json({ error: 'Failed to remove test series thumbnail' });
     }
+    await invalidateTestSeriesCaches(id);
     res.json({ success: true, message: 'Thumbnail deleted successfully', test_series: updatedSeries });
   } catch (error) {
     logger.error('Error deleting test series thumbnail:', error);

@@ -2,27 +2,30 @@ const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { redisCache, CACHE_TTL, buildCacheKey } = require('../utils/redisCache');
 
-const EXAM_CACHE_VERSION = 'v3';
+const EXAM_CACHE_VERSION = 'v5';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const batchLoadCategoriesAndSubcategories = async () => {
-  const cacheKey = buildCacheKey('metadata', 'categories_subcategories');
+  const cacheKey = buildCacheKey('metadata', 'categories_subcategories_difficulties');
   const cached = await redisCache.get(cacheKey);
   if (cached) return cached;
 
-  const [categoriesResult, subcategoriesResult] = await Promise.all([
+  const [categoriesResult, subcategoriesResult, difficultiesResult] = await Promise.all([
     supabase.from('exam_categories').select('id, name, slug, logo_url, icon'),
     supabase.from('exam_subcategories').select('id, name, slug, category_id'),
+    supabase.from('exam_difficulties').select('id, name, slug, level_order'),
   ]);
 
   const metadata = {
     categories: categoriesResult.data || [],
     subcategories: subcategoriesResult.data || [],
+    difficulties: difficultiesResult.data || [],
     categoriesMap: {},
     subcategoriesMap: {},
+    difficultiesMap: {},
   };
 
   metadata.categories.forEach(cat => {
@@ -32,6 +35,11 @@ const batchLoadCategoriesAndSubcategories = async () => {
   metadata.subcategories.forEach(sub => {
     metadata.subcategoriesMap[sub.id] = sub;
     metadata.subcategoriesMap[sub.slug] = sub;
+  });
+  metadata.difficulties.forEach(diff => {
+    metadata.difficultiesMap[diff.id] = diff;
+    metadata.difficultiesMap[diff.slug] = diff;
+    metadata.difficultiesMap[diff.name] = diff;
   });
 
   await redisCache.set(cacheKey, metadata, CACHE_TTL.CATEGORIES);
@@ -70,15 +78,55 @@ const buildExamCacheKey = (params) => {
     page = 1, limit = 10, search = '', category = '', subcategory = '',
     status = '', difficulty = '', exam_type = '', is_premium = '',
     year = '', paper_section_id = '', paper_topic_id = '',
+    sortBy = '', sortOrder = '',
   } = params;
   return buildCacheKey(
     'exams', EXAM_CACHE_VERSION, page, limit,
     search.toLowerCase().trim(), category, subcategory, status,
-    difficulty, exam_type, is_premium, year, paper_section_id, paper_topic_id
+    difficulty, exam_type, is_premium, year, paper_section_id, paper_topic_id,
+    sortBy, sortOrder
   );
 };
 
 const buildExamDetailCacheKey = (identifier) => `exam-detail:${identifier}`;
+
+const hasPremiumExamAccess = async (userId) => {
+  const now = Date.now();
+
+  const { data: user, error: userError } = await supabase
+    .from('users')
+    .select('is_premium, subscription_expires_at')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (userError) {
+    logger.warn('Failed to fetch user premium flags for exam access:', userError, { userId });
+  }
+
+  const userExpiry = user?.subscription_expires_at ? new Date(user.subscription_expires_at).getTime() : null;
+  if (user?.is_premium && (!userExpiry || userExpiry >= now)) {
+    return true;
+  }
+
+  const { data: subscription, error: subscriptionError } = await supabase
+    .from('user_subscriptions')
+    .select('status, expires_at')
+    .eq('user_id', userId)
+    .in('status', ['active', 'canceled'])
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (subscriptionError) {
+    logger.warn('Failed to fetch user subscription for exam access:', subscriptionError, { userId });
+    return false;
+  }
+
+  if (!subscription) return false;
+
+  const subscriptionExpiry = subscription.expires_at ? new Date(subscription.expires_at).getTime() : null;
+  return !subscriptionExpiry || subscriptionExpiry >= now;
+};
 
 const buildExamQuery = () => supabase
   .from('exams')
@@ -88,7 +136,7 @@ const buildExamQuery = () => supabase
     image_url, logo_url, thumbnail_url, pdf_url_en, pdf_url_hi,
     negative_marking, negative_mark_value, allow_anytime, supports_hindi,
     exam_type, is_premium, slug, url_path, exam_uid,
-    exam_categories(logo_url, icon)
+    exam_categories(logo_url, icon), attempts
   `)
   .eq('is_published', true)
   .is('deleted_at', null);
@@ -183,29 +231,35 @@ const getExams = async (req, res) => {
     const {
       page = 1, limit = 10, search, category, subcategory,
       status, difficulty, exam_type, is_premium, year,
-      paper_section_id, paper_topic_id,
+      paper_section_id, paper_topic_id, sortBy = 'created_at', sortOrder = 'desc'
     } = req.query;
 
     const pageNum = Math.max(1, parseInt(page, 10));
-    const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10)));
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10)));
     const offset = (pageNum - 1) * limitNum;
 
     const cacheKey = buildExamCacheKey(req.query || {});
     const cachedResponse = await redisCache.get(cacheKey);
-    if (cachedResponse) return res.json(cachedResponse);
+    if (cachedResponse && !sortBy) return res.json(cachedResponse);
+    // If sortBy is present, we bypass/refresh cache to ensure accurate rankings
 
     const metadata = await batchLoadCategoriesAndSubcategories();
 
     let query = supabase
       .from('exams')
       .select(
-        'id, title, duration, total_marks, total_questions, category_id, subcategory_id, difficulty, status, start_date, end_date, exam_date, is_free, image_url, logo_url, thumbnail_url, allow_anytime, supports_hindi, exam_type, is_premium, slug, url_path, created_at',
+        'id, title, duration, total_marks, total_questions, category_id, subcategory_id, difficulty, difficulty_id, status, start_date, end_date, exam_date, is_free, image_url, logo_url, thumbnail_url, allow_anytime, supports_hindi, exam_type, is_premium, slug, url_path, created_at, attempts',
         { count: 'exact' }
       )
       .eq('is_published', true)
-      .is('deleted_at', null)
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limitNum - 1);
+      .is('deleted_at', null);
+
+    // Apply sorting
+    if (sortBy === 'attempts') {
+      query = query.order('attempts', { ascending: sortOrder === 'asc' });
+    } else {
+      query = query.order(sortBy, { ascending: sortOrder === 'asc' });
+    }
 
     if (search) {
       const searchTerm = search.trim();
@@ -223,7 +277,14 @@ const getExams = async (req, res) => {
     }
 
     if (status) query = query.eq('status', status);
-    if (difficulty) query = query.eq('difficulty', difficulty);
+    if (difficulty) {
+      const difficultyData = metadata.difficultiesMap[difficulty];
+      if (difficultyData?.id) {
+        query = query.or(`difficulty_id.eq.${difficultyData.id},difficulty.eq.${difficultyData.slug},difficulty.eq.${difficultyData.name}`);
+      } else {
+        query = query.eq('difficulty', difficulty);
+      }
+    }
 
     if (exam_type) {
       if (exam_type === 'mock_test') {
@@ -246,8 +307,11 @@ const getExams = async (req, res) => {
       }
     }
 
-    if (paper_section_id) query = query.eq('paper_section_id', paper_section_id);
     if (paper_topic_id) query = query.eq('paper_topic_id', paper_topic_id);
+    if (paper_section_id) query = query.eq('paper_section_id', paper_section_id);
+
+    // Apply range at the end after all filters
+    query = query.range(offset, offset + limitNum - 1);
 
     const { data: exams, error, count } = await query;
 
@@ -281,6 +345,130 @@ const getExams = async (req, res) => {
   } catch (error) {
     logger.error('Error in getExams:', error);
     res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+  }
+};
+
+const getExamHistory = async (req, res) => {
+  try {
+    const { page = 1, status = '' } = req.query;
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = 20;
+    const offset = (pageNum - 1) * limitNum;
+
+    let attemptsQuery = supabase
+      .from('exam_attempts')
+      .select(`
+        id,
+        exam_id,
+        language,
+        started_at,
+        updated_at,
+        is_submitted,
+        time_taken,
+        exams!inner (
+          id,
+          title,
+          category,
+          total_questions,
+          duration,
+          deleted_at
+        )
+      `, { count: 'exact' })
+      .eq('user_id', req.user.id)
+      .is('exams.deleted_at', null)
+      .order('updated_at', { ascending: false })
+      .range(offset, offset + limitNum - 1);
+
+    if (status === 'in-progress') {
+      attemptsQuery = attemptsQuery.eq('is_submitted', false);
+    } else if (status === 'completed') {
+      attemptsQuery = attemptsQuery.eq('is_submitted', true);
+    }
+
+    const { data: attempts, error, count } = await attemptsQuery;
+
+    if (error) {
+      logger.error('Error fetching exam history:', error, { userId: req.user.id });
+      return res.status(500).json({ success: false, message: 'Failed to fetch exam history' });
+    }
+
+    const attemptIds = (attempts || []).map(attempt => attempt.id);
+    const [answersRes, resultsRes] = await Promise.all([
+      attemptIds.length
+        ? supabase
+            .from('user_answers')
+            .select('attempt_id, question_id, answer')
+            .in('attempt_id', attemptIds)
+        : Promise.resolve({ data: [] }),
+      attemptIds.length
+        ? supabase
+            .from('results')
+            .select('attempt_id, score, total_marks, percentage')
+            .in('attempt_id', attemptIds)
+        : Promise.resolve({ data: [] }),
+    ]);
+
+    const answerCountByAttempt = new Map();
+    (answersRes.data || []).forEach(answer => {
+      const hasAnswer = Array.isArray(answer.answer)
+        ? answer.answer.length > 0
+        : typeof answer.answer === 'string'
+          ? answer.answer.trim().length > 0
+          : Boolean(answer.answer);
+
+      if (!hasAnswer) return;
+      answerCountByAttempt.set(
+        answer.attempt_id,
+        (answerCountByAttempt.get(answer.attempt_id) || 0) + 1
+      );
+    });
+
+    const resultByAttempt = new Map((resultsRes.data || []).map(result => [result.attempt_id, result]));
+
+    const entries = (attempts || []).map(attempt => {
+      const answeredQuestions = answerCountByAttempt.get(attempt.id) || 0;
+      const totalQuestions = attempt.exams?.total_questions || 0;
+      const result = resultByAttempt.get(attempt.id);
+      return {
+        attemptId: attempt.id,
+        examId: attempt.exam_id,
+        examTitle: attempt.exams?.title || 'Exam',
+        category: attempt.exams?.category || '',
+        status: attempt.is_submitted ? 'completed' : 'in-progress',
+        startedAt: attempt.started_at,
+        updatedAt: attempt.updated_at,
+        language: attempt.language || 'en',
+        answeredQuestions,
+        totalQuestions,
+        duration: attempt.exams?.duration || 0,
+        timeSpent: attempt.time_taken || 0,
+        resumeAllowed: !attempt.is_submitted,
+        score: result?.score,
+        totalMarks: result?.total_marks,
+        percentage: result?.percentage,
+      };
+    });
+
+    const metrics = {
+      totalAttempts: count || 0,
+      completed: entries.filter(entry => entry.status === 'completed').length,
+      inProgress: entries.filter(entry => entry.status === 'in-progress').length,
+    };
+
+    return res.json({
+      success: true,
+      data: entries,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total: count || 0,
+        totalPages: Math.ceil((count || 0) / limitNum),
+      },
+      metrics,
+    });
+  } catch (error) {
+    logger.error('Error in getExamHistory:', error, { userId: req.user?.id });
+    return res.status(500).json({ success: false, message: 'Failed to fetch exam history' });
   }
 };
 
@@ -447,7 +635,17 @@ const startExam = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Hindi language not supported for this exam' });
     }
 
-    if (!exam.is_free) {
+    let hasExamAccess = Boolean(exam.is_free);
+    let accessDeniedMessage = 'Payment required to access this exam';
+
+    if (!hasExamAccess && exam.is_premium) {
+      hasExamAccess = await hasPremiumExamAccess(req.user.id);
+      if (!hasExamAccess) {
+        accessDeniedMessage = 'Premium subscription required to access this exam';
+      }
+    }
+
+    if (!hasExamAccess) {
       const { data: payment } = await supabase
         .from('transactions')
         .select('id')
@@ -456,7 +654,11 @@ const startExam = async (req, res) => {
         .eq('status', 'success')
         .single();
 
-      if (!payment) return res.status(403).json({ success: false, message: 'Payment required to access this exam' });
+      hasExamAccess = Boolean(payment);
+    }
+
+    if (!hasExamAccess) {
+      return res.status(403).json({ success: false, message: accessDeniedMessage });
     }
 
     const { data: attempt, error: attemptError } = await supabase
@@ -474,6 +676,18 @@ const startExam = async (req, res) => {
     if (attemptError) {
       logger.error('Start exam error:', attemptError);
       return res.status(500).json({ success: false, message: 'Failed to start exam' });
+    }
+
+    // Atomically increment the attempts counter in the exams table
+    try {
+      await supabase.rpc('increment_exam_attempts', { exam_id: resolvedExamId });
+    } catch (incError) {
+      // Fallback if RPC doesn't exist: Manual increment
+      logger.warn('Failed to call increment_exam_attempts RPC, falling back to manual update', incError);
+      await supabase
+        .from('exams')
+        .update({ attempts: (exam.attempts || 0) + 1 })
+        .eq('id', resolvedExamId);
     }
 
     res.json({
@@ -521,7 +735,9 @@ const getExamQuestions = async (req, res) => {
 
     if (attempt.is_submitted) return res.status(400).json({ success: false, message: 'Exam already submitted' });
 
-    const attemptLanguage = attempt.language || 'en';
+    // Allow ?lang query override (user can change language preference before starting)
+    const queryLang = req.query.lang;
+    const attemptLanguage = (queryLang === 'hi' || queryLang === 'en') ? queryLang : (attempt.language || 'en');
 
     let sectionsData, sectionsError;
     try {
@@ -700,6 +916,11 @@ const saveAnswer = async (req, res) => {
         answer: hasAnswer ? answer : null, marked_for_review: isMarked, time_taken: timeTaken || 0,
       });
     }
+
+    await supabase
+      .from('exam_attempts')
+      .update({ updated_at: new Date().toISOString() })
+      .eq('id', attemptId);
 
     res.json({ success: true, message: 'Answer saved successfully' });
   } catch (error) {
@@ -969,6 +1190,7 @@ const getExamForPDF = async (req, res) => {
 
 module.exports = {
   getExams,
+  getExamHistory,
   getExamByShortPath,
   getExamByPath,
   getExamById,

@@ -28,9 +28,63 @@ const resultSelectFields = `
     difficulty,
     image_url,
     pass_percentage,
-    total_questions
+    total_questions,
+    duration,
+    slug,
+    url_path
   )
 `;
+
+const enrichResultComparisons = async (result) => {
+  const { data: examResults, error } = await supabase
+    .from('results')
+    .select('id, score')
+    .eq('exam_id', result.exam_id)
+    .eq('is_published', true);
+
+  if (error) {
+    logger.warn('Failed to fetch exam comparison stats:', error, { examId: result.exam_id, resultId: result.id });
+    return {
+      averageScore: null,
+      bestScore: null,
+      computedRank: null,
+      computedTotalParticipants: null,
+      percentileAchieved: null,
+      questionsAttempted: (result.correct_answers || 0) + (result.wrong_answers || 0),
+      accuracyAchieved: (result.correct_answers || 0) + (result.wrong_answers || 0) > 0
+        ? Number((((result.correct_answers || 0) / ((result.correct_answers || 0) + (result.wrong_answers || 0))) * 100).toFixed(2))
+        : 0,
+    };
+  }
+
+  const scores = (examResults || []).map(entry => Number(entry.score) || 0);
+  const averageScore = scores.length
+    ? Number((scores.reduce((sum, value) => sum + value, 0) / scores.length).toFixed(2))
+    : null;
+  const bestScore = scores.length ? Math.max(...scores) : null;
+  const computedTotalParticipants = examResults?.length || null;
+  const currentScore = Number(result.score) || 0;
+  const computedRank = computedTotalParticipants
+    ? examResults.filter(entry => (Number(entry.score) || 0) > currentScore).length + 1
+    : null;
+  const effectiveRank = result.rank || computedRank;
+  const effectiveTotalParticipants = result.total_participants || computedTotalParticipants;
+  const percentileAchieved = effectiveRank && effectiveTotalParticipants
+    ? Number((((effectiveTotalParticipants - effectiveRank + 1) / effectiveTotalParticipants) * 100).toFixed(2))
+    : null;
+
+  return {
+    averageScore,
+    bestScore,
+    computedRank,
+    computedTotalParticipants,
+    percentileAchieved,
+    questionsAttempted: (result.correct_answers || 0) + (result.wrong_answers || 0),
+    accuracyAchieved: (result.correct_answers || 0) + (result.wrong_answers || 0) > 0
+      ? Number((((result.correct_answers || 0) / ((result.correct_answers || 0) + (result.wrong_answers || 0))) * 100).toFixed(2))
+      : 0,
+  };
+};
 
 const fetchResultWithDetails = (filters = {}) => {
   let query = supabase
@@ -257,6 +311,13 @@ const getResultByAttemptId = async (req, res) => {
       pass_percentage: result.exams.pass_percentage,
       total_questions: result.exams.total_questions
     };
+    result.comparison = await enrichResultComparisons(result);
+    if (!result.rank && result.comparison?.computedRank) {
+      result.rank = result.comparison.computedRank;
+    }
+    if (!result.total_participants && result.comparison?.computedTotalParticipants) {
+      result.total_participants = result.comparison.computedTotalParticipants;
+    }
     result.language = attemptLanguage;
     delete result.exams;
     delete result.exam_attempts;
@@ -355,6 +416,14 @@ const getResultById = async (req, res) => {
       accuracy: sa.accuracy,
       timeTaken: sa.time_taken
     }));
+
+    result.comparison = await enrichResultComparisons(result);
+    if (!result.rank && result.comparison?.computedRank) {
+      result.rank = result.comparison.computedRank;
+    }
+    if (!result.total_participants && result.comparison?.computedTotalParticipants) {
+      result.total_participants = result.comparison.computedTotalParticipants;
+    }
 
     res.json({
       success: true,

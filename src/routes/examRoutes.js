@@ -8,6 +8,8 @@ const supabase = require('../config/database');
 
 router.get('/', optionalAuth, examController.getExams);
 
+router.get('/history', authenticate, examController.getExamHistory);
+
 router.get('/categories', examController.getExamCategories);
 
 router.get('/path/:parentSlug/:examSlug',
@@ -18,11 +20,6 @@ router.get('/path/:parentSlug/:examSlug',
 router.get('/path/:category/:subcategory/:examSlug',
   optionalAuth,
   examController.getExamByPath
-);
-
-router.get('/:id', 
-  optionalAuth, 
-  examController.getExamById
 );
 
 router.post('/:examId/start',
@@ -65,6 +62,11 @@ router.post('/:attemptId/submit',
 router.get('/:examId/download-pdf',
   optionalAuth,
   examController.getExamForPDF
+);
+
+router.get('/:id', 
+  optionalAuth, 
+  examController.getExamById
 );
 
 // Debug endpoint to check exam by path
