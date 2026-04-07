@@ -188,13 +188,16 @@ const adminUpsertPrivacyPolicy = async (req, res) => {
     const sectionsMap = [...insertedSections, ...upsertedSections];
 
     const pointsWithSections = pointsPayload.map((point) => {
-      if (point.section_id) {
-        return point;
+      let finalSectionId = point.section_id;
+      if (!finalSectionId && point.section_title) {
+        const matching = sectionsMap.find((section) => section.title === point.section_title);
+        finalSectionId = matching?.id || null;
       }
-      const matching = sectionsMap.find((section) => section.title === point.section_title);
+
+      const { section_title, ...dbPoint } = point;
       return {
-        ...point,
-        section_id: matching?.id || null
+        ...dbPoint,
+        section_id: finalSectionId
       };
     }).filter((point) => point.section_id);
 
