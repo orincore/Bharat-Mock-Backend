@@ -32,7 +32,11 @@ const {
   getAllUsers,
   getUserDetails,
   updateUserRole,
-  toggleUserBlock
+  toggleUserBlock,
+  updateUser,
+  adminUpdateUserSubscription,
+  adminDeleteUser,
+  adminRestoreUser
 } = require('../controllers/adminExamController');
 const {
   getAdminNavigationLinks,
@@ -161,7 +165,11 @@ router.delete('/exams/:id/remove-pdf-hi', requireRole('admin'), activityLogger('
 
 router.get('/users', requireRole('admin'), getAllUsers);
 router.get('/users/:id', requireRole('admin'), getUserDetails);
+router.put('/users/:id', requireRole('admin'), activityLogger('UPDATE_USER', 'user'), updateUser);
 router.put('/users/:id/role', requireRole('admin'), activityLogger('UPDATE_USER_ROLE', 'user'), updateUserRole);
 router.put('/users/:id/toggle-block', requireRole('admin'), activityLogger('TOGGLE_USER_BLOCK', 'user'), toggleUserBlock);
+router.put('/users/:id/subscription', requireRole('admin'), activityLogger('UPDATE_USER_SUBSCRIPTION', 'user'), adminUpdateUserSubscription);
+router.delete('/users/:id', requireRole('admin'), activityLogger('DELETE_USER', 'user'), adminDeleteUser);
+router.put('/users/:id/restore', requireRole('admin'), activityLogger('RESTORE_USER', 'user'), adminRestoreUser);
 
 module.exports = router;

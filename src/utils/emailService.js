@@ -277,7 +277,7 @@ const sendSubscriptionActivatedEmail = async (userEmail, userName, { planName, a
             <p style="color:#374151; line-height:1.6;">Thank you for upgrading to the <strong>${planName}</strong> plan. You now have unlimited access to all premium exams on Bharat Mock.</p>
             <div style="margin:24px 0; padding:16px; border-radius:12px; background:#f3f4f6;">
               <p style="margin:0; color:#111827; font-weight:600;">Plan summary</p>
-              <p style="margin:8px 0 0; color:#4b5563;">Amount paid: <strong>${currency} ${(amount / 100).toFixed(2)}</strong></p>
+              <p style="margin:8px 0 0; color:#4b5563;">Amount paid: <strong>${amount === 0 ? '0 Rs (Admin granted)' : `${currency} ${(amount / 100).toFixed(2)}`}</strong></p>
               <p style="margin:4px 0 0; color:#4b5563;">Expires on: <strong>${
                 expiresAt ? new Date(expiresAt).toLocaleDateString() : 'N/A'
               }</strong></p>

@@ -192,7 +192,7 @@ const login = async (req, res) => {
 
     const { data: user, error: fetchError } = await supabase
       .from('users')
-      .select('id, email, password_hash, name, avatar_url, phone, date_of_birth, role, is_blocked, block_reason, created_at')
+      .select('id, email, password_hash, name, avatar_url, phone, date_of_birth, role, is_blocked, block_reason, deleted_at, created_at')
       .eq('email', email)
       .single();
 
@@ -203,12 +203,22 @@ const login = async (req, res) => {
       });
     }
 
+    if (user.deleted_at) {
+      return res.status(403).json({
+        success: false,
+        code: 'ACCOUNT_DELETED',
+        message: 'This account has been deleted'
+      });
+    }
+
     if (user.is_blocked) {
       return res.status(403).json({
         success: false,
-        message: user.block_reason 
+        code: 'ACCOUNT_BLOCKED',
+        message: user.block_reason
           ? `Your account has been suspended: ${user.block_reason}`
-          : 'Your account has been suspended'
+          : 'Your account has been suspended',
+        block_reason: user.block_reason || null
       });
     }
 
@@ -268,6 +278,7 @@ const getProfile = async (req, res) => {
         subscription_expires_at,
         subscription_auto_renew,
         created_at,
+        deleted_at,
         user_education (
           level,
           institution,
@@ -287,6 +298,13 @@ const getProfile = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: 'User not found'
+      });
+    }
+
+    if (user?.deleted_at) {
+      return res.status(410).json({
+        success: false,
+        message: 'This account has been deleted'
       });
     }
 
@@ -750,6 +768,28 @@ const getPublicProfile = async (req, res) => {
   }
 };
 
+const deleteAccount = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const { error } = await supabase
+      .from('users')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', userId)
+      .is('deleted_at', null);
+
+    if (error) {
+      logger.error('Delete account error:', error);
+      return res.status(500).json({ success: false, message: 'Failed to delete account' });
+    }
+
+    res.json({ success: true, message: 'Account deleted successfully' });
+  } catch (error) {
+    logger.error('Delete account error:', error);
+    res.status(500).json({ success: false, message: 'Server error while deleting account' });
+  }
+};
+
 module.exports = {
   register,
   sendRegistrationOtp,
@@ -763,5 +803,6 @@ module.exports = {
   changePassword,
   googleCallback,
   completeOnboarding,
-  refreshAuthToken
+  refreshAuthToken,
+  deleteAccount
 };

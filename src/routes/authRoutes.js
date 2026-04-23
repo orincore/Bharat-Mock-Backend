@@ -111,4 +111,6 @@ router.post('/onboarding',
   authController.completeOnboarding
 );
 
+router.delete('/account', authenticate, authController.deleteAccount);
+
 module.exports = router;

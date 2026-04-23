@@ -2,7 +2,7 @@ const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { uploadExamLogo, uploadExamThumbnail, uploadExamPdfEn, uploadExamPdfHi, uploadQuestionImage, uploadOptionImage, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
-const { sendRoleChangedEmail } = require('../utils/emailService');
+const { sendRoleChangedEmail, sendSubscriptionActivatedEmail } = require('../utils/emailService');
 
 const safeAverage = (numbers = []) => {
   const valid = numbers.filter((n) => typeof n === 'number' && !Number.isNaN(n));
@@ -206,6 +206,7 @@ const getUserDetails = async (req, res) => {
         email,
         name,
         phone,
+        bio,
         avatar_url,
         role,
         is_verified,
@@ -214,7 +215,12 @@ const getUserDetails = async (req, res) => {
         is_onboarded,
         auth_provider,
         date_of_birth,
-        created_at
+        is_premium,
+        subscription_plan_id,
+        subscription_expires_at,
+        subscription_auto_renew,
+        created_at,
+        deleted_at
       `)
       .eq('id', id)
       .single();
@@ -1465,6 +1471,152 @@ const updateUserRole = async (req, res) => {
       success: false,
       message: 'Server error while updating user role'
     });
+  }
+};
+
+const updateUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, phone, bio, is_verified, is_blocked, block_reason } = req.body;
+
+    const { data: existing, error: fetchErr } = await supabase
+      .from('users')
+      .select('id, email, name')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !existing) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const updateData = {};
+    if (name !== undefined) updateData.name = name;
+    if (phone !== undefined) updateData.phone = phone;
+    if (bio !== undefined) updateData.bio = bio;
+    if (is_verified !== undefined) updateData.is_verified = Boolean(is_verified);
+    if (is_blocked !== undefined) {
+      updateData.is_blocked = Boolean(is_blocked);
+      updateData.block_reason = is_blocked ? (block_reason || null) : null;
+    }
+
+    const { data: user, error } = await supabase
+      .from('users')
+      .update(updateData)
+      .eq('id', id)
+      .select('id, email, name, phone, bio, role, is_verified, is_blocked, block_reason, avatar_url, date_of_birth, auth_provider, is_onboarded, is_premium, subscription_plan_id, subscription_expires_at, subscription_auto_renew, created_at')
+      .single();
+
+    if (error) {
+      logger.error('Admin updateUser error:', error);
+      return res.status(500).json({ success: false, message: 'Failed to update user' });
+    }
+
+    res.json({ success: true, message: 'User updated successfully', data: user });
+  } catch (error) {
+    logger.error('Admin updateUser error:', error);
+    res.status(500).json({ success: false, message: 'Server error while updating user' });
+  }
+};
+
+const adminUpdateUserSubscription = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { plan_id, expires_at, is_premium, auto_renew, send_notification } = req.body;
+
+    const { data: user, error: userErr } = await supabase
+      .from('users')
+      .select('id, email, name')
+      .eq('id', id)
+      .single();
+
+    if (userErr || !user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const updateData = {};
+    if (plan_id !== undefined) updateData.subscription_plan_id = plan_id || null;
+    if (expires_at !== undefined) updateData.subscription_expires_at = expires_at || null;
+    if (is_premium !== undefined) updateData.is_premium = Boolean(is_premium);
+    if (auto_renew !== undefined) updateData.subscription_auto_renew = Boolean(auto_renew);
+
+    const { error: updateErr } = await supabase
+      .from('users')
+      .update(updateData)
+      .eq('id', id);
+
+    if (updateErr) {
+      logger.error('Admin update subscription error:', updateErr);
+      return res.status(500).json({ success: false, message: 'Failed to update subscription' });
+    }
+
+    if (send_notification && plan_id) {
+      try {
+        const { data: plan } = await supabase
+          .from('subscription_plans')
+          .select('id, name, duration_days, normal_price_cents, currency_code')
+          .eq('id', plan_id)
+          .single();
+
+        if (plan) {
+          await sendSubscriptionActivatedEmail(user.email, user.name, {
+            planName: plan.name,
+            amount: 0,
+            currency: plan.currency_code || 'INR',
+            expiresAt: expires_at || new Date(Date.now() + plan.duration_days * 86400000).toISOString(),
+            autoRenew: Boolean(auto_renew)
+          });
+        }
+      } catch (emailError) {
+        logger.warn('Failed to send subscription notification email (non-critical):', emailError);
+      }
+    }
+
+    res.json({ success: true, message: 'Subscription updated successfully' });
+  } catch (error) {
+    logger.error('Admin update subscription error:', error);
+    res.status(500).json({ success: false, message: 'Server error while updating subscription' });
+  }
+};
+
+const adminRestoreUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { error } = await supabase
+      .from('users')
+      .update({ deleted_at: null })
+      .eq('id', id);
+
+    if (error) {
+      logger.error('Admin restore user error:', error);
+      return res.status(500).json({ success: false, message: 'Failed to restore user' });
+    }
+
+    res.json({ success: true, message: 'User account restored successfully' });
+  } catch (error) {
+    logger.error('Admin restore user error:', error);
+    res.status(500).json({ success: false, message: 'Server error while restoring user' });
+  }
+};
+
+const adminDeleteUser = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { error } = await supabase
+      .from('users')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', id);
+
+    if (error) {
+      logger.error('Admin delete user error:', error);
+      return res.status(500).json({ success: false, message: 'Failed to delete user' });
+    }
+
+    res.json({ success: true, message: 'User account deleted successfully' });
+  } catch (error) {
+    logger.error('Admin delete user error:', error);
+    res.status(500).json({ success: false, message: 'Server error while deleting user' });
   }
 };
 
@@ -2829,5 +2981,9 @@ module.exports = {
   getUserDetails,
   getAllUsers,
   updateUserRole,
-  toggleUserBlock
+  toggleUserBlock,
+  updateUser,
+  adminUpdateUserSubscription,
+  adminDeleteUser,
+  adminRestoreUser
 };

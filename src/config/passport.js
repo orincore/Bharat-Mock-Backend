@@ -33,7 +33,8 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_CALLBACK_URL) {
           if (existingUser && !fetchError) {
             const updatePayload = {
               auth_provider: 'google',
-              google_id: profile.id
+              google_id: profile.id,
+              is_verified: true
             };
 
             if (avatar_url) {
@@ -64,6 +65,7 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_CALLBACK_URL) {
               avatar_url,
               password_hash: hashedPlaceholder,
               role: 'user',
+              is_verified: true,
               is_onboarded: false,
               auth_provider: 'google',
               google_id: profile.id
