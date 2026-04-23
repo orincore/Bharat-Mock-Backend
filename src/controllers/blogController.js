@@ -52,8 +52,10 @@ const blogController = {
         .from('blogs')
         .select('*', { count: 'exact' });
 
+      const isPrivileged = req.user && ['admin', 'editor', 'author'].includes(req.user.role);
+
       // Public users only see published blogs
-      if (!req.user || req.user.role !== 'admin') {
+      if (!isPrivileged) {
         query = query.eq('is_published', true);
       } else {
         if (published !== undefined) {
@@ -151,7 +153,7 @@ const blogController = {
   async getBlogById(req, res) {
     try {
       const { blogId } = req.params;
-      if (!req.user || req.user.role !== 'admin') {
+      if (!req.user || !['admin', 'editor', 'author'].includes(req.user.role)) {
         return res.status(403).json({ error: 'Admin access required' });
       }
 
@@ -190,8 +192,8 @@ const blogController = {
         return res.status(404).json({ error: 'Blog not found' });
       }
 
-      const isAdmin = req.user && req.user.role === 'admin';
-      if (!isAdmin && !blog.is_published) {
+      const isPrivileged = req.user && ['admin', 'editor', 'author'].includes(req.user.role);
+      if (!isPrivileged && !blog.is_published) {
         return res.status(403).json({ error: 'Blog not published yet' });
       }
 
@@ -243,7 +245,7 @@ const blogController = {
         .select('category')
         .not('category', 'is', null);
 
-      if (!req.user || req.user.role !== 'admin') {
+      if (!req.user || !['admin', 'editor', 'author'].includes(req.user.role)) {
         query = query.eq('is_published', true);
       }
 

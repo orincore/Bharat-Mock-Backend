@@ -572,6 +572,118 @@ const sendPasswordChangedEmail = async (userEmail, userName) => {
   }
 };
 
+const ROLE_LABELS = {
+  admin: 'Admin',
+  editor: 'Editor',
+  author: 'Author',
+  user: 'User'
+};
+
+const ROLE_DESCRIPTIONS = {
+  admin: 'You have full access to manage the platform, including exams, users, and settings.',
+  editor: 'You can create and edit exam content, blog posts, and page content.',
+  author: 'You can write and publish blog posts and study material.',
+  user: 'You have standard learner access to all public exams and resources.'
+};
+
+const ROLE_COLORS = {
+  admin: '#7c3aed',
+  editor: '#2563eb',
+  author: '#d97706',
+  user: '#6366f1'
+};
+
+const sendRoleChangedEmail = async (userEmail, userName, { oldRole, newRole, changedBy }) => {
+  if (!hasEmailConfig()) {
+    console.warn('SMTP not configured, skipping role change email');
+    return;
+  }
+
+  const roleLabel = ROLE_LABELS[newRole] || newRole;
+  const roleDescription = ROLE_DESCRIPTIONS[newRole] || 'Your account access has been updated.';
+  const roleColor = ROLE_COLORS[newRole] || '#6366f1';
+  const oldRoleLabel = ROLE_LABELS[oldRole] || oldRole;
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: userEmail,
+    subject: `Your Bharat Mock role has been updated to ${roleLabel}`,
+    html: `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 24px; }
+          .card { max-width: 560px; margin: 0 auto; background: #fff; border-radius: 16px; border: 1px solid #e5e7eb; box-shadow: 0 20px 35px rgba(15,23,42,0.08); overflow: hidden; }
+          .header { background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); padding: 32px; color: #fff; text-align: center; }
+          .content { padding: 32px; color: #1f2937; line-height: 1.6; }
+          .role-badge { display: inline-block; background: ${roleColor}18; color: ${roleColor}; border: 1px solid ${roleColor}40; border-radius: 8px; padding: 8px 20px; font-size: 18px; font-weight: 700; margin: 16px 0; }
+          .change-row { display: flex; align-items: center; gap: 12px; margin: 20px 0; padding: 16px; background: #f9fafb; border-radius: 12px; }
+          .old-role { color: #6b7280; text-decoration: line-through; font-size: 14px; }
+          .arrow { color: #9ca3af; font-size: 18px; }
+          .new-role { color: ${roleColor}; font-weight: 700; font-size: 15px; }
+          .info-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 10px; padding: 16px; margin: 20px 0; font-size: 14px; color: #166534; }
+          .footer { padding: 24px 32px; text-align: center; font-size: 13px; color: #9ca3af; background: #f9fafb; border-top: 1px solid #e5e7eb; }
+          .cta { display: inline-block; padding: 12px 28px; background: ${roleColor}; color: #fff; border-radius: 8px; text-decoration: none; font-weight: 600; margin-top: 16px; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <div class="header">
+            <h1 style="margin:0;font-size:24px;">Role Updated</h1>
+            <p style="margin:8px 0 0;opacity:0.85;font-size:15px;">Your account access has changed</p>
+          </div>
+          <div class="content">
+            <p>Hi <strong>${userName || 'there'}</strong>,</p>
+            <p>An admin has updated your role on Bharat Mock.</p>
+
+            <div class="change-row">
+              <span class="old-role">${oldRoleLabel}</span>
+              <span class="arrow">→</span>
+              <span class="new-role">✦ ${roleLabel}</span>
+            </div>
+
+            <div style="text-align:center;">
+              <span class="role-badge">${roleLabel}</span>
+            </div>
+
+            <div class="info-box">
+              ${roleDescription}
+            </div>
+
+            <p style="color:#4b5563;font-size:14px;">
+              This change was made by <strong>${changedBy || 'a platform administrator'}</strong> on
+              <strong>${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })} IST</strong>.
+            </p>
+
+            <p style="color:#4b5563;font-size:14px;">
+              If you believe this change was made in error, please contact our support team immediately.
+            </p>
+
+            <div style="text-align:center;">
+              <a href="${process.env.FRONTEND_URL}" class="cta">Go to Dashboard</a>
+            </div>
+          </div>
+          <div class="footer">
+            © ${new Date().getFullYear()} Bharat Mock. All rights reserved.<br/>
+            You're receiving this because your account role was changed by an administrator.
+          </div>
+        </div>
+      </body>
+      </html>
+    `
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Role change email sent to ${userEmail} (${oldRole} → ${newRole})`);
+  } catch (error) {
+    console.error('Error sending role change email:', error);
+  }
+};
+
 module.exports = {
   sendWelcomeEmail,
   sendPasswordOtpEmail,
@@ -582,5 +694,6 @@ module.exports = {
   sendRenewalReminderEmail,
   sendExpiryReminderEmail,
   sendSubscriptionExpiredEmail,
-  sendSubscriptionCancelledEmail
+  sendSubscriptionCancelledEmail,
+  sendRoleChangedEmail
 };

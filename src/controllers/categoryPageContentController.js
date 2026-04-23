@@ -19,9 +19,6 @@ const categoryPageContentController = {
     try {
       const { categoryId } = req.params;
 
-      // Check if user is admin or editor - they should see ALL content including inactive
-      const isAdminOrEditor = req.user?.role && ['admin', 'editor'].includes(req.user.role.toLowerCase());
-
       const { data: customTabs, error: tabsError } = await supabase
         .from('category_custom_tabs')
         .select('*')
@@ -34,35 +31,24 @@ const categoryPageContentController = {
         return buildErrorResponse(res, 'Failed to fetch custom tabs', tabsError);
       }
 
-      // For admin/editor: fetch ALL sections (including inactive)
-      // For public: fetch only active sections
-      let sectionsQuery = supabase
+      // Always fetch only active sections — soft-deleted (is_active:false) must not appear in either admin or public view
+      const { data: sections, error: sectionsError } = await supabase
         .from('page_sections')
         .select('*')
-        .eq('category_id', categoryId);
-      
-      if (!isAdminOrEditor) {
-        sectionsQuery = sectionsQuery.eq('is_active', true);
-      }
-      
-      const { data: sections, error: sectionsError } = await sectionsQuery.order('display_order', { ascending: true });
+        .eq('category_id', categoryId)
+        .eq('is_active', true)
+        .order('display_order', { ascending: true });
 
       if (sectionsError) {
         return buildErrorResponse(res, 'Failed to fetch sections', sectionsError);
       }
 
-      // For admin/editor: fetch ALL blocks (including inactive)
-      // For public: fetch only active blocks
-      let blocksQuery = supabase
+      // Always fetch only active blocks — soft-deleted blocks must not appear in either admin or public view
+      const { data: blocks, error: blocksError } = await supabase
         .from('page_content_blocks')
         .select('*')
-        .eq('category_id', categoryId);
-      
-      if (!isAdminOrEditor) {
-        blocksQuery = blocksQuery.eq('is_active', true);
-      }
-      
-      const { data: blocks, error: blocksError } = await blocksQuery
+        .eq('category_id', categoryId)
+        .eq('is_active', true)
         .order('section_id', { ascending: true })
         .order('display_order', { ascending: true });
 

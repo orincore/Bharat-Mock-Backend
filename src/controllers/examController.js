@@ -2,7 +2,7 @@ const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { redisCache, CACHE_TTL, buildCacheKey } = require('../utils/redisCache');
 
-const EXAM_CACHE_VERSION = 'v5';
+const EXAM_CACHE_VERSION = 'v6';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -262,8 +262,15 @@ const getExams = async (req, res) => {
     }
 
     if (search) {
-      const searchTerm = search.trim();
-      query = query.or(`title.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%,url_path.ilike.%${searchTerm}%`);
+      const searchTerm = search.trim().replace(/\s+/g, ' ');
+      const hasSpecialChars = /[(),]/.test(searchTerm);
+      const titlePattern = `%${searchTerm.replace(/ /g, '%')}%`;
+      if (hasSpecialChars) {
+        query = query.ilike('title', titlePattern);
+      } else {
+        const plainPattern = `%${searchTerm}%`;
+        query = query.or(`title.ilike.${titlePattern},slug.ilike.${plainPattern},url_path.ilike.${plainPattern}`);
+      }
     }
 
     if (category) {

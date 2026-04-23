@@ -2,6 +2,7 @@ const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { uploadExamLogo, uploadExamThumbnail, uploadExamPdfEn, uploadExamPdfHi, uploadQuestionImage, uploadOptionImage, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
+const { sendRoleChangedEmail } = require('../utils/emailService');
 
 const safeAverage = (numbers = []) => {
   const valid = numbers.filter((n) => typeof n === 'number' && !Number.isNaN(n));
@@ -103,13 +104,18 @@ const getAdminExams = async (req, res) => {
         pdf_url_hi,
         created_at,
         updated_at
-      `, { count: 'exact' })
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limitNumber - 1);
+      `, { count: 'exact' });
 
     if (search) {
-      const searchTerm = search.trim();
-      query = query.or(`title.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%,exam_uid.ilike.%${searchTerm}%`);
+      const searchTerm = search.trim().replace(/\s+/g, ' ');
+      const hasSpecialChars = /[(),]/.test(searchTerm);
+      const titlePattern = `%${searchTerm.replace(/ /g, '%')}%`;
+      if (hasSpecialChars) {
+        query = query.ilike('title', titlePattern);
+      } else {
+        const plainPattern = `%${searchTerm}%`;
+        query = query.or(`title.ilike.${titlePattern},slug.ilike.${plainPattern},exam_uid.ilike.${plainPattern}`);
+      }
     }
 
     if (status) {
@@ -157,6 +163,8 @@ const getAdminExams = async (req, res) => {
     if (date_to) {
       query = query.lte('exam_date', date_to);
     }
+
+    query = query.order('created_at', { ascending: false }).range(offset, offset + limitNumber - 1);
 
     const { data: exams, error, count } = await query;
 
@@ -1375,6 +1383,18 @@ const updateUserRole = async (req, res) => {
       });
     }
 
+    const { data: currentUser, error: fetchError } = await supabase
+      .from('users')
+      .select('id, email, name, role')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !currentUser) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    const oldRole = currentUser.role;
+
     const { data: user, error } = await supabase
       .from('users')
       .update({ role })
@@ -1422,6 +1442,16 @@ const updateUserRole = async (req, res) => {
         success: false,
         message: 'User role updated, but failed to synchronize admin access'
       });
+    }
+
+    try {
+      await sendRoleChangedEmail(user.email, user.name, {
+        oldRole,
+        newRole: role,
+        changedBy: req.user?.name || req.user?.email || 'a platform administrator'
+      });
+    } catch (emailError) {
+      logger.warn('Failed to send role change email (non-critical):', emailError);
     }
 
     res.json({
