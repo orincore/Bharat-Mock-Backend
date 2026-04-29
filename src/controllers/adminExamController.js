@@ -1,6 +1,6 @@
 const supabase = require('../config/database');
 const logger = require('../config/logger');
-const { uploadExamLogo, uploadExamThumbnail, uploadExamPdfEn, uploadExamPdfHi, uploadQuestionImage, uploadOptionImage, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
+const { uploadExamLogo, uploadExamThumbnail, uploadExamPdfEn, uploadExamPdfHi, uploadQuestionImage, uploadOptionImage, uploadExplanationImage, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 const { sendRoleChangedEmail, sendSubscriptionActivatedEmail } = require('../utils/emailService');
 
@@ -373,6 +373,7 @@ const getExamSectionsWithQuestions = async (req, res) => {
         negative_marks,
         explanation,
         explanation_hi,
+        explanation_image_url,
         difficulty,
         image_url,
         question_order,
@@ -424,6 +425,7 @@ const getExamSectionsWithQuestions = async (req, res) => {
           negative_marks: q.negative_marks,
           explanation: q.explanation,
           explanation_hi: q.explanation_hi,
+          explanation_image_url: q.explanation_image_url,
           difficulty: q.difficulty,
           image_url: q.image_url,
           question_order: q.question_order,
@@ -1083,7 +1085,7 @@ const deleteSection = async (req, res) => {
 
 const createQuestion = async (req, res) => {
   try {
-    const { exam_id, section_id, type, text, marks, negative_marks, explanation, difficulty, question_order, question_number } = req.body;
+    const { exam_id, section_id, type, text, marks, negative_marks, explanation, explanation_image_url, difficulty, question_order, question_number } = req.body;
 
     let imageUrl = null;
     if (req.file) {
@@ -1101,6 +1103,7 @@ const createQuestion = async (req, res) => {
         marks: parseFloat(marks),
         negative_marks: parseFloat(negative_marks) || 0,
         explanation,
+        explanation_image_url,
         image_url: imageUrl,
         difficulty,
         question_order: question_order ? parseInt(question_order) : null,
@@ -1901,6 +1904,7 @@ const bulkCreateExamWithContent = async (req, res) => {
               negative_marks: question.negative_marks,
               explanation: question.explanation || null,
               explanation_hi: question.explanation_hi || null,
+              explanation_image_url: question.explanation_image_url || null,
               difficulty: question.difficulty,
               image_url: question.image_url || null,
               question_order: question.question_order || (qIdx + 1),
@@ -2270,6 +2274,7 @@ const updateExamWithContent = async (req, res) => {
               negative_marks: numberOrNull(question.negative_marks, 0),
               explanation: question.explanation || null,
               explanation_hi: question.explanation_hi || null,
+              explanation_image_url: question.explanation_image_url || null,
               difficulty: question.difficulty,
               image_url: question.image_url || null,
               question_order: question.question_order || (qIdx + 1),
@@ -2690,6 +2695,35 @@ const removeOptionImage = async (req, res) => {
   }
 };
 
+// Upload explanation image (for rich text editor)
+const uploadExplanationImageController = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No image file provided'
+      });
+    }
+
+    // Upload image to R2
+    const imageResult = await uploadExplanationImage(req.file);
+
+    res.json({
+      success: true,
+      message: 'Explanation image uploaded successfully',
+      data: {
+        image_url: imageResult.url
+      }
+    });
+  } catch (error) {
+    logger.error('Upload explanation image error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while uploading explanation image'
+    });
+  }
+};
+
 // Upload English PDF for exam
 const uploadExamPdfEnController = async (req, res) => {
   try {
@@ -2974,6 +3008,7 @@ module.exports = {
   removeQuestionImage,
   uploadOptionImage: uploadOptionImageController,
   removeOptionImage,
+  uploadExplanationImage: uploadExplanationImageController,
   uploadExamPdfEn: uploadExamPdfEnController,
   uploadExamPdfHi: uploadExamPdfHiController,
   removeExamPdfEn,

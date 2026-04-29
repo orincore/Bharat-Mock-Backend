@@ -777,7 +777,7 @@ const getExamQuestions = async (req, res) => {
       .from('questions')
       .select(`
         id, section_id, type, text, text_hi, marks, negative_marks,
-        explanation, explanation_hi, image_url, question_order, question_number,
+        explanation, explanation_hi, explanation_image_url, image_url, question_order, question_number,
         question_options (
           id, option_text, option_text_hi, option_order, image_url,
           imageUrl:image_url
@@ -1010,18 +1010,39 @@ const evaluateExam = async (attemptId, examId, userId) => {
       if (language === 'hi') {
         return Boolean(
           (question.text_hi && question.text_hi.trim()) ||
-          (question.question_options && question.question_options.some(opt => opt.option_text_hi && opt.option_text_hi.trim()))
+          (question.explanation_hi && question.explanation_hi.trim()) ||
+          (question.image_url && question.image_url.trim()) ||
+          (question.question_options && question.question_options.some(opt => 
+            (opt.option_text_hi && opt.option_text_hi.trim()) || (opt.image_url && opt.image_url.trim())
+          ))
         );
       }
       return Boolean(
         (question.text && question.text.trim()) ||
-        (question.question_options && question.question_options.some(opt => opt.option_text && opt.option_text.trim()))
+        (question.explanation && question.explanation.trim()) ||
+        (question.image_url && question.image_url.trim()) ||
+        (question.question_options && question.question_options.some(opt => 
+          (opt.option_text && opt.option_text.trim()) || (opt.image_url && opt.image_url.trim())
+        ))
       );
     };
 
-    const filteredQuestions = questions.filter(q =>
-      allowedSectionIds.has(q.section_id) && questionHasContent(q, attemptLanguage)
+    let languageUsed = attemptLanguage;
+    let filteredQuestions = questions.filter(q =>
+      allowedSectionIds.has(q.section_id) && questionHasContent(q, languageUsed)
     );
+
+    if (filteredQuestions.length === 0 && attemptLanguage === 'hi') {
+      languageUsed = 'en';
+      filteredQuestions = questions.filter(q =>
+        allowedSectionIds.has(q.section_id) && questionHasContent(q, languageUsed)
+      );
+    }
+    
+    if (filteredQuestions.length === 0) {
+      languageUsed = 'en';
+      filteredQuestions = questions.filter(q => allowedSectionIds.has(q.section_id));
+    }
 
     if (filteredQuestions.length === 0) throw new Error('No questions available for evaluation in selected language');
 

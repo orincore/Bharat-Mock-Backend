@@ -527,6 +527,7 @@ const getAnswerReview = async (req, res) => {
         negative_marks,
         explanation,
         explanation_hi,
+        explanation_image_url,
         image_url,
         question_order,
         question_number,
@@ -574,6 +575,7 @@ const getAnswerReview = async (req, res) => {
         marks: q.marks,
         negativeMarks: q.negative_marks,
         explanation: attemptLanguage === 'hi' && q.explanation_hi ? q.explanation_hi : q.explanation,
+        explanationImageUrl: q.explanation_image_url,
         imageUrl: q.image_url,
         options: q.question_options
           .sort((a, b) => a.option_order - b.option_order)

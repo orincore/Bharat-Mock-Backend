@@ -25,6 +25,7 @@ const {
   removeQuestionImage,
   uploadOptionImage,
   removeOptionImage,
+  uploadExplanationImage,
   uploadExamPdfEn,
   uploadExamPdfHi,
   removeExamPdfEn,
@@ -156,6 +157,9 @@ router.put('/options/:id', checkPermission('exams', 'update'), activityLogger('U
 
 router.post('/options/:id/upload-image', checkPermission('exams', 'update'), activityLogger('UPLOAD_OPTION_IMAGE', 'option'), upload.single('image'), uploadOptionImage);
 router.delete('/options/:id/remove-image', requireRole('admin', 'editor'), activityLogger('REMOVE_OPTION_IMAGE', 'option'), removeOptionImage);
+
+// Explanation image upload endpoint (for rich text editor)
+router.post('/upload/explanation-image', checkPermission('exams', 'update'), activityLogger('UPLOAD_EXPLANATION_IMAGE', 'explanation'), upload.single('image'), uploadExplanationImage);
 
 // PDF upload endpoints for exams
 router.post('/exams/:id/upload-pdf-en', checkPermission('exams', 'update'), activityLogger('UPLOAD_EXAM_PDF_EN', 'exam'), uploadPdf.single('pdf'), uploadExamPdfEn);

@@ -18,6 +18,7 @@ const FOLDER_STRUCTURE = {
   EXAM_PDFS: 'exams/pdfs',
   QUESTION_IMAGES: 'questions/images',
   OPTION_IMAGES: 'options/images',
+  EXPLANATION_IMAGES: 'explanations/images',
   USER_AVATARS: 'users/avatars',
   CATEGORY_LOGOS: 'categories/logos',
   SUBCATEGORY_LOGOS: 'subcategories/logos'
@@ -32,6 +33,7 @@ const RESIZE_CONFIG = {
   [FOLDER_STRUCTURE.USER_AVATARS]:     { width: 256,  height: 256,  quality: 85 },
   [FOLDER_STRUCTURE.QUESTION_IMAGES]:  { width: 1200, height: 900,  quality: 85 },
   [FOLDER_STRUCTURE.OPTION_IMAGES]:    { width: 600,  height: 400,  quality: 85 },
+  [FOLDER_STRUCTURE.EXPLANATION_IMAGES]:{ width: 1200, height: 900,  quality: 85 },
 };
 
 const IMAGE_MIME_TYPES = new Set([
@@ -165,6 +167,10 @@ const uploadOptionImage = async (file) => {
   return uploadFile(file, FOLDER_STRUCTURE.OPTION_IMAGES);
 };
 
+const uploadExplanationImage = async (file) => {
+  return uploadFile(file, FOLDER_STRUCTURE.EXPLANATION_IMAGES);
+};
+
 const uploadUserAvatar = async (file) => {
   return uploadFile(file, FOLDER_STRUCTURE.USER_AVATARS);
 };
@@ -238,6 +244,7 @@ module.exports = {
   uploadExamPdfHi,
   uploadQuestionImage,
   uploadOptionImage,
+  uploadExplanationImage,
   uploadUserAvatar,
   uploadCategoryLogo,
   uploadSubcategoryLogo,
