@@ -46,6 +46,7 @@ const testSeriesRoutes = require('./routes/testSeriesRoutes');
 const paperSectionsRoutes = require('./routes/paperSectionsRoutes');
 const currentAffairsRoutes = require('./routes/currentAffairsRoutes');
 const activityLogRoutes = require('./routes/activityLogRoutes');
+const sitemapRoutes = require('./routes/sitemapRoutes');
 
 const app = express();
 
@@ -157,6 +158,7 @@ app.use(`/api/${API_VERSION}/paper-sections`, paperSectionsRoutes);
 app.use(`/api/${API_VERSION}/current-affairs`, currentAffairsRoutes);
 app.use(`/api/${API_VERSION}/init`, initRoutes);
 app.use(`/api/${API_VERSION}/activity`, activityLogRoutes);
+app.use(`/api/${API_VERSION}/sitemap`, sitemapRoutes);
 
 const GRAPHQL_PATH = process.env.GRAPHQL_PATH || '/api/graphql';
 const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_FILE_SIZE, 10) || 5242880; // 5MB default

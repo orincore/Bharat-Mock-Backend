@@ -2728,7 +2728,7 @@ const uploadExplanationImageController = async (req, res) => {
 const uploadExamPdfEnController = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -2736,10 +2736,10 @@ const uploadExamPdfEnController = async (req, res) => {
       });
     }
 
-    // Check if exam exists
+    // Check if exam exists and get title
     const { data: exam, error: examError } = await supabase
       .from('exams')
-      .select('id, pdf_url_en')
+      .select('id, title, pdf_url_en')
       .eq('id', id)
       .single();
 
@@ -2763,8 +2763,8 @@ const uploadExamPdfEnController = async (req, res) => {
       }
     }
 
-    // Upload new PDF
-    const pdfResult = await uploadExamPdfEn(req.file);
+    // Upload new PDF with exam title as filename
+    const pdfResult = await uploadExamPdfEn(req.file, exam.title);
     
     // Update exam with new PDF URL
     const { error: updateError } = await supabase
@@ -2800,7 +2800,7 @@ const uploadExamPdfEnController = async (req, res) => {
 const uploadExamPdfHiController = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -2808,10 +2808,10 @@ const uploadExamPdfHiController = async (req, res) => {
       });
     }
 
-    // Check if exam exists
+    // Check if exam exists and get title
     const { data: exam, error: examError } = await supabase
       .from('exams')
-      .select('id, pdf_url_hi')
+      .select('id, title, pdf_url_hi')
       .eq('id', id)
       .single();
 
@@ -2835,8 +2835,8 @@ const uploadExamPdfHiController = async (req, res) => {
       }
     }
 
-    // Upload new PDF
-    const pdfResult = await uploadExamPdfHi(req.file);
+    // Upload new PDF with exam title as filename
+    const pdfResult = await uploadExamPdfHi(req.file, exam.title);
     
     // Update exam with new PDF URL
     const { error: updateError } = await supabase

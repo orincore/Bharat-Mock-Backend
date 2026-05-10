@@ -183,12 +183,29 @@ const uploadSubcategoryLogo = async (file) => {
   return uploadFile(file, FOLDER_STRUCTURE.SUBCATEGORY_LOGOS);
 };
 
-const uploadExamPdfEn = async (file) => {
-  return uploadFile(file, FOLDER_STRUCTURE.EXAM_PDFS);
+const sanitizeFilename = (filename) => {
+  return filename
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/--+/g, '-')
+    .substring(0, 100); // Limit length
 };
 
-const uploadExamPdfHi = async (file) => {
-  return uploadFile(file, FOLDER_STRUCTURE.EXAM_PDFS);
+const uploadExamPdfEn = async (file, examTitle = null) => {
+  const customFileName = examTitle
+    ? `${sanitizeFilename(examTitle)}-english.pdf`
+    : null;
+  return uploadFile(file, FOLDER_STRUCTURE.EXAM_PDFS, customFileName);
+};
+
+const uploadExamPdfHi = async (file, examTitle = null) => {
+  const customFileName = examTitle
+    ? `${sanitizeFilename(examTitle)}-hindi.pdf`
+    : null;
+  return uploadFile(file, FOLDER_STRUCTURE.EXAM_PDFS, customFileName);
 };
 
 const extractKeyFromUrl = (url) => {
