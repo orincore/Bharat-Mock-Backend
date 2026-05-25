@@ -218,6 +218,10 @@ const CACHE_TTL = {
   EXAM_DETAILS:  1800,
   SEARCH_RESULTS: 300,  // 5 min
   USER_SPECIFIC:  300,
+  PAGE_CONTENT:  1800,  // 30 min — subcategory & category page content
+  HOMEPAGE:      1800,  // 30 min — homepage aggregated data
+  NAVIGATION:   86400,  // 24 hr  — navigation links
+  TAXONOMY:     86400,  // 24 hr  — categories & subcategories
 };
 
 const buildCacheKey = (prefix, ...parts) =>

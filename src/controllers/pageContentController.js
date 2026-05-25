@@ -1,6 +1,17 @@
 const supabase = require('../config/database');
 const { uploadToR2 } = require('../utils/fileUpload');
 const { slugify } = require('../utils/slugify');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+const PAGE_CONTENT_TTL = 1800; // 30 minutes — invalidated on every write
+const cacheKeyFor = (subcategoryId) => buildCacheKey('page_content', subcategoryId);
+
+const invalidatePageCache = async (subcategoryId) => {
+  if (!subcategoryId) return;
+  const key = cacheKeyFor(subcategoryId);
+  await redisCache.del(key);
+  console.log(`[Cache] Invalidated page content cache for subcategory: ${subcategoryId}`);
+};
 
 const buildErrorResponse = (res, message, error) => {
   console.error(message, error);
@@ -24,6 +35,17 @@ const pageContentController = {
 
       // Check if user is admin or editor - they should see ALL content including inactive
       const isAdminOrEditor = req.user?.role && ['admin', 'editor'].includes(req.user.role.toLowerCase());
+
+      // Serve from cache for public requests only (admins/editors always get fresh data)
+      if (!isAdminOrEditor) {
+        const cacheKey = cacheKeyFor(subcategoryId);
+        const cached = await redisCache.get(cacheKey);
+        if (cached) {
+          console.log(`[Cache] HIT  page_content:${subcategoryId}`);
+          return res.json(cached);
+        }
+        console.log(`[Cache] MISS page_content:${subcategoryId} — fetching from DB`);
+      }
 
       const { data: tabConfig, error: tabConfigError } = await supabase
         .from('subcategory_tab_config')
@@ -130,7 +152,7 @@ const pageContentController = {
       const tabHeadings = (seo?.structured_data?.tab_headings) || {};
       const tabSeo = (seo?.structured_data?.tab_seo) || {};
 
-      res.json({
+      const responsePayload = {
         sections: groupedBlocks,
         orphanBlocks,
         seo: seo || null,
@@ -140,7 +162,16 @@ const pageContentController = {
         tocOrder,
         tabHeadings,
         tabSeo
-      });
+      };
+
+      // Store in cache for public requests
+      if (!isAdminOrEditor) {
+        const cacheKey = cacheKeyFor(subcategoryId);
+        await redisCache.set(cacheKey, responsePayload, PAGE_CONTENT_TTL);
+        console.log(`[Cache] SET  page_content:${subcategoryId} (TTL ${PAGE_CONTENT_TTL}s)`);
+      }
+
+      res.json(responsePayload);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch page content', error);
     }
@@ -407,6 +438,7 @@ const pageContentController = {
         blocks: (refreshedBlocksResult.data || []).filter((block) => block.section_id === section.id)
       }));
 
+      await invalidatePageCache(subcategoryId);
       res.json({
         success: true,
         sections: groupedSections,
@@ -466,6 +498,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to create section', error);
       }
 
+      await invalidatePageCache(subcategoryId);
       res.status(201).json(data);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to create section', error);
@@ -520,6 +553,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to update section', error);
       }
 
+      await invalidatePageCache(data.subcategory_id);
       res.json(data);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to update section', error);
@@ -552,6 +586,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to delete section', error);
       }
 
+      await invalidatePageCache(data.subcategory_id);
       res.json({ message: 'Section deleted successfully', id: data.id });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to delete section', error);
@@ -610,6 +645,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to create block', error);
       }
 
+      await invalidatePageCache(subcategoryId);
       res.status(201).json(data);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to create block', error);
@@ -656,6 +692,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to update block', error);
       }
 
+      await invalidatePageCache(data.subcategory_id);
       res.json(data);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to update block', error);
@@ -686,6 +723,9 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to delete block', error);
       }
 
+      // Look up subcategory_id for cache invalidation (not in params for deleteBlock)
+      const { data: blockMeta } = await supabase.from('page_content_blocks').select('subcategory_id').eq('id', blockId).maybeSingle();
+      await invalidatePageCache(blockMeta?.subcategory_id);
       res.json({ message: 'Block deleted successfully' });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to delete block', error);
@@ -740,6 +780,9 @@ const pageContentController = {
         operations.blocksDeleted += blocksToDelete.length;
       }
 
+      // Invalidate cache using subcategory_id from the first block (all blocks belong to same subcategory)
+      const firstBlockSubcategoryId = blocks?.[0]?.subcategory_id;
+      if (firstBlockSubcategoryId) await invalidatePageCache(firstBlockSubcategoryId);
       res.json({ message: 'Blocks reordered successfully' });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to reorder blocks', error);
@@ -909,6 +952,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to update SEO', error);
       }
 
+      await invalidatePageCache(subcategoryId);
       res.json(data);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to update SEO', error);
@@ -1073,6 +1117,7 @@ const pageContentController = {
         }
       }
 
+      await invalidatePageCache(subcategoryId);
       res.json({ message: 'Revision restored successfully' });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to restore revision', error);
@@ -1293,6 +1338,7 @@ const pageContentController = {
         blocks: (refreshedBlocks || []).filter((block) => block.section_id === section.id)
       }));
 
+      await invalidatePageCache(subcategoryId);
       res.json({
         success: true,
         summary: operations,
@@ -1369,6 +1415,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to create custom tab', error);
       }
 
+      await invalidatePageCache(subcategoryId);
       res.status(201).json({ success: true, data });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to create custom tab', error);
@@ -1403,6 +1450,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to update custom tab', error);
       }
 
+      await invalidatePageCache(data.subcategory_id);
       res.json({ success: true, data });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to update custom tab', error);
@@ -1426,6 +1474,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to delete custom tab', error);
       }
 
+      await invalidatePageCache(subcategoryId);
       res.json({ success: true });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to delete custom tab', error);
@@ -1454,6 +1503,7 @@ const pageContentController = {
         }
       }
 
+      await invalidatePageCache(subcategoryId);
       res.json({ success: true });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to reorder custom tabs', error);
@@ -1543,6 +1593,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to initialize default tabs', error);
       }
 
+      await invalidatePageCache(subcategoryId);
       res.status(201).json({ success: true, data });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to initialize default tabs', error);
@@ -1604,6 +1655,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to create tab configuration', error);
       }
 
+      await invalidatePageCache(subcategoryId);
       res.status(201).json({ success: true, data });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to create tab configuration', error);
@@ -1637,6 +1689,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to update tab configuration', error);
       }
 
+      await invalidatePageCache(data.subcategory_id);
       res.json({ success: true, data });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to update tab configuration', error);
@@ -1660,6 +1713,7 @@ const pageContentController = {
         return buildErrorResponse(res, 'Failed to delete tab configuration', error);
       }
 
+      await invalidatePageCache(subcategoryId);
       res.json({ success: true });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to delete tab configuration', error);
@@ -1688,6 +1742,7 @@ const pageContentController = {
         }
       }
 
+      await invalidatePageCache(subcategoryId);
       res.json({ success: true });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to reorder tab configuration', error);

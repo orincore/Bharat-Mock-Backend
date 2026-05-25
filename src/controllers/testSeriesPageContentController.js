@@ -1,6 +1,16 @@
 const supabase = require('../config/database');
 const { uploadToR2 } = require('../utils/fileUpload');
 const { slugify } = require('../utils/slugify');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+const TS_CONTENT_TTL = 1800; // 30 minutes
+const tsContentKey = (testSeriesId) => buildCacheKey('ts_content', testSeriesId);
+
+const invalidateTsContentCache = async (testSeriesId) => {
+  if (!testSeriesId) return;
+  await redisCache.del(tsContentKey(testSeriesId));
+  console.log(`[Cache] Invalidated ts_content:${testSeriesId}`);
+};
 
 const buildErrorResponse = (res, message, error) => {
   console.error(message, error);
@@ -18,6 +28,13 @@ const testSeriesPageContentController = {
   getPageContent: async (req, res) => {
     try {
       const { testSeriesId } = req.params;
+
+      const cached = await redisCache.get(tsContentKey(testSeriesId));
+      if (cached) {
+        console.log(`[Cache] HIT  ts_content:${testSeriesId}`);
+        return res.json(cached);
+      }
+      console.log(`[Cache] MISS ts_content:${testSeriesId} — fetching from DB`);
 
       const { data: customTabs, error: tabsError } = await supabase
         .from('test_series_custom_tabs')
@@ -77,7 +94,7 @@ const testSeriesPageContentController = {
       const tabHeadings = (seo?.structured_data?.tab_headings) || {};
       const tabSeo = (seo?.structured_data?.tab_seo) || {};
 
-      res.json({
+      const responsePayload = {
         sections: groupedBlocks,
         orphanBlocks,
         seo: seo || null,
@@ -85,7 +102,11 @@ const testSeriesPageContentController = {
         tocOrder,
         tabHeadings,
         tabSeo
-      });
+      };
+
+      await redisCache.set(tsContentKey(testSeriesId), responsePayload, TS_CONTENT_TTL);
+      console.log(`[Cache] SET  ts_content:${testSeriesId} (TTL ${TS_CONTENT_TTL}s)`);
+      res.json(responsePayload);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch page content', error);
     }
@@ -342,6 +363,7 @@ const testSeriesPageContentController = {
         blocks: (refreshedBlocksResult.data || []).filter((block) => block.section_id === section.id)
       }));
 
+      await invalidateTsContentCache(testSeriesId);
       res.json({
         success: true,
         summary: operations,
@@ -471,6 +493,7 @@ const testSeriesPageContentController = {
         return buildErrorResponse(res, 'Failed to create custom tab', error);
       }
 
+      await invalidateTsContentCache(testSeriesId);
       res.status(201).json({ success: true, data });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to create custom tab', error);
@@ -505,6 +528,7 @@ const testSeriesPageContentController = {
         return buildErrorResponse(res, 'Failed to update custom tab', error);
       }
 
+      await invalidateTsContentCache(req.params.testSeriesId);
       res.json({ success: true, data });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to update custom tab', error);
@@ -525,6 +549,7 @@ const testSeriesPageContentController = {
         return buildErrorResponse(res, 'Failed to delete custom tab', error);
       }
 
+      await invalidateTsContentCache(testSeriesId);
       res.json({ success: true });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to delete custom tab', error);
@@ -553,6 +578,7 @@ const testSeriesPageContentController = {
         }
       }
 
+      await invalidateTsContentCache(testSeriesId);
       res.json({ success: true });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to reorder custom tabs', error);
@@ -658,6 +684,7 @@ const testSeriesPageContentController = {
         return buildErrorResponse(res, 'Failed to update SEO', error);
       }
 
+      await invalidateTsContentCache(testSeriesId);
       res.json(data);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to update SEO', error);

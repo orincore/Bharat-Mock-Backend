@@ -1,5 +1,15 @@
 const supabase = require('../config/database');
 const logger = require('../config/logger');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+const NAV_TTL = 86400; // 24 hours — navigation rarely changes, invalidated on every write
+const NAV_CACHE_KEY = buildCacheKey('navigation', 'links');
+const INIT_PUBLIC_KEY = buildCacheKey('init', 'public');
+
+const invalidateNavCache = async () => {
+  await Promise.all([redisCache.del(NAV_CACHE_KEY), redisCache.del(INIT_PUBLIC_KEY)]);
+  console.log('[Cache] Invalidated navigation:links + init:public');
+};
 
 const sanitizeNumber = (value, fallback = 0) => {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -52,6 +62,13 @@ const handleSupabaseError = (res, message, error) => {
 
 const getNavigationLinks = async (req, res) => {
   try {
+    const cached = await redisCache.get(NAV_CACHE_KEY);
+    if (cached) {
+      console.log('[Cache] HIT  navigation:links');
+      return res.json(cached);
+    }
+    console.log('[Cache] MISS navigation:links — fetching from DB');
+
     const { data, error } = await supabase
       .from('navigation_links')
       .select(safeSelect)
@@ -64,7 +81,10 @@ const getNavigationLinks = async (req, res) => {
       return handleSupabaseError(res, 'Failed to fetch navigation links', error);
     }
 
-    return res.json({ success: true, data: data || [] });
+    const responsePayload = { success: true, data: data || [] };
+    await redisCache.set(NAV_CACHE_KEY, responsePayload, NAV_TTL);
+    console.log(`[Cache] SET  navigation:links (TTL ${NAV_TTL}s)`);
+    return res.json(responsePayload);
   } catch (error) {
     return handleSupabaseError(res, 'Failed to fetch navigation links', error);
   }
@@ -104,6 +124,7 @@ const createNavigationLink = async (req, res) => {
       return handleSupabaseError(res, 'Failed to create navigation link', error);
     }
 
+    await invalidateNavCache();
     return res.status(201).json({ success: true, data });
   } catch (error) {
     if (error.message?.includes('required')) {
@@ -138,6 +159,7 @@ const updateNavigationLink = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Navigation link not found' });
     }
 
+    await invalidateNavCache();
     return res.json({ success: true, data });
   } catch (error) {
     if (error.message?.includes('required')) {
@@ -164,6 +186,7 @@ const deleteNavigationLink = async (req, res) => {
       return handleSupabaseError(res, 'Failed to delete navigation link', error);
     }
 
+    await invalidateNavCache();
     return res.json({ success: true, message: 'Navigation link deleted successfully' });
   } catch (error) {
     return handleSupabaseError(res, 'Failed to delete navigation link', error);
@@ -192,6 +215,7 @@ const reorderNavigationLinks = async (req, res) => {
       return handleSupabaseError(res, 'Failed to reorder navigation links', error);
     }
 
+    await invalidateNavCache();
     return getAdminNavigationLinks(req, res);
   } catch (error) {
     return handleSupabaseError(res, 'Failed to reorder navigation links', error);

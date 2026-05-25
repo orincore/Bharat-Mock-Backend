@@ -1,6 +1,19 @@
 const supabase = require('../config/database');
 const { uploadToR2 } = require('../utils/fileUpload');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+const BLOG_TTL = 1800; // 30 minutes — invalidated on every write
+const blogSlugKey  = (slug)   => buildCacheKey('blog_slug', slug);
+const blogContentKey = (blogId) => buildCacheKey('blog_content', blogId);
+
+const invalidateBlogCache = async (blogId, slug) => {
+  const ops = [];
+  if (blogId) ops.push(redisCache.del(blogContentKey(blogId)));
+  if (slug)   ops.push(redisCache.del(blogSlugKey(slug)));
+  await Promise.all(ops);
+  console.log(`[Cache] Invalidated blog cache — blogId: ${blogId || 'n/a'}, slug: ${slug || 'n/a'}`);
+};
 
 const buildErrorResponse = (res, message, error) => {
   console.error(message, error);
@@ -116,6 +129,20 @@ const blogController = {
   async getBlogBySlug(req, res) {
     try {
       const { slug } = req.params;
+      const isPrivileged = req.user && ['admin', 'editor', 'author'].includes(req.user.role);
+
+      // Serve from cache for public requests
+      if (!isPrivileged) {
+        const cacheKey = blogSlugKey(slug);
+        const cached = await redisCache.get(cacheKey);
+        if (cached) {
+          console.log(`[Cache] HIT  blog_slug:${slug}`);
+          // Still increment view count fire-and-forget
+          supabase.from('blogs').update({ view_count: (cached.data?.view_count || 0) + 1 }).eq('id', cached.data?.id);
+          return res.json(cached);
+        }
+        console.log(`[Cache] MISS blog_slug:${slug} — fetching from DB`);
+      }
 
       const { data, error } = await supabase
         .from('blogs')
@@ -125,6 +152,10 @@ const blogController = {
 
       if (error || !data) {
         return res.status(404).json({ error: 'Blog not found' });
+      }
+
+      if (!isPrivileged && !data.is_published) {
+        return res.status(403).json({ error: 'Blog not published yet' });
       }
 
       // Increment view count
@@ -144,7 +175,15 @@ const blogController = {
         author = authorData || null;
       }
 
-      res.json({ success: true, data: { ...data, author } });
+      const responsePayload = { success: true, data: { ...data, author } };
+
+      // Cache for public published blogs only
+      if (!isPrivileged && data.is_published) {
+        await redisCache.set(blogSlugKey(slug), responsePayload, BLOG_TTL);
+        console.log(`[Cache] SET  blog_slug:${slug} (TTL ${BLOG_TTL}s)`);
+      }
+
+      res.json(responsePayload);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch blog', error);
     }
@@ -181,6 +220,18 @@ const blogController = {
   async getBlogContent(req, res) {
     try {
       const { blogId } = req.params;
+      const isPrivileged = req.user && ['admin', 'editor', 'author'].includes(req.user.role);
+
+      // Serve from cache for public requests
+      if (!isPrivileged) {
+        const cacheKey = blogContentKey(blogId);
+        const cached = await redisCache.get(cacheKey);
+        if (cached) {
+          console.log(`[Cache] HIT  blog_content:${blogId}`);
+          return res.json(cached);
+        }
+        console.log(`[Cache] MISS blog_content:${blogId} — fetching from DB`);
+      }
 
       const { data: blog, error: blogError } = await supabase
         .from('blogs')
@@ -192,7 +243,6 @@ const blogController = {
         return res.status(404).json({ error: 'Blog not found' });
       }
 
-      const isPrivileged = req.user && ['admin', 'editor', 'author'].includes(req.user.role);
       if (!isPrivileged && !blog.is_published) {
         return res.status(403).json({ error: 'Blog not published yet' });
       }
@@ -229,10 +279,15 @@ const blogController = {
         blocks: blocks.filter(block => block.section_id === section.id)
       }));
 
-      res.json({
-        success: true,
-        sections: sectionsWithBlocks
-      });
+      const responsePayload = { success: true, sections: sectionsWithBlocks };
+
+      // Cache for public published blogs only
+      if (!isPrivileged && blog.is_published) {
+        await redisCache.set(blogContentKey(blogId), responsePayload, BLOG_TTL);
+        console.log(`[Cache] SET  blog_content:${blogId} (TTL ${BLOG_TTL}s)`);
+      }
+
+      res.json(responsePayload);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch blog content', error);
     }
@@ -429,6 +484,8 @@ const blogController = {
         return buildErrorResponse(res, 'Failed to update blog', error);
       }
 
+      // Invalidate both slug and content caches
+      await invalidateBlogCache(blogId, data.slug);
       res.json({ success: true, data });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to update blog', error);
@@ -449,6 +506,7 @@ const blogController = {
         return buildErrorResponse(res, 'Failed to delete blog', error);
       }
 
+      await invalidateBlogCache(blogId, null);
       res.json({ success: true, message: 'Blog deleted successfully' });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to delete blog', error);
@@ -545,6 +603,7 @@ const blogController = {
         }
       }
 
+      await invalidateBlogCache(blogId, null);
       res.json({ success: true, message: 'Blog content synced successfully' });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to sync blog content', error);

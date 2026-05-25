@@ -2,6 +2,29 @@ const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 const { uploadCategoryLogo, uploadSubcategoryLogo, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+const TAXONOMY_TTL = 86400; // 24 hours — invalidated on every write
+const CATEGORIES_CACHE_KEY = buildCacheKey('taxonomy', 'categories');
+const categorySlugKey = (slug) => buildCacheKey('taxonomy', 'category', slug);
+const subcategoriesKey = (categoryId) => buildCacheKey('taxonomy', 'subcategories', categoryId);
+const INIT_PUBLIC_KEY = buildCacheKey('init', 'public');
+
+// Invalidates the categories list + a specific slug key + init:public (init embeds categories)
+const invalidateCategoryCache = async (slug) => {
+  const ops = [redisCache.del(CATEGORIES_CACHE_KEY), redisCache.del(INIT_PUBLIC_KEY)];
+  if (slug) ops.push(redisCache.del(categorySlugKey(slug)));
+  await Promise.all(ops);
+  console.log(`[Cache] Invalidated taxonomy:categories + init:public${slug ? ` + taxonomy:category:${slug}` : ''}`);
+};
+
+// Subcategory changes invalidate categories list, init:public, and the per-category subcategories cache
+const invalidateSubcategoryCache = async (categoryId) => {
+  const ops = [redisCache.del(CATEGORIES_CACHE_KEY), redisCache.del(INIT_PUBLIC_KEY)];
+  if (categoryId) ops.push(redisCache.del(subcategoriesKey(categoryId)));
+  await Promise.all(ops);
+  console.log(`[Cache] Invalidated taxonomy:categories + init:public${categoryId ? ` + taxonomy:subcategories:${categoryId}` : ''} (subcategory change)`);
+};
 
 const fetchSubcategoryRecord = async (categoryId, subcategorySlug, select = 'id, name, slug, description, category_id, logo_url, display_order, is_active, created_at, updated_at', includeActiveFilter = true) => {
   let baseQuery = supabase
@@ -74,6 +97,7 @@ const deleteSubcategory = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to delete subcategory' });
     }
 
+    await invalidateSubcategoryCache(subcategory.category_id);
     res.json({ success: true, message: 'Subcategory deleted successfully' });
   } catch (error) {
     logger.error('Delete subcategory error:', error);
@@ -220,6 +244,7 @@ deleteCategory = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to delete category' });
     }
 
+    await invalidateCategoryCache(category?.slug);
     res.json({
       success: true,
       message: `Category deleted along with ${allExams.length} exam(s) and ${subIds.length} subcategory(ies)`
@@ -233,6 +258,17 @@ deleteCategory = async (req, res) => {
 const getCategories = async (req, res) => {
   try {
     const { search } = req.query;
+
+    // Only cache unfiltered requests (no search param)
+    if (!search) {
+      const cached = await redisCache.get(CATEGORIES_CACHE_KEY);
+      if (cached) {
+        console.log('[Cache] HIT  taxonomy:categories');
+        return res.json(cached);
+      }
+      console.log('[Cache] MISS taxonomy:categories — fetching from DB');
+    }
+
     let query = supabase
       .from('exam_categories')
       .select('id, name, slug, description, logo_url, icon, display_order, is_active, created_at, updated_at')
@@ -250,7 +286,14 @@ const getCategories = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to fetch categories' });
     }
 
-    res.json({ success: true, data });
+    const responsePayload = { success: true, data };
+
+    if (!search) {
+      await redisCache.set(CATEGORIES_CACHE_KEY, responsePayload, TAXONOMY_TTL);
+      console.log(`[Cache] SET  taxonomy:categories (TTL ${TAXONOMY_TTL}s)`);
+    }
+
+    res.json(responsePayload);
   } catch (error) {
     logger.error('Get categories error:', error);
     res.status(500).json({ success: false, message: 'Server error while fetching categories' });
@@ -296,6 +339,7 @@ const createCategory = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to create category' });
     }
 
+    await invalidateCategoryCache(null);
     res.status(201).json({ success: true, data });
   } catch (error) {
     logger.error('Create category error:', error);
@@ -364,6 +408,8 @@ const updateCategory = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to update category' });
     }
 
+    // Invalidate both the list and the old + new slug keys
+    await invalidateCategoryCache(data?.slug);
     res.json({ success: true, data });
   } catch (error) {
     logger.error('Update category error:', error);
@@ -374,6 +420,18 @@ const updateCategory = async (req, res) => {
 const getSubcategories = async (req, res) => {
   try {
     const { category_id, search } = req.query;
+
+    // Cache per-category filtered requests (skip cache for search or unfiltered)
+    const canCache = category_id && !search;
+    if (canCache) {
+      const cacheKey = subcategoriesKey(category_id);
+      const cached = await redisCache.get(cacheKey);
+      if (cached) {
+        console.log(`[Cache] HIT  taxonomy:subcategories:${category_id}`);
+        return res.json(cached);
+      }
+      console.log(`[Cache] MISS taxonomy:subcategories:${category_id} — fetching from DB`);
+    }
 
     const baseSelect = 'id, category_id, name, slug, description, logo_url, display_order, is_active, created_at, updated_at, exam_categories(name, slug)';
     let query = supabase
@@ -412,7 +470,14 @@ const getSubcategories = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to fetch subcategories' });
     }
 
-    res.json({ success: true, data });
+    const responsePayload = { success: true, data };
+
+    if (canCache) {
+      await redisCache.set(subcategoriesKey(category_id), responsePayload, TAXONOMY_TTL);
+      console.log(`[Cache] SET  taxonomy:subcategories:${category_id} (TTL ${TAXONOMY_TTL}s)`);
+    }
+
+    res.json(responsePayload);
   } catch (error) {
     logger.error('Get subcategories error:', error);
     res.status(500).json({ success: false, message: 'Server error while fetching subcategories' });
@@ -468,6 +533,7 @@ const createSubcategory = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to create subcategory' });
     }
 
+    await invalidateSubcategoryCache(category_id);
     res.status(201).json({ success: true, data });
   } catch (error) {
     logger.error('Create subcategory error:', error);
@@ -552,6 +618,7 @@ const updateSubcategory = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to update subcategory' });
     }
 
+    await invalidateSubcategoryCache(existingSubcategory.category_id);
     res.json({ success: true, data });
   } catch (error) {
     logger.error('Update subcategory error:', error);
@@ -632,6 +699,14 @@ const getCategoryBySlug = async (req, res) => {
   try {
     const { slug } = req.params;
 
+    const cacheKey = categorySlugKey(slug);
+    const cached = await redisCache.get(cacheKey);
+    if (cached) {
+      console.log(`[Cache] HIT  taxonomy:category:${slug}`);
+      return res.json(cached);
+    }
+    console.log(`[Cache] MISS taxonomy:category:${slug} — fetching from DB`);
+
     const { data: categories, error } = await supabase
       .from('exam_categories')
       .select('id, name, slug, description, logo_url, icon')
@@ -643,7 +718,10 @@ const getCategoryBySlug = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
-    res.json({ success: true, data: category });
+    const responsePayload = { success: true, data: category };
+    await redisCache.set(cacheKey, responsePayload, TAXONOMY_TTL);
+    console.log(`[Cache] SET  taxonomy:category:${slug} (TTL ${TAXONOMY_TTL}s)`);
+    res.json(responsePayload);
   } catch (error) {
     logger.error('Get category by slug error:', error);
     res.status(500).json({ success: false, message: 'Server error while fetching category' });

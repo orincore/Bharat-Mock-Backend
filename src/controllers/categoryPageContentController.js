@@ -1,6 +1,17 @@
 const supabase = require('../config/database');
 const { uploadToR2 } = require('../utils/fileUpload');
 const { slugify } = require('../utils/slugify');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+const PAGE_CONTENT_TTL = 1800; // 30 minutes — invalidated on every write
+const cacheKeyFor = (categoryId) => buildCacheKey('category_page_content', categoryId);
+
+const invalidateCategoryCache = async (categoryId) => {
+  if (!categoryId) return;
+  const key = cacheKeyFor(categoryId);
+  await redisCache.del(key);
+  console.log(`[Cache] Invalidated category page content cache for category: ${categoryId}`);
+};
 
 const buildErrorResponse = (res, message, error) => {
   console.error(message, error);
@@ -18,6 +29,18 @@ const categoryPageContentController = {
   getPageContent: async (req, res) => {
     try {
       const { categoryId } = req.params;
+
+      // Serve from cache for public requests (admins always get fresh data)
+      const isAdminOrEditor = req.user?.role && ['admin', 'editor'].includes(req.user.role.toLowerCase());
+      if (!isAdminOrEditor) {
+        const cacheKey = cacheKeyFor(categoryId);
+        const cached = await redisCache.get(cacheKey);
+        if (cached) {
+          console.log(`[Cache] HIT  category_page_content:${categoryId}`);
+          return res.json(cached);
+        }
+        console.log(`[Cache] MISS category_page_content:${categoryId} — fetching from DB`);
+      }
 
       const { data: customTabs, error: tabsError } = await supabase
         .from('category_custom_tabs')
@@ -77,7 +100,7 @@ const categoryPageContentController = {
       const tabHeadings = (seo?.structured_data?.tab_headings) || {};
       const tabSeo = (seo?.structured_data?.tab_seo) || {};
 
-      res.json({
+      const responsePayload = {
         sections: groupedBlocks,
         orphanBlocks,
         seo: seo || null,
@@ -85,7 +108,15 @@ const categoryPageContentController = {
         tocOrder,
         tabHeadings,
         tabSeo
-      });
+      };
+
+      if (!isAdminOrEditor) {
+        const cacheKey = cacheKeyFor(categoryId);
+        await redisCache.set(cacheKey, responsePayload, PAGE_CONTENT_TTL);
+        console.log(`[Cache] SET  category_page_content:${categoryId} (TTL ${PAGE_CONTENT_TTL}s)`);
+      }
+
+      res.json(responsePayload);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to fetch page content', error);
     }
@@ -342,6 +373,7 @@ const categoryPageContentController = {
         blocks: (refreshedBlocksResult.data || []).filter((block) => block.section_id === section.id)
       }));
 
+      await invalidateCategoryCache(categoryId);
       res.json({
         success: true,
         summary: operations,
@@ -471,6 +503,7 @@ const categoryPageContentController = {
         return buildErrorResponse(res, 'Failed to create custom tab', error);
       }
 
+      await invalidateCategoryCache(categoryId);
       res.status(201).json({ success: true, data });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to create custom tab', error);
@@ -505,6 +538,7 @@ const categoryPageContentController = {
         return buildErrorResponse(res, 'Failed to update custom tab', error);
       }
 
+      await invalidateCategoryCache(data.category_id);
       res.json({ success: true, data });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to update custom tab', error);
@@ -525,6 +559,7 @@ const categoryPageContentController = {
         return buildErrorResponse(res, 'Failed to delete custom tab', error);
       }
 
+      await invalidateCategoryCache(categoryId);
       res.json({ success: true });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to delete custom tab', error);
@@ -553,6 +588,7 @@ const categoryPageContentController = {
         }
       }
 
+      await invalidateCategoryCache(categoryId);
       res.json({ success: true });
     } catch (error) {
       return buildErrorResponse(res, 'Failed to reorder custom tabs', error);
@@ -658,6 +694,7 @@ const categoryPageContentController = {
         return buildErrorResponse(res, 'Failed to update SEO', error);
       }
 
+      await invalidateCategoryCache(categoryId);
       res.json(data);
     } catch (error) {
       return buildErrorResponse(res, 'Failed to update SEO', error);

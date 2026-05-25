@@ -1,6 +1,11 @@
 const supabase = require('../config/database');
 const logger = require('../config/logger');
-const { getCache, setCache } = require('../utils/cache');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+const INIT_PUBLIC_TTL = 1800; // 30 min — public (no user), invalidated via nav/taxonomy writes
+const INIT_USER_TTL  = 60;   // 1 min  — per-user (includes profile/subscription)
+const INIT_PUBLIC_KEY = buildCacheKey('init', 'public');
+const initUserKey = (userId) => buildCacheKey('init', 'user', userId);
 
 const normalizePlanRecord = (planData) => {
   if (!planData) return null;
@@ -16,18 +21,17 @@ const normalizePlanRecord = (planData) => {
   };
 };
 
-const INIT_CACHE_TTL = 300;
-const INIT_CACHE_KEY = 'app:init:public';
-
 const getAppInit = async (req, res) => {
   try {
     const isAuthenticated = Boolean(req.user?.id);
-    const cacheKey = isAuthenticated ? `app:init:user:${req.user.id}` : INIT_CACHE_KEY;
+    const cacheKey = isAuthenticated ? initUserKey(req.user.id) : INIT_PUBLIC_KEY;
 
-    const cached = getCache(cacheKey);
+    const cached = await redisCache.get(cacheKey);
     if (cached) {
+      console.log(`[Cache] HIT  ${cacheKey}`);
       return res.json(cached);
     }
+    console.log(`[Cache] MISS ${cacheKey} — fetching from DB`);
 
     const promises = [
       supabase
@@ -147,8 +151,9 @@ const getAppInit = async (req, res) => {
       },
     };
 
-    const ttl = isAuthenticated ? 60 : INIT_CACHE_TTL;
-    setCache(cacheKey, response, ttl);
+    const ttl = isAuthenticated ? INIT_USER_TTL : INIT_PUBLIC_TTL;
+    await redisCache.set(cacheKey, response, ttl);
+    console.log(`[Cache] SET  ${cacheKey} (TTL ${ttl}s)`);
 
     return res.json(response);
   } catch (error) {

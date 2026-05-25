@@ -1,4 +1,14 @@
 const logger = require('../config/logger');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+const PLANS_TTL = 3600; // 1 hour — invalidated on every plan write
+const PLANS_CACHE_KEY = buildCacheKey('subscription', 'plans');
+
+const invalidatePlansCache = async () => {
+  await redisCache.del(PLANS_CACHE_KEY);
+  console.log('[Cache] Invalidated subscription:plans');
+};
+
 const {
   listPlans,
   createPlan,
@@ -103,8 +113,18 @@ const applyDiscount = (amountCents, promo) => {
 
 const getPlans = async (req, res) => {
   try {
+    const cached = await redisCache.get(PLANS_CACHE_KEY);
+    if (cached) {
+      console.log('[Cache] HIT  subscription:plans');
+      return res.json(cached);
+    }
+    console.log('[Cache] MISS subscription:plans — fetching from DB');
+
     const plans = await listPlans();
-    res.json({ success: true, data: plans });
+    const responsePayload = { success: true, data: plans };
+    await redisCache.set(PLANS_CACHE_KEY, responsePayload, PLANS_TTL);
+    console.log(`[Cache] SET  subscription:plans (TTL ${PLANS_TTL}s)`);
+    res.json(responsePayload);
   } catch (error) {
     logger.error('Failed to fetch plans:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch subscription plans' });
@@ -166,6 +186,7 @@ const adminCreatePlan = async (req, res) => {
     }
 
     const plan = await createPlan(payload);
+    await invalidatePlansCache();
     res.status(201).json({ success: true, data: plan });
   } catch (error) {
     logger.error('Failed to create plan:', error);
@@ -226,6 +247,7 @@ const adminUpdatePlan = async (req, res) => {
     }
 
     const plan = await updatePlan(req.params.planId, payload);
+    await invalidatePlansCache();
     res.json({ success: true, data: plan });
   } catch (error) {
     logger.error('Failed to update plan:', error);
@@ -240,6 +262,7 @@ const adminTogglePlan = async (req, res) => {
       return res.status(400).json({ success: false, message: 'is_active flag required' });
     }
     const plan = await togglePlan(req.params.planId, is_active);
+    await invalidatePlansCache();
     res.json({ success: true, data: plan });
   } catch (error) {
     logger.error('Failed to toggle plan:', error);

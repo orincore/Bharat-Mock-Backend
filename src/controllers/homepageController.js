@@ -1,6 +1,15 @@
 const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { uploadToR2 } = require('../utils/fileUpload');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+const HOMEPAGE_TTL = 1800; // 30 minutes
+const HOMEPAGE_CACHE_KEY = buildCacheKey('homepage', 'data');
+
+const invalidateHomepageCache = async () => {
+  await redisCache.del(HOMEPAGE_CACHE_KEY);
+  console.log('[Cache] Invalidated homepage:data');
+};
 
 const DEFAULT_SLUG = 'default';
 
@@ -139,6 +148,7 @@ const upsertHero = async (req, res) => {
       return res.status(500).json(formatError('Failed to save homepage hero content'));
     }
 
+    await invalidateHomepageCache();
     return res.json({ success: true, data });
   } catch (error) {
     logger.error('Upsert homepage hero exception:', error);
@@ -205,6 +215,14 @@ const fetchBanners = async (onlyActive = true) => {
 
 const getHomepageData = async (req, res) => {
   try {
+    // Serve from cache (homepage data is public, no user-specific content)
+    const cached = await redisCache.get(HOMEPAGE_CACHE_KEY);
+    if (cached) {
+      console.log('[Cache] HIT  homepage:data');
+      return res.json(cached);
+    }
+    console.log('[Cache] MISS homepage:data — fetching from DB');
+
     const [heroResult, categoriesResult, examsResult, blogsResult, banners] = await Promise.all([
       supabase
         .from('homepage_hero')
@@ -297,7 +315,7 @@ const getHomepageData = async (req, res) => {
       }
     }
 
-    return res.json({
+    const responsePayload = {
       success: true,
       data: {
         hero: heroResult.data || null,
@@ -309,7 +327,12 @@ const getHomepageData = async (req, res) => {
         featuredExams,
         featuredArticles
       }
-    });
+    };
+
+    await redisCache.set(HOMEPAGE_CACHE_KEY, responsePayload, HOMEPAGE_TTL);
+    console.log(`[Cache] SET  homepage:data (TTL ${HOMEPAGE_TTL}s)`);
+
+    return res.json(responsePayload);
   } catch (error) {
     logger.error('Get homepage data error:', error);
     return res.status(500).json(formatError('Failed to fetch homepage data'));
@@ -375,6 +398,7 @@ const createBanner = async (req, res) => {
       return res.status(500).json(formatError('Failed to create banner'));
     }
 
+    await invalidateHomepageCache();
     return res.json({ success: true, data });
   } catch (error) {
     logger.error('Create banner exception:', error);
@@ -416,6 +440,7 @@ const updateBanner = async (req, res) => {
       return res.status(404).json(formatError('Banner not found or failed to update'));
     }
 
+    await invalidateHomepageCache();
     return res.json({ success: true, data });
   } catch (error) {
     logger.error('Update banner exception:', error);
@@ -440,6 +465,7 @@ const deleteBanner = async (req, res) => {
       return res.status(500).json(formatError('Failed to delete banner'));
     }
 
+    await invalidateHomepageCache();
     return res.json({ success: true });
   } catch (error) {
     logger.error('Delete banner exception:', error);
@@ -463,6 +489,7 @@ const reorderBanners = async (req, res) => {
 
     await Promise.all(updates);
 
+    await invalidateHomepageCache();
     return res.json({ success: true });
   } catch (error) {
     logger.error('Reorder banners error:', error);
