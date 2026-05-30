@@ -469,13 +469,25 @@ const getTestSeriesBySlug = async (req, res) => {
 const createTestSeries = async (req, res) => {
   try {
     const {
-      title, description, category_id, subcategory_id, difficulty_id,
+      title, slug: customSlug, description, category_id, subcategory_id, difficulty_id,
       is_published, is_free, price, display_order, logo_url, thumbnail_url,
     } = req.body;
 
     if (!title) return res.status(400).json({ error: 'Title is required' });
 
-    const baseSlug = slugify(title);
+    // Allow an admin-provided custom slug, otherwise derive it from the title.
+    let baseSlug;
+    if (customSlug !== undefined && customSlug !== null && String(customSlug).trim() !== '') {
+      baseSlug = slugify(customSlug);
+      if (!baseSlug) {
+        return res.status(400).json({
+          error: 'Invalid slug',
+          message: 'The slug must contain at least one letter or number.',
+        });
+      }
+    } else {
+      baseSlug = slugify(title);
+    }
     const slug = await ensureUniqueSlug(supabase, 'test_series', baseSlug);
 
     const { data: testSeries, error } = await supabase
@@ -508,16 +520,46 @@ const updateTestSeries = async (req, res) => {
   try {
     const { id } = req.params;
     const {
-      title, description, category_id, subcategory_id, difficulty_id,
+      title, slug, description, category_id, subcategory_id, difficulty_id,
       is_published, is_free, price, display_order, logo_url, thumbnail_url,
     } = req.body;
 
     const updateData = { updated_at: new Date().toISOString() };
 
-    if (title !== undefined) {
-      updateData.title = title;
-      const baseSlug = slugify(title);
-      updateData.slug = await ensureUniqueSlug(supabase, 'test_series', baseSlug, { excludeId: id });
+    if (title !== undefined) updateData.title = title;
+
+    // An explicit `slug` lets the admin set a custom, stable public URL.
+    // It takes precedence and is validated for format + uniqueness so that
+    // renaming the title never silently changes a curated URL.
+    if (slug !== undefined) {
+      const desiredSlug = slugify(slug);
+      if (!desiredSlug) {
+        return res.status(400).json({
+          error: 'Invalid slug',
+          message: 'The slug must contain at least one letter or number.',
+        });
+      }
+
+      const { data: slugConflict, error: slugCheckError } = await supabase
+        .from('test_series')
+        .select('id')
+        .eq('slug', desiredSlug)
+        .neq('id', id)
+        .maybeSingle();
+
+      if (slugCheckError && slugCheckError.code !== 'PGRST116') {
+        logger.error('Error checking slug uniqueness:', slugCheckError);
+        return res.status(500).json({ error: 'Failed to validate slug' });
+      }
+
+      if (slugConflict) {
+        return res.status(409).json({
+          error: 'Slug already in use',
+          message: `The slug "${desiredSlug}" is already used by another test series. Please choose a different one.`,
+        });
+      }
+
+      updateData.slug = desiredSlug;
     }
     if (description !== undefined) updateData.description = description;
     if (category_id !== undefined) updateData.category_id = category_id;
