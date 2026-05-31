@@ -409,6 +409,25 @@ const pageContentController = {
         ]);
       }
 
+      // Reconcile: the client always submits the FULL set of sections, so any section
+      // that existed before but is no longer present was removed by the user. Delete
+      // those orphans even if they weren't listed in deletedSectionIds — this is what
+      // makes a deleted sidebar (or any removed section) actually disappear instead of
+      // lingering. Guarded by `sections.length` so an empty/malformed payload can never
+      // wipe the whole page.
+      if (sections.length > 0) {
+        const keepIds = new Set(upsertedSectionIds.map((id) => String(id)));
+        const orphanIds = (existingSectionsResult.data || [])
+          .map((s) => s.id)
+          .filter((id) => !keepIds.has(String(id)));
+        if (orphanIds.length) {
+          await Promise.all([
+            supabase.from('page_content_blocks').delete().in('section_id', orphanIds),
+            supabase.from('page_sections').delete().in('id', orphanIds),
+          ]);
+        }
+      }
+
       // Fetch refreshed data in parallel — use high limit to avoid Supabase's default 1000-row cap
       const [refreshedSectionsResult, refreshedBlocksResult] = await Promise.all([
         supabase
