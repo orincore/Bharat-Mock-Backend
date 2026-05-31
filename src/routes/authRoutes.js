@@ -11,7 +11,8 @@ router.post('/register',
     body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
     body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
     body('name').trim().notEmpty().withMessage('Name is required'),
-    body('phone').optional().isMobilePhone().withMessage('Valid phone number required'),
+    body('phone').trim().notEmpty().withMessage('Phone number is required')
+      .bail().isMobilePhone('any').withMessage('Valid phone number required'),
     validate
   ],
   authController.register
