@@ -1,5 +1,24 @@
 const supabase = require('../config/database');
 const logger = require('../config/logger');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+// Bust all language variants of an exam's translation cache
+const bustExamTranslationCache = async (examId) => {
+  if (!examId) return;
+  await redisCache.deleteByPattern(buildCacheKey('exam_translations', examId, '*'));
+  logger.info(`[Cache] Busted exam_translations:${examId}:*`);
+};
+
+// Bust the cached exam listings + the derived "years" filter.
+// The year filter on exam pages is computed from published exams' exam_date and
+// cached under `exam_years`; the per-query exam listings embed that years array.
+// Call this after any create/update/delete so a removed/changed year disappears
+// from the filter immediately instead of lingering until the cache TTL expires.
+const bustExamListCaches = async () => {
+  await redisCache.del(buildCacheKey('exam_years'));
+  await redisCache.deleteByPattern(buildCacheKey('exams', '*'));
+  logger.info('[Cache] Busted exam_years + exams:* listings');
+};
 const { uploadExamLogo, uploadExamThumbnail, uploadExamPdfEn, uploadExamPdfHi, uploadQuestionImage, uploadOptionImage, uploadExplanationImage, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 const { sendRoleChangedEmail, sendSubscriptionActivatedEmail } = require('../utils/emailService');
@@ -676,6 +695,9 @@ const createExam = async (req, res) => {
       }
     }
 
+    // New exam_date may introduce a new year into the filter.
+    await bustExamListCaches();
+
     res.status(201).json({
       success: true,
       message: 'Exam created successfully',
@@ -820,6 +842,9 @@ const updateExam = async (req, res) => {
       }
     }
 
+    // exam_date may have changed — refresh listings + year filter.
+    await bustExamListCaches();
+
     res.json({
       success: true,
       message: 'Exam updated successfully',
@@ -962,6 +987,9 @@ const deleteExam = async (req, res) => {
       });
     }
 
+    // Refresh listings + year filter so a now-empty year drops out immediately.
+    await bustExamListCaches();
+
     res.json({
       success: true,
       message: 'Exam and related content deleted successfully'
@@ -972,6 +1000,60 @@ const deleteExam = async (req, res) => {
       success: false,
       message: 'Server error while deleting exam'
     });
+  }
+};
+
+// Remove a year from the exam-page filter.
+//
+// There is no "years" table — the filter is derived from published exams' exam_date
+// (see examController.getExamYears). So a year can only be removed once no published
+// exam falls within it. This endpoint:
+//   • 400 if the year param is invalid
+//   • 409 if published exams still use that year (returns how many)
+//   • 200 + busts the derived-years cache otherwise, so the filter refreshes at once
+//     (covers the common case where the year lingered only because of a stale cache).
+const deleteExamYear = async (req, res) => {
+  try {
+    const year = parseInt(req.params.year, 10);
+    if (!Number.isInteger(year) || year < 1900 || year > 3000) {
+      return res.status(400).json({ success: false, message: 'Invalid year' });
+    }
+
+    const start = `${year}-01-01`;
+    const end = `${year + 1}-01-01`;
+
+    // Mirror the exact filters getExamYears() uses, so this reflects what the UI shows.
+    const { count, error } = await supabase
+      .from('exams')
+      .select('id', { count: 'exact', head: true })
+      .gte('exam_date', start)
+      .lt('exam_date', end)
+      .eq('is_published', true)
+      .is('deleted_at', null);
+
+    if (error) {
+      logger.error('deleteExamYear count error:', error);
+      return res.status(500).json({ success: false, message: 'Failed to verify exams for the year' });
+    }
+
+    if ((count || 0) > 0) {
+      return res.status(409).json({
+        success: false,
+        message: `Cannot remove ${year}: ${count} published exam(s) still use this year. Change their exam date or delete them first.`,
+        exam_count: count,
+      });
+    }
+
+    // No exams in this year → refresh the derived years + exam listings cache.
+    await bustExamListCaches();
+
+    return res.json({
+      success: true,
+      message: `Year ${year} removed from the exam filter.`,
+    });
+  } catch (error) {
+    logger.error('deleteExamYear error:', error);
+    return res.status(500).json({ success: false, message: 'Server error while removing the year' });
   }
 };
 
@@ -1024,6 +1106,13 @@ const updateSection = async (req, res) => {
     if (updateData.duration) updateData.duration = parseInt(updateData.duration);
     if (updateData.section_order) updateData.section_order = parseInt(updateData.section_order);
 
+    // Fetch existing section to detect name change
+    const { data: existingSection } = await supabase
+      .from('exam_sections')
+      .select('name, exam_id')
+      .eq('id', id)
+      .single();
+
     const { data: section, error } = await supabase
       .from('exam_sections')
       .update(updateData)
@@ -1037,6 +1126,12 @@ const updateSection = async (req, res) => {
         success: false,
         message: 'Failed to update section'
       });
+    }
+
+    // Bust translation cache if section name changed
+    const nameChanged = updateData.name && updateData.name !== existingSection?.name;
+    if (nameChanged && existingSection?.exam_id) {
+      await bustExamTranslationCache(existingSection.exam_id);
     }
 
     res.json({
@@ -1141,7 +1236,7 @@ const updateQuestion = async (req, res) => {
 
     const { data: existingQuestion } = await supabase
       .from('questions')
-      .select('image_url')
+      .select('image_url, text, exam_id')
       .eq('id', id)
       .single();
 
@@ -1172,6 +1267,12 @@ const updateQuestion = async (req, res) => {
         success: false,
         message: 'Failed to update question'
       });
+    }
+
+    // Bust translation cache if the English text changed
+    const textChanged = updateData.text && updateData.text !== existingQuestion?.text;
+    if (textChanged && existingQuestion?.exam_id) {
+      await bustExamTranslationCache(existingQuestion.exam_id);
     }
 
     res.json({
@@ -1280,7 +1381,7 @@ const updateOption = async (req, res) => {
 
     const { data: existingOption } = await supabase
       .from('question_options')
-      .select('image_url')
+      .select('image_url, option_text, question_id, questions!inner(exam_id)')
       .eq('id', id)
       .single();
 
@@ -1314,6 +1415,13 @@ const updateOption = async (req, res) => {
         success: false,
         message: 'Failed to update option'
       });
+    }
+
+    // Bust translation cache if the English option text changed
+    const optionTextChanged = updateData.option_text && updateData.option_text !== existingOption?.option_text;
+    if (optionTextChanged) {
+      const examId = existingOption?.questions?.exam_id;
+      if (examId) await bustExamTranslationCache(examId);
     }
 
     res.json({
@@ -2381,6 +2489,9 @@ const updateExamWithContent = async (req, res) => {
       }
     }
 
+    // exam_date may have changed — refresh listings + year filter.
+    await bustExamListCaches();
+
     res.json({
       success: true,
       message: 'Exam updated successfully with all content',
@@ -2993,6 +3104,7 @@ module.exports = {
   createExam,
   updateExam,
   deleteExam,
+  deleteExamYear,
   createSection,
   updateSection,
   deleteSection,

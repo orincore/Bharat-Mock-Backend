@@ -27,6 +27,11 @@ router.post('/:examId/start',
   examController.startExam
 );
 
+router.get('/:examId/attempts/resume',
+  authenticate,
+  examController.getResumeAttempts
+);
+
 router.get('/:examId/attempts/:attemptId/questions',
   authenticate,
   [

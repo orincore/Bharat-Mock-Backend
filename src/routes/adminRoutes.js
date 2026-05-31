@@ -11,6 +11,7 @@ const {
   updateExam,
   updateExamWithContent,
   deleteExam,
+  deleteExamYear,
   createSection,
   updateSection,
   deleteSection,
@@ -111,6 +112,10 @@ router.put('/exams/:id', checkPermission('exams', 'update'), activityLogger('UPD
   { name: 'logo', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 }
 ]), updateExam);
+
+// Remove a year from the exam-page filter (only succeeds when no published exam uses it).
+// Declared before '/exams/:id' so the literal "years" segment is never read as an exam id.
+router.delete('/exams/years/:year', requireRole('admin'), activityLogger('DELETE_EXAM_YEAR', 'exam'), deleteExamYear);
 
 router.delete('/exams/:id', requireRole('admin'), activityLogger('DELETE_EXAM', 'exam'), deleteExam);
 

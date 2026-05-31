@@ -81,7 +81,12 @@ const processSubscriptionExpirations = async () => {
     await Promise.all(
       subscriptions.map(async (subscription) => {
         try {
-          await markSubscriptionExpired(subscription.id);
+          const result = await markSubscriptionExpired(subscription.id);
+          // null = already expired by another job instance — skip to avoid duplicate email
+          if (!result) {
+            logger.info('Subscription already expired, skipping', { subscriptionId: subscription.id });
+            return;
+          }
           await revokePremiumIfNeeded(subscription.user_id);
           await sendSubscriptionExpiredEmail(subscription.user.email, subscription.user.name, {
             planName: subscription.plan.name,
@@ -125,10 +130,17 @@ const processMidnightExpirations = async () => {
           status: subscription.status,
         });
 
-        // 1. Mark subscription as expired in user_subscriptions table
-        await markSubscriptionExpired(subscription.id);
+        // 1. Mark subscription as expired — status guard prevents duplicate processing
+        const result = await markSubscriptionExpired(subscription.id);
+        if (!result) {
+          logger.info('[MidnightJob] Subscription already expired by hourly job, skipping', {
+            subscriptionId: subscription.id,
+          });
+          processed++;
+          continue;
+        }
 
-        // 2. Revoke premium on the users table
+        // 2. Revoke premium on the users table (only if no other active subscription)
         await revokePremiumIfNeeded(subscription.user_id);
 
         // 3. Send expiry email (non-critical — don't fail the job if email fails)

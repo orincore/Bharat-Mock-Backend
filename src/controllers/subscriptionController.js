@@ -514,7 +514,20 @@ const confirmSubscriptionPayment = async (req, res) => {
     }
 
     const startDate = new Date();
-    const expiresAt = new Date(startDate.getTime() + plan.duration_days * 24 * 60 * 60 * 1000);
+
+    // Expire at 00:00:00 IST (UTC+5:30) on the correct calendar date so the user
+    // always gets the full day they paid for.
+    const rawExpiry = new Date(startDate.getTime() + plan.duration_days * 24 * 60 * 60 * 1000);
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const rawExpiryIST = new Date(rawExpiry.getTime() + IST_OFFSET_MS);
+    // Snap to the start of that calendar day in IST, then convert back to UTC
+    const midnightIST = new Date(Date.UTC(
+      rawExpiryIST.getUTCFullYear(),
+      rawExpiryIST.getUTCMonth(),
+      rawExpiryIST.getUTCDate(),
+      0, 0, 0, 0
+    ) - IST_OFFSET_MS);
+    const expiresAt = midnightIST;
 
     await markSubscriptionActive({
       subscriptionId: subscription.id,

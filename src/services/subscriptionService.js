@@ -465,6 +465,8 @@ const markExpiryReminderSent = async (subscriptionId) => {
 
 const markSubscriptionExpired = async (subscriptionId) => {
   const timestamp = new Date().toISOString();
+  // Status guard prevents race condition: only the first job run that finds
+  // status = active/canceled wins; concurrent runs silently skip.
   const { data, error } = await supabase
     .from('user_subscriptions')
     .update({
@@ -473,13 +475,15 @@ const markSubscriptionExpired = async (subscriptionId) => {
       updated_at: timestamp
     })
     .eq('id', subscriptionId)
+    .in('status', ['active', 'canceled'])
     .select('*')
-    .single();
+    .maybeSingle();
 
   if (error) {
     logger.error('Failed to mark subscription expired:', error, { subscriptionId });
     throw new Error('Unable to expire subscription');
   }
+  // Returns null when already expired — caller should treat null as "already handled"
   return data;
 };
 
@@ -551,6 +555,25 @@ const updateUserPremiumState = async ({ userId, planId, expiresAt, autoRenew }) 
 };
 
 const revokePremiumIfNeeded = async (userId) => {
+  // Do NOT revoke if the user has another active subscription still running
+  const now = new Date().toISOString();
+  const { data: activeSubscription } = await supabase
+    .from('user_subscriptions')
+    .select('id, expires_at')
+    .eq('user_id', userId)
+    .in('status', ['active', 'canceled'])
+    .not('expires_at', 'is', null)
+    .gte('expires_at', now)
+    .limit(1)
+    .maybeSingle();
+
+  if (activeSubscription) {
+    logger.info('revokePremiumIfNeeded: user still has active subscription, skipping revoke', {
+      userId, subscriptionId: activeSubscription.id, expiresAt: activeSubscription.expires_at
+    });
+    return;
+  }
+
   const { error } = await supabase
     .from('users')
     .update({

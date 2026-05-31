@@ -46,31 +46,100 @@ const batchLoadCategoriesAndSubcategories = async () => {
   return metadata;
 };
 
-const getExamYears = async () => {
-  const cacheKey = buildCacheKey('exam_years');
-  const cached = await redisCache.get(cacheKey);
-  if (cached) return cached;
+// Apply the exam-listing WHERE filters to a Supabase query.
+// Shared by the main listing query and the year-facet query so the two never drift.
+// `includeYear: false` omits the year filter — used when building the year dropdown
+// so it reflects the OTHER active filters but still lists every selectable year.
+const applyExamFilters = (query, filters, metadata, { includeYear = true } = {}) => {
+  const {
+    search, category, subcategory, status, difficulty,
+    exam_type, is_premium, year, paper_section_id, paper_topic_id,
+  } = filters;
 
-  const { data, error } = await supabase
+  if (search) {
+    const searchTerm = String(search).trim().replace(/\s+/g, ' ');
+    const hasSpecialChars = /[(),]/.test(searchTerm);
+    const titlePattern = `%${searchTerm.replace(/ /g, '%')}%`;
+    if (hasSpecialChars) {
+      query = query.ilike('title', titlePattern);
+    } else {
+      const plainPattern = `%${searchTerm}%`;
+      query = query.or(`title.ilike.${titlePattern},slug.ilike.${plainPattern},url_path.ilike.${plainPattern}`);
+    }
+  }
+
+  if (category) {
+    const categoryData = metadata.categoriesMap[category];
+    if (categoryData) query = query.eq('category_id', categoryData.id);
+  }
+
+  if (subcategory) {
+    const subcategoryData = metadata.subcategoriesMap[subcategory];
+    if (subcategoryData) query = query.eq('subcategory_id', subcategoryData.id);
+  }
+
+  if (status) query = query.eq('status', status);
+
+  if (difficulty) {
+    const difficultyData = metadata.difficultiesMap[difficulty];
+    if (difficultyData?.id) {
+      query = query.or(`difficulty_id.eq.${difficultyData.id},difficulty.eq.${difficultyData.slug},difficulty.eq.${difficultyData.name}`);
+    } else {
+      query = query.eq('difficulty', difficulty);
+    }
+  }
+
+  if (exam_type) {
+    if (exam_type === 'mock_test') {
+      query = query.or('exam_type.eq.mock_test,and(exam_type.eq.past_paper,show_in_mock_tests.eq.true)');
+    } else if (exam_type !== 'all') {
+      query = query.eq('exam_type', exam_type);
+    }
+  }
+
+  if (is_premium === 'true') query = query.eq('is_premium', true);
+  else if (is_premium === 'false') query = query.eq('is_premium', false);
+
+  if (includeYear && year) {
+    const yearList = String(year).split(',').map(v => parseInt(v.trim(), 10)).filter(v => !Number.isNaN(v));
+    if (yearList.length === 1) {
+      query = query.gte('exam_date', `${yearList[0]}-01-01`).lt('exam_date', `${yearList[0] + 1}-01-01`);
+    } else if (yearList.length > 1) {
+      const orFilters = yearList.map(yr => `and(exam_date.gte.${yr}-01-01,exam_date.lt.${yr + 1}-01-01)`);
+      query = query.or(orFilters.join(','));
+    }
+  }
+
+  if (paper_topic_id) query = query.eq('paper_topic_id', paper_topic_id);
+  if (paper_section_id) query = query.eq('paper_section_id', paper_section_id);
+
+  return query;
+};
+
+// Build the year-filter facet for the CURRENT filter context.
+// Only returns years that have at least one matching published exam, so a year with
+// 0 available exams (globally or within the active category/section/etc.) is hidden.
+const getFilteredExamYears = async (filters, metadata) => {
+  let query = supabase
     .from('exams')
     .select('exam_date')
-    .not('exam_date', 'is', null)
     .eq('is_published', true)
-    .is('deleted_at', null);
+    .is('deleted_at', null)
+    .not('exam_date', 'is', null);
 
+  query = applyExamFilters(query, filters, metadata, { includeYear: false });
+
+  const { data, error } = await query;
   if (error) {
-    logger.error('Error fetching exam years:', error);
+    logger.error('Error fetching filtered exam years:', error);
     return [];
   }
 
-  const years = [...new Set(
+  return [...new Set(
     data
-      .map(exam => exam.exam_date ? new Date(exam.exam_date).getFullYear() : null)
+      .map(exam => (exam.exam_date ? new Date(exam.exam_date).getFullYear() : null))
       .filter(Boolean)
   )].sort((a, b) => b - a);
-
-  await redisCache.set(cacheKey, years, CACHE_TTL.CATEGORIES);
-  return years;
 };
 
 const buildExamCacheKey = (params) => {
@@ -91,41 +160,38 @@ const buildExamCacheKey = (params) => {
 const buildExamDetailCacheKey = (identifier) => `exam-detail:${identifier}`;
 
 const hasPremiumExamAccess = async (userId) => {
-  const now = Date.now();
+  const nowIso = new Date().toISOString();
 
-  const { data: user, error: userError } = await supabase
+  // Primary check: live subscription table is the authoritative source
+  // Checks active/canceled subscriptions that haven't expired yet
+  const { data: subscription, error: subscriptionError } = await supabase
+    .from('user_subscriptions')
+    .select('id, status, expires_at')
+    .eq('user_id', userId)
+    .in('status', ['active', 'canceled'])
+    .not('expires_at', 'is', null)
+    .gte('expires_at', nowIso)
+    .order('expires_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!subscriptionError && subscription) return true;
+
+  if (subscriptionError) {
+    logger.warn('Failed to fetch user subscription for exam access:', subscriptionError, { userId });
+  }
+
+  // Fallback: trust users.is_premium + subscription_expires_at cache
+  // (in case user_subscriptions query fails)
+  const { data: user } = await supabase
     .from('users')
     .select('is_premium, subscription_expires_at')
     .eq('id', userId)
     .maybeSingle();
 
-  if (userError) {
-    logger.warn('Failed to fetch user premium flags for exam access:', userError, { userId });
-  }
-
-  const userExpiry = user?.subscription_expires_at ? new Date(user.subscription_expires_at).getTime() : null;
-  if (user?.is_premium && (!userExpiry || userExpiry >= now)) {
-    return true;
-  }
-
-  const { data: subscription, error: subscriptionError } = await supabase
-    .from('user_subscriptions')
-    .select('status, expires_at')
-    .eq('user_id', userId)
-    .in('status', ['active', 'canceled'])
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (subscriptionError) {
-    logger.warn('Failed to fetch user subscription for exam access:', subscriptionError, { userId });
-    return false;
-  }
-
-  if (!subscription) return false;
-
-  const subscriptionExpiry = subscription.expires_at ? new Date(subscription.expires_at).getTime() : null;
-  return !subscriptionExpiry || subscriptionExpiry >= now;
+  if (!user?.is_premium) return false;
+  if (!user.subscription_expires_at) return true;
+  return new Date(user.subscription_expires_at).toISOString() >= nowIso;
 };
 
 const buildExamQuery = () => supabase
@@ -261,61 +327,9 @@ const getExams = async (req, res) => {
       query = query.order(sortBy, { ascending: sortOrder === 'asc' });
     }
 
-    if (search) {
-      const searchTerm = search.trim().replace(/\s+/g, ' ');
-      const hasSpecialChars = /[(),]/.test(searchTerm);
-      const titlePattern = `%${searchTerm.replace(/ /g, '%')}%`;
-      if (hasSpecialChars) {
-        query = query.ilike('title', titlePattern);
-      } else {
-        const plainPattern = `%${searchTerm}%`;
-        query = query.or(`title.ilike.${titlePattern},slug.ilike.${plainPattern},url_path.ilike.${plainPattern}`);
-      }
-    }
-
-    if (category) {
-      const categoryData = metadata.categoriesMap[category];
-      if (categoryData) query = query.eq('category_id', categoryData.id);
-    }
-
-    if (subcategory) {
-      const subcategoryData = metadata.subcategoriesMap[subcategory];
-      if (subcategoryData) query = query.eq('subcategory_id', subcategoryData.id);
-    }
-
-    if (status) query = query.eq('status', status);
-    if (difficulty) {
-      const difficultyData = metadata.difficultiesMap[difficulty];
-      if (difficultyData?.id) {
-        query = query.or(`difficulty_id.eq.${difficultyData.id},difficulty.eq.${difficultyData.slug},difficulty.eq.${difficultyData.name}`);
-      } else {
-        query = query.eq('difficulty', difficulty);
-      }
-    }
-
-    if (exam_type) {
-      if (exam_type === 'mock_test') {
-        query = query.or('exam_type.eq.mock_test,and(exam_type.eq.past_paper,show_in_mock_tests.eq.true)');
-      } else if (exam_type !== 'all') {
-        query = query.eq('exam_type', exam_type);
-      }
-    }
-
-    if (is_premium === 'true') query = query.eq('is_premium', true);
-    else if (is_premium === 'false') query = query.eq('is_premium', false);
-
-    if (year) {
-      const yearList = year.split(',').map(v => parseInt(v.trim(), 10)).filter(v => !Number.isNaN(v));
-      if (yearList.length === 1) {
-        query = query.gte('exam_date', `${yearList[0]}-01-01`).lt('exam_date', `${yearList[0] + 1}-01-01`);
-      } else if (yearList.length > 1) {
-        const orFilters = yearList.map(yr => `and(exam_date.gte.${yr}-01-01,exam_date.lt.${yr + 1}-01-01)`);
-        query = query.or(orFilters.join(','));
-      }
-    }
-
-    if (paper_topic_id) query = query.eq('paper_topic_id', paper_topic_id);
-    if (paper_section_id) query = query.eq('paper_section_id', paper_section_id);
+    // Apply all listing filters (search, category, subcategory, status, difficulty,
+    // exam_type, is_premium, year, paper section/topic) via the shared helper.
+    query = applyExamFilters(query, req.query, metadata, { includeYear: true });
 
     // Apply range at the end after all filters
     query = query.range(offset, offset + limitNum - 1);
@@ -333,7 +347,8 @@ const getExams = async (req, res) => {
       exam_subcategories: exam.subcategory_id ? metadata.subcategoriesMap[exam.subcategory_id] : null,
     }));
 
-    const years = await getExamYears();
+    // Year facet scoped to the current filters — years with 0 matching exams are excluded.
+    const years = await getFilteredExamYears(req.query, metadata);
 
     const response = {
       success: true,
@@ -771,7 +786,8 @@ const getExamQuestions = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to fetch exam sections' });
     }
 
-    const sections = (sectionsData || []).map(s => ({ ...s, language: s.language || attemptLanguage }));
+    // Use the section's own language when set; otherwise leave as null so languageUsed (resolved after filtering) takes over
+    const sections = (sectionsData || []).map(s => ({ ...s, language: s.language || null }));
 
     const { data: questions, error: questionsError } = await supabase
       .from('questions')
@@ -852,14 +868,14 @@ const getExamQuestions = async (req, res) => {
 
     const sectionsWithQuestions = sections
       .map(section => {
-        const derivedLanguage = sectionLanguageMap.get(section.id) || attemptLanguage;
-        if (derivedLanguage !== languageUsed) return null;
         const sectionQuestions = (sectionQuestionMap.get(section.id) || [])
           .sort((a, b) => (a.question_number || a.question_order || 0) - (b.question_number || b.question_order || 0));
         if (sectionQuestions.length === 0) return null;
         return {
           id: section.id, name: section.name, name_hi: section.name_hi || null,
-          language: derivedLanguage, totalQuestions: sectionQuestions.length,
+          // Always report the actual content language so the frontend renders correctly
+          language: languageUsed,
+          totalQuestions: sectionQuestions.length,
           marksPerQuestion: section.marks_per_question, duration: section.duration,
           sectionOrder: section.section_order, questions: sectionQuestions,
         };
@@ -881,11 +897,11 @@ const getExamQuestions = async (req, res) => {
 const saveAnswer = async (req, res) => {
   try {
     const { attemptId, questionId } = req.params;
-    const { answer, markedForReview, timeTaken } = req.body;
+    const { answer, markedForReview, timeTaken, timeRemaining } = req.body;
 
     const { data: attempt } = await supabase
       .from('exam_attempts')
-      .select('id, user_id, is_submitted')
+      .select('id, exam_id, user_id, is_submitted')
       .eq('id', attemptId)
       .eq('user_id', req.user.id)
       .single();
@@ -924,10 +940,18 @@ const saveAnswer = async (req, res) => {
       });
     }
 
+    // Persist remaining time so the timer survives tab close / session change
+    const attemptUpdate = { updated_at: new Date().toISOString() };
+    if (typeof timeRemaining === 'number' && timeRemaining >= 0) {
+      attemptUpdate.time_remaining = timeRemaining;
+    }
     await supabase
       .from('exam_attempts')
-      .update({ updated_at: new Date().toISOString() })
+      .update(attemptUpdate)
       .eq('id', attemptId);
+
+    // Invalidate resume cache so the next GET reflects new time_remaining + answer count
+    await redisCache.del(resumeCacheKey(req.user.id, attempt.exam_id));
 
     res.json({ success: true, message: 'Answer saved successfully' });
   } catch (error) {
@@ -956,6 +980,9 @@ const submitExam = async (req, res) => {
     await supabase.from('exam_attempts')
       .update({ is_submitted: true, submitted_at: submittedAt.toISOString(), time_taken: timeTaken })
       .eq('id', attemptId);
+
+    // Invalidate resume cache — attempt is no longer resumable
+    await redisCache.del(resumeCacheKey(attempt.user_id, attempt.exam_id));
 
     await evaluateExam(attemptId, attempt.exam_id, req.user.id);
     await redisCache.deleteByPattern(`bharat_mock:exam-detail:${attempt.exam_id}*`);
@@ -1216,6 +1243,60 @@ const getExamForPDF = async (req, res) => {
   }
 };
 
+const RESUME_TTL = 60; // 60 seconds — short TTL since time_remaining changes frequently
+const resumeCacheKey = (userId, examId) => buildCacheKey('resume_attempts', userId, examId);
+
+const getResumeAttempts = async (req, res) => {
+  try {
+    const { examId } = req.params;
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({ success: false, message: 'Unauthorized' });
+
+    // Check Redis first
+    const key = resumeCacheKey(userId, examId);
+    const cached = await redisCache.get(key);
+    if (cached) {
+      return res.json({ success: true, data: cached });
+    }
+
+    const { data: attempts, error } = await supabase
+      .from('exam_attempts')
+      .select('id, exam_id, started_at, language, time_remaining, updated_at')
+      .eq('exam_id', examId)
+      .eq('user_id', userId)
+      .eq('is_submitted', false)
+      .order('updated_at', { ascending: false })
+      .limit(5);
+
+    if (error) {
+      logger.error('getResumeAttempts error:', error);
+      return res.status(500).json({ success: false, message: 'Failed to fetch resume attempts' });
+    }
+
+    if (!attempts?.length) {
+      await redisCache.set(key, [], RESUME_TTL);
+      return res.json({ success: true, data: [] });
+    }
+
+    // Enrich with answered question count
+    const enriched = await Promise.all(attempts.map(async (attempt) => {
+      const { count } = await supabase
+        .from('user_answers')
+        .select('id', { count: 'exact', head: true })
+        .eq('attempt_id', attempt.id)
+        .not('answer', 'is', null);
+      return { ...attempt, answered_count: count || 0 };
+    }));
+
+    await redisCache.set(key, enriched, RESUME_TTL);
+    return res.json({ success: true, data: enriched });
+  } catch (err) {
+    logger.error('getResumeAttempts error:', err);
+    return res.status(500).json({ success: false, message: 'Server error' });
+  }
+};
+
 module.exports = {
   getExams,
   getExamHistory,
@@ -1228,4 +1309,5 @@ module.exports = {
   saveAnswer,
   submitExam,
   getExamForPDF,
+  getResumeAttempts,
 };
