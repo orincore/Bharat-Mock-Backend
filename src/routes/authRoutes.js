@@ -45,6 +45,7 @@ router.post('/login',
 );
 
 router.get('/profile', authenticate, authController.getProfile);
+router.post('/logout', authenticate, authController.logout);
 router.get('/author/:id', authController.getPublicProfile);
 
 router.put('/profile',

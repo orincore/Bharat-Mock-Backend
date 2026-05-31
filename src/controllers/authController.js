@@ -3,6 +3,29 @@ const jwt = require('jsonwebtoken');
 const supabase = require('../config/database');
 const logger = require('../config/logger');
 const { sendWelcomeEmail, sendPasswordOtpEmail, sendEmailVerificationOtpEmail, sendPasswordChangedEmail } = require('../utils/emailService');
+const { redisCache, buildCacheKey } = require('../utils/redisCache');
+
+// Per-user profile cache. Short TTL because it carries subscription state; we also
+// bust it explicitly on profile update, account deletion, and logout so it never
+// serves stale data. Keys mirror the init user cache so logout can clear both.
+const PROFILE_CACHE_TTL = 60; // seconds
+const profileCacheKey = (userId) => buildCacheKey('auth_profile', userId);
+const initUserCacheKey = (userId) => buildCacheKey('init', 'user', userId);
+
+// Drop every cached entry tied to a user (profile + app-init). Safe to call with a
+// missing id (no-op) and never throws — cache busting must not break the request.
+const bustUserCaches = async (userId) => {
+  if (!userId) return;
+  try {
+    await Promise.all([
+      redisCache.del(profileCacheKey(userId)),
+      redisCache.del(initUserCacheKey(userId)),
+    ]);
+    console.log(`[Cache] BUST auth_profile + init:user for ${userId}`);
+  } catch (err) {
+    logger.warn('Failed to bust user caches:', err?.message || err);
+  }
+};
 
 const normalizePlanRecord = (planData) => {
   if (!planData) return null;
@@ -257,6 +280,14 @@ const login = async (req, res) => {
 
 const getProfile = async (req, res) => {
   try {
+    const cacheKey = profileCacheKey(req.user.id);
+    const cached = await redisCache.get(cacheKey);
+    if (cached) {
+      console.log(`[Cache] HIT  ${cacheKey}`);
+      return res.json(cached);
+    }
+    console.log(`[Cache] MISS ${cacheKey} — fetching from DB`);
+
     const { data: user, error } = await supabase
       .from('users')
       .select(`
@@ -321,13 +352,18 @@ const getProfile = async (req, res) => {
       }
     }
 
-    res.json({
+    const payload = {
       success: true,
       data: {
         ...user,
         subscription_plan: subscriptionPlan
       }
-    });
+    };
+
+    // Cache the successful profile so repeated/burst loads are served from Redis.
+    await redisCache.set(profileCacheKey(req.user.id), payload, PROFILE_CACHE_TTL);
+
+    res.json(payload);
   } catch (error) {
     logger.error('Get profile error:', error);
     res.status(500).json({
@@ -387,6 +423,9 @@ const updateProfile = async (req, res) => {
         .update(preferences)
         .eq('user_id', req.user.id);
     }
+
+    // Profile changed — drop cached copies so the next load reflects the update.
+    await bustUserCaches(req.user.id);
 
     res.json({
       success: true,
@@ -783,10 +822,28 @@ const deleteAccount = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to delete account' });
     }
 
+    // Ensure a deleted account never serves a cached profile/init.
+    await bustUserCaches(userId);
+
     res.json({ success: true, message: 'Account deleted successfully' });
   } catch (error) {
     logger.error('Delete account error:', error);
     res.status(500).json({ success: false, message: 'Server error while deleting account' });
+  }
+};
+
+// Logout — JWTs are stateless, so there is nothing to revoke server-side. We use this
+// hook to bust the user's cached profile + app-init so a fresh login (or the next
+// account on this device) never sees the previous session's cached data, and so the
+// DB isn't hit again on the next profile load until Redis is repopulated.
+const logout = async (req, res) => {
+  try {
+    await bustUserCaches(req.user?.id);
+    res.json({ success: true, message: 'Logged out' });
+  } catch (error) {
+    logger.error('Logout error:', error);
+    // Logout should never fail the client — report success regardless.
+    res.json({ success: true, message: 'Logged out' });
   }
 };
 
@@ -797,6 +854,7 @@ module.exports = {
   login,
   getProfile,
   updateProfile,
+  logout,
   getPublicProfile,
   forgotPassword,
   resetPassword,
