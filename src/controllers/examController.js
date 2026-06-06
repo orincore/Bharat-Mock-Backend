@@ -658,13 +658,17 @@ const startExam = async (req, res) => {
     }
 
     let hasExamAccess = Boolean(exam.is_free);
-    let accessDeniedMessage = 'Payment required to access this exam';
+    const accessDeniedMessage = 'Premium subscription required to access this exam';
 
-    if (!hasExamAccess && exam.is_premium) {
+    // An active subscription unlocks EVERY paid exam — the product is the
+    // "All Exams Test Series". We deliberately do NOT gate this on the
+    // exam.is_premium flag: any non-free exam is covered by a subscription.
+    // This matches the frontend access model (requiresUnlock = !is_free &&
+    // !user.is_premium), which never inspects exam.is_premium. Gating on
+    // is_premium here blocked subscribers from non-free exams that weren't
+    // explicitly flagged premium.
+    if (!hasExamAccess) {
       hasExamAccess = await hasPremiumExamAccess(req.user.id);
-      if (!hasExamAccess) {
-        accessDeniedMessage = 'Premium subscription required to access this exam';
-      }
     }
 
     if (!hasExamAccess) {
@@ -1297,8 +1301,74 @@ const getResumeAttempts = async (req, res) => {
   }
 };
 
+// Public: all published short_quiz exams enriched with their Test Series
+// section/topic NAMES so the /quizzes page can group them (Section tabs → Topic
+// pills, pooled across series). Section/topic names are bulk-resolved in a single
+// extra query each to avoid N round-trips.
+const getQuizGroups = async (req, res) => {
+  try {
+    const limitNum = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10) || 1000));
+
+    const metadata = await batchLoadCategoriesAndSubcategories();
+
+    const { data: exams, error } = await supabase
+      .from('exams')
+      .select(
+        'id, title, duration, total_marks, total_questions, category_id, subcategory_id, difficulty, difficulty_id, status, start_date, end_date, exam_date, is_free, image_url, logo_url, thumbnail_url, allow_anytime, supports_hindi, exam_type, is_premium, slug, url_path, created_at, attempts, test_series_id, test_series_section_id, test_series_topic_id'
+      )
+      .eq('is_published', true)
+      .eq('exam_type', 'short_quiz')
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false })
+      .limit(limitNum);
+
+    if (error) {
+      logger.error('Error fetching quizzes:', error);
+      return res.status(500).json({ success: false, message: 'Failed to fetch quizzes', error: error.message });
+    }
+
+    const quizzes = exams || [];
+
+    // Bulk-resolve section & topic names referenced by these quizzes.
+    const sectionIds = [...new Set(quizzes.map(q => q.test_series_section_id).filter(Boolean))];
+    const topicIds = [...new Set(quizzes.map(q => q.test_series_topic_id).filter(Boolean))];
+
+    const [sectionsRes, topicsRes] = await Promise.all([
+      sectionIds.length
+        ? supabase.from('test_series_sections').select('id, name, display_order').in('id', sectionIds)
+        : Promise.resolve({ data: [] }),
+      topicIds.length
+        ? supabase.from('test_series_topics').select('id, name, display_order').in('id', topicIds)
+        : Promise.resolve({ data: [] }),
+    ]);
+
+    const sectionMap = Object.fromEntries((sectionsRes.data || []).map(s => [s.id, s]));
+    const topicMap = Object.fromEntries((topicsRes.data || []).map(t => [t.id, t]));
+
+    const data = quizzes.map(exam => {
+      const section = exam.test_series_section_id ? sectionMap[exam.test_series_section_id] : null;
+      const topic = exam.test_series_topic_id ? topicMap[exam.test_series_topic_id] : null;
+      return {
+        ...exam,
+        exam_categories: exam.category_id ? metadata.categoriesMap[exam.category_id] : null,
+        exam_subcategories: exam.subcategory_id ? metadata.subcategoriesMap[exam.subcategory_id] : null,
+        section_name: section?.name || null,
+        section_order: section?.display_order ?? null,
+        topic_name: topic?.name || null,
+        topic_order: topic?.display_order ?? null,
+      };
+    });
+
+    res.json({ success: true, data, total: data.length });
+  } catch (error) {
+    logger.error('Error in getQuizGroups:', error);
+    res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+  }
+};
+
 module.exports = {
   getExams,
+  getQuizGroups,
   getExamHistory,
   getExamByShortPath,
   getExamByPath,

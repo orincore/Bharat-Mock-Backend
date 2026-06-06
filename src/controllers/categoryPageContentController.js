@@ -2,6 +2,7 @@ const supabase = require('../config/database');
 const { uploadToR2 } = require('../utils/fileUpload');
 const { slugify } = require('../utils/slugify');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
+const { mergeStructuredData } = require('../utils/structuredData');
 
 const PAGE_CONTENT_TTL = 1800; // 30 minutes — invalidated on every write
 const cacheKeyFor = (categoryId) => buildCacheKey('category_page_content', categoryId);
@@ -653,6 +654,15 @@ const categoryPageContentController = {
         canonical_url, robots_meta, structured_data, author_name
       } = req.body;
 
+      // Check if SEO record exists for this category. Pull structured_data too so
+      // we can merge — saving one concern (schema vs. tab_headings/toc/tab_seo)
+      // must never wipe the other (they share this JSONB column).
+      const { data: existing } = await supabase
+        .from('page_seo')
+        .select('id, structured_data')
+        .eq('category_id', categoryId)
+        .maybeSingle();
+
       const seoPayload = {
         category_id: categoryId,
         meta_title: meta_title || null,
@@ -663,16 +673,9 @@ const categoryPageContentController = {
         og_image_url: og_image_url || null,
         canonical_url: canonical_url || null,
         robots_meta: robots_meta || null,
-        structured_data: structured_data || {},
+        structured_data: mergeStructuredData(existing?.structured_data, structured_data),
         author_name: author_name || null
       };
-
-      // Check if SEO record exists for this category
-      const { data: existing } = await supabase
-        .from('page_seo')
-        .select('id')
-        .eq('category_id', categoryId)
-        .maybeSingle();
 
       let data, error;
       if (existing?.id) {

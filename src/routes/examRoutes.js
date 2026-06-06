@@ -12,6 +12,9 @@ router.get('/history', authenticate, examController.getExamHistory);
 
 router.get('/categories', examController.getExamCategories);
 
+// Public quizzes grouped by Test Series section/topic (for the /quizzes page)
+router.get('/quizzes-grouped', examController.getQuizGroups);
+
 router.get('/path/:parentSlug/:examSlug',
   optionalAuth,
   examController.getExamByShortPath

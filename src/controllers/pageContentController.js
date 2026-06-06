@@ -2,6 +2,7 @@ const supabase = require('../config/database');
 const { uploadToR2 } = require('../utils/fileUpload');
 const { slugify } = require('../utils/slugify');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
+const { mergeStructuredData } = require('../utils/structuredData');
 
 const PAGE_CONTENT_TTL = 1800; // 30 minutes — invalidated on every write
 const cacheKeyFor = (subcategoryId) => buildCacheKey('page_content', subcategoryId);
@@ -949,6 +950,14 @@ const pageContentController = {
         author_name
       } = req.body;
 
+      // Pull existing structured_data so we can merge — saving one concern (schema
+      // vs. tab_headings/toc/tab_seo) must never wipe the other (shared JSONB column).
+      const { data: existingSeo } = await supabase
+        .from('page_seo')
+        .select('structured_data')
+        .eq('subcategory_id', subcategoryId)
+        .maybeSingle();
+
       const { data, error } = await supabase
         .from('page_seo')
         .upsert({
@@ -961,7 +970,7 @@ const pageContentController = {
           og_image_url,
           canonical_url,
           robots_meta,
-          structured_data: structured_data || {},
+          structured_data: mergeStructuredData(existingSeo?.structured_data, structured_data),
           author_name: author_name || null
         }, { onConflict: 'subcategory_id' })
         .select('*')
