@@ -64,7 +64,7 @@ const applyExamFilters = (query, filters, metadata, { includeYear = true } = {})
       query = query.ilike('title', titlePattern);
     } else {
       const plainPattern = `%${searchTerm}%`;
-      query = query.or(`title.ilike.${titlePattern},slug.ilike.${plainPattern},url_path.ilike.${plainPattern}`);
+      query = query.or(`title.ilike.${titlePattern},slug.ilike.${plainPattern},url_path.ilike.${plainPattern},exam_uid.ilike.${plainPattern}`);
     }
   }
 
@@ -314,7 +314,7 @@ const getExams = async (req, res) => {
     let query = supabase
       .from('exams')
       .select(
-        'id, title, duration, total_marks, total_questions, category_id, subcategory_id, difficulty, difficulty_id, status, start_date, end_date, exam_date, is_free, image_url, logo_url, thumbnail_url, allow_anytime, supports_hindi, exam_type, is_premium, slug, url_path, created_at, attempts',
+        'id, title, duration, total_marks, total_questions, category_id, subcategory_id, difficulty, difficulty_id, status, start_date, end_date, exam_date, is_free, image_url, logo_url, thumbnail_url, allow_anytime, supports_hindi, exam_type, is_premium, slug, url_path, exam_uid, created_at, attempts',
         { count: 'exact' }
       )
       .eq('is_published', true)
