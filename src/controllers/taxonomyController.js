@@ -9,21 +9,39 @@ const CATEGORIES_CACHE_KEY = buildCacheKey('taxonomy', 'categories');
 const categorySlugKey = (slug) => buildCacheKey('taxonomy', 'category', slug);
 const subcategoriesKey = (categoryId) => buildCacheKey('taxonomy', 'subcategories', categoryId);
 const INIT_PUBLIC_KEY = buildCacheKey('init', 'public');
+// Per-user init caches (init:user:<id>, 60s TTL) also embed the navbar category list,
+// so a logged-in admin/user would keep seeing a deleted category until their key expires.
+// Bust them all by pattern on every taxonomy write.
+const INIT_USER_PATTERN = buildCacheKey('init', 'user', '*');
+// The homepage aggregate (homepage:data) embeds the categories + subcategories shown
+// in the "Choose your exam" section, so it must be busted on any taxonomy write too.
+const HOMEPAGE_CACHE_KEY = buildCacheKey('homepage', 'data');
 
-// Invalidates the categories list + a specific slug key + init:public (init embeds categories)
+// Invalidates the categories list + a specific slug key + init (public & all per-user) + homepage:data
+// (both init and homepage embed categories)
 const invalidateCategoryCache = async (slug) => {
-  const ops = [redisCache.del(CATEGORIES_CACHE_KEY), redisCache.del(INIT_PUBLIC_KEY)];
+  const ops = [
+    redisCache.del(CATEGORIES_CACHE_KEY),
+    redisCache.del(INIT_PUBLIC_KEY),
+    redisCache.deleteByPattern(INIT_USER_PATTERN),
+    redisCache.del(HOMEPAGE_CACHE_KEY),
+  ];
   if (slug) ops.push(redisCache.del(categorySlugKey(slug)));
   await Promise.all(ops);
-  console.log(`[Cache] Invalidated taxonomy:categories + init:public${slug ? ` + taxonomy:category:${slug}` : ''}`);
+  console.log(`[Cache] Invalidated taxonomy:categories + init:public + init:user:* + homepage:data${slug ? ` + taxonomy:category:${slug}` : ''}`);
 };
 
-// Subcategory changes invalidate categories list, init:public, and the per-category subcategories cache
+// Subcategory changes invalidate categories list, init (public & per-user), homepage:data, and the per-category subcategories cache
 const invalidateSubcategoryCache = async (categoryId) => {
-  const ops = [redisCache.del(CATEGORIES_CACHE_KEY), redisCache.del(INIT_PUBLIC_KEY)];
+  const ops = [
+    redisCache.del(CATEGORIES_CACHE_KEY),
+    redisCache.del(INIT_PUBLIC_KEY),
+    redisCache.deleteByPattern(INIT_USER_PATTERN),
+    redisCache.del(HOMEPAGE_CACHE_KEY),
+  ];
   if (categoryId) ops.push(redisCache.del(subcategoriesKey(categoryId)));
   await Promise.all(ops);
-  console.log(`[Cache] Invalidated taxonomy:categories + init:public${categoryId ? ` + taxonomy:subcategories:${categoryId}` : ''} (subcategory change)`);
+  console.log(`[Cache] Invalidated taxonomy:categories + init:public + init:user:* + homepage:data${categoryId ? ` + taxonomy:subcategories:${categoryId}` : ''} (subcategory change)`);
 };
 
 const fetchSubcategoryRecord = async (categoryId, subcategorySlug, select = 'id, name, slug, description, category_id, logo_url, display_order, is_active, created_at, updated_at', includeActiveFilter = true) => {

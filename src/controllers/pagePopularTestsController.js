@@ -3,6 +3,27 @@ const { redisCache, CACHE_TTL, buildCacheKey } = require('../utils/redisCache');
 
 const buildErrorResponse = (message, statusCode = 500) => ({ success: false, message, statusCode });
 
+// Any write to a page's popular tests must bust that page's own cache AND, when the
+// page is the homepage, the homepage aggregate (homepage:data) that powers the
+// "Popular Government Exams" section. Without this the homepage stays stale up to 30 min.
+const invalidatePopularTestsCache = async (pageIdentifier) => {
+  const ops = [];
+  if (pageIdentifier) ops.push(redisCache.del(buildCacheKey('popular_tests', pageIdentifier)));
+  if (pageIdentifier === 'homepage') ops.push(redisCache.del(buildCacheKey('homepage', 'data')));
+  if (ops.length) await Promise.all(ops);
+  console.log(`[Cache] Invalidated popular_tests:${pageIdentifier}${pageIdentifier === 'homepage' ? ' + homepage:data' : ''}`);
+};
+
+// Resolve which page a popular-test row belongs to (remove/toggle only receive the row id)
+const getPageIdentifierForTest = async (id) => {
+  const { data } = await supabase
+    .from('page_popular_tests')
+    .select('page_identifier')
+    .eq('id', id)
+    .single();
+  return data?.page_identifier || null;
+};
+
 const getPopularTests = async (req, res) => {
   try {
     const { pageIdentifier } = req.params;
@@ -136,6 +157,8 @@ const addPopularTest = async (req, res) => {
       return res.status(500).json(buildErrorResponse('Failed to add popular test'));
     }
 
+    await invalidatePopularTestsCache(pageIdentifier);
+
     return res.status(201).json({
       success: true,
       message: 'Popular test added successfully',
@@ -159,12 +182,16 @@ const addPopularTest = async (req, res) => {
 const removePopularTest = async (req, res) => {
   try {
     const { id } = req.params;
+    // Capture the page before deleting so we know which cache(s) to bust
+    const pageIdentifier = await getPageIdentifierForTest(id);
     const { error } = await supabase.from('page_popular_tests').delete().eq('id', id);
 
     if (error) {
       console.error('Error removing popular test:', error);
       return res.status(500).json(buildErrorResponse('Failed to remove popular test'));
     }
+
+    await invalidatePopularTestsCache(pageIdentifier);
 
     return res.status(200).json({ success: true, message: 'Popular test removed successfully' });
   } catch (err) {
@@ -195,6 +222,8 @@ const reorderPopularTests = async (req, res) => {
       return res.status(500).json(buildErrorResponse('Failed to reorder popular tests'));
     }
 
+    await invalidatePopularTestsCache(pageIdentifier);
+
     return res.status(200).json({ success: true, message: 'Popular tests reordered successfully' });
   } catch (err) {
     console.error('Error in reorderPopularTests:', err);
@@ -222,6 +251,8 @@ const togglePopularTestStatus = async (req, res) => {
       console.error('Error toggling popular test status:', error);
       return res.status(500).json(buildErrorResponse('Failed to update popular test status'));
     }
+
+    await invalidatePopularTestsCache(data?.page_identifier);
 
     return res.status(200).json({
       success: true,

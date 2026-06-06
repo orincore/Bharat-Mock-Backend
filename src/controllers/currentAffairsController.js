@@ -146,6 +146,7 @@ const currentAffairsController = {
             id,
             title,
             slug,
+            url_path,
             status,
             start_date,
             end_date,
@@ -423,7 +424,7 @@ const currentAffairsController = {
       if (examIds.length) {
         const { data: exams, error: examsError } = await supabase
           .from(EXAMS_TABLE)
-          .select('id, title, slug, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
+          .select('id, title, slug, url_path, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
           .in('id', examIds);
 
         if (examsError) return buildError(res, 'Failed to load quiz exams', examsError);
@@ -449,7 +450,7 @@ const currentAffairsController = {
 
       const { data: exam, error: examError } = await supabase
         .from(EXAMS_TABLE)
-        .select('id, title, slug, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
+        .select('id, title, slug, url_path, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
         .eq('id', examId)
         .maybeSingle();
 
@@ -504,7 +505,7 @@ const currentAffairsController = {
       if (examId) {
         const { data: exam, error: examError } = await supabase
           .from(EXAMS_TABLE)
-          .select('id, title, slug, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
+          .select('id, title, slug, url_path, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
           .eq('id', examId)
           .maybeSingle();
 
@@ -540,7 +541,7 @@ const currentAffairsController = {
       if (!linkedExam && data.exam_id) {
         const { data: exam, error: examError } = await supabase
           .from(EXAMS_TABLE)
-          .select('id, title, slug, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
+          .select('id, title, slug, url_path, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
           .eq('id', data.exam_id)
           .maybeSingle();
 

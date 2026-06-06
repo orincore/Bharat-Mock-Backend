@@ -5,10 +5,16 @@ const { redisCache, buildCacheKey } = require('../utils/redisCache');
 const NAV_TTL = 86400; // 24 hours — navigation rarely changes, invalidated on every write
 const NAV_CACHE_KEY = buildCacheKey('navigation', 'links');
 const INIT_PUBLIC_KEY = buildCacheKey('init', 'public');
+// Per-user init caches (init:user:<id>) also embed the navbar links, so bust them too.
+const INIT_USER_PATTERN = buildCacheKey('init', 'user', '*');
 
 const invalidateNavCache = async () => {
-  await Promise.all([redisCache.del(NAV_CACHE_KEY), redisCache.del(INIT_PUBLIC_KEY)]);
-  console.log('[Cache] Invalidated navigation:links + init:public');
+  await Promise.all([
+    redisCache.del(NAV_CACHE_KEY),
+    redisCache.del(INIT_PUBLIC_KEY),
+    redisCache.deleteByPattern(INIT_USER_PATTERN),
+  ]);
+  console.log('[Cache] Invalidated navigation:links + init:public + init:user:*');
 };
 
 const sanitizeNumber = (value, fallback = 0) => {
