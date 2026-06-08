@@ -64,7 +64,7 @@ const applyExamFilters = (query, filters, metadata, { includeYear = true } = {})
       query = query.ilike('title', titlePattern);
     } else {
       const plainPattern = `%${searchTerm}%`;
-      query = query.or(`title.ilike.${titlePattern},slug.ilike.${plainPattern},url_path.ilike.${plainPattern},exam_uid.ilike.${plainPattern}`);
+      query = query.or(`title.ilike."${titlePattern}",slug.ilike."${plainPattern}",url_path.ilike."${plainPattern}",exam_uid.ilike."${plainPattern}"`);
     }
   }
 
@@ -632,6 +632,12 @@ const startExam = async (req, res) => {
     if (examError || !exam) return res.status(404).json({ success: false, message: 'Exam not found' });
 
     const resolvedExamId = exam.id;
+
+    // Secure attempt check: reject if current time is before the exam's scheduled start time
+    const examStartDate = exam.start_date || exam.startDate;
+    if (examStartDate && new Date() < new Date(examStartDate)) {
+      return res.status(400).json({ success: false, message: 'This exam has not started yet.' });
+    }
 
     if (!exam.allow_anytime) {
       const now = new Date();

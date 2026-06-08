@@ -133,7 +133,7 @@ const getAdminExams = async (req, res) => {
         query = query.ilike('title', titlePattern);
       } else {
         const plainPattern = `%${searchTerm}%`;
-        query = query.or(`title.ilike.${titlePattern},slug.ilike.${plainPattern},exam_uid.ilike.${plainPattern}`);
+        query = query.or(`title.ilike."${titlePattern}",slug.ilike."${plainPattern}",exam_uid.ilike."${plainPattern}"`);
       }
     }
 

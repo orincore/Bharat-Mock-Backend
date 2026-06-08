@@ -874,7 +874,7 @@ const getExamsByCategory = async (req, res) => {
 
     if (search) {
       const searchTerm = search.trim();
-      query = query.or(`title.ilike.%${searchTerm}%`);
+      query = query.or(`title.ilike."%${searchTerm}%"`);
     }
 
     const { data: exams, error, count } = await query;
@@ -1009,7 +1009,7 @@ const getExamsBySubcategory = async (req, res) => {
 
     if (search) {
       const searchTerm = search.trim();
-      query = query.or(`title.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%`);
+      query = query.or(`title.ilike."%${searchTerm}%",slug.ilike."%${searchTerm}%"`);
     }
 
     const { data: exams, error, count } = await query;
@@ -1159,7 +1159,7 @@ const getExamsBySubcategorySlug = async (req, res) => {
 
     if (search) {
       const searchTerm = search.trim();
-      query = query.or(`title.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%`);
+      query = query.or(`title.ilike."%${searchTerm}%",slug.ilike."%${searchTerm}%"`);
     }
 
     const { data: exams, error, count } = await query;

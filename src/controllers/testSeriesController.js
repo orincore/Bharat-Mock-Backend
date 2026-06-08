@@ -263,7 +263,7 @@ const getAllTestSeries = async (req, res) => {
 
     if (search) {
       const searchTerm = search.trim();
-      query = query.or(`title.ilike.%${searchTerm}%,description.ilike.%${searchTerm}%`);
+      query = query.or(`title.ilike."%${searchTerm}%",description.ilike."%${searchTerm}%"`);
     }
 
     if (is_published !== undefined && is_published !== '') {
