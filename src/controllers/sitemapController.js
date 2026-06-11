@@ -46,7 +46,7 @@ const getSitemapData = async (req, res) => {
       // Subcategories with category slug for URL construction
       supabase
         .from('exam_subcategories')
-        .select('id, slug, updated_at, exam_categories!inner(slug)')
+        .select('id, slug, updated_at, show_mock_tests_tab, show_previous_papers_tab, exam_categories!inner(slug)')
         .or('is_active.eq.true,is_active.is.null')
         .order('updated_at', { ascending: false })
         .limit(1000),
@@ -89,7 +89,9 @@ const getSitemapData = async (req, res) => {
       id: sub.id,
       slug: sub.slug,
       category_slug: sub.exam_categories?.slug,
-      updated_at: sub.updated_at
+      updated_at: sub.updated_at,
+      show_mock_tests_tab: sub.show_mock_tests_tab,
+      show_previous_papers_tab: sub.show_previous_papers_tab
     }));
 
     // Build custom tabs map by subcategory_id
@@ -119,12 +121,15 @@ const getSitemapData = async (req, res) => {
 
     // Generate subcategory tab URLs
     const subcategoryTabUrls = [];
-    const staticTabSlugs = ['mock-tests', 'previous-papers'];
 
     for (const sub of subcategories) {
       const lastMod = sub.updated_at || now;
 
-      // Add static tabs
+      // Add reserved tabs only when the admin hasn't hidden them
+      const staticTabSlugs = [
+        ...(sub.show_mock_tests_tab !== false ? ['mock-tests'] : []),
+        ...(sub.show_previous_papers_tab !== false ? ['previous-papers'] : [])
+      ];
       for (const tabSlug of staticTabSlugs) {
         subcategoryTabUrls.push({
           url: `/${sub.slug}/${tabSlug}`,

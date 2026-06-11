@@ -31,20 +31,25 @@ const invalidateCategoryCache = async (slug) => {
   console.log(`[Cache] Invalidated taxonomy:categories + init:public + init:user:* + homepage:data${slug ? ` + taxonomy:category:${slug}` : ''}`);
 };
 
-// Subcategory changes invalidate categories list, init (public & per-user), homepage:data, and the per-category subcategories cache
-const invalidateSubcategoryCache = async (categoryId) => {
+// Subcategory changes invalidate categories list, init (public & per-user), homepage:data,
+// the per-category subcategories cache, the exam metadata cache (carries subcategory
+// names/flags into exam & quiz listings) and — when a subcategory id is given — the public
+// page-content cache so settings changes (name, logo, tab visibility) show up instantly.
+const invalidateSubcategoryCache = async (categoryId, subcategoryId) => {
   const ops = [
     redisCache.del(CATEGORIES_CACHE_KEY),
     redisCache.del(INIT_PUBLIC_KEY),
     redisCache.deleteByPattern(INIT_USER_PATTERN),
     redisCache.del(HOMEPAGE_CACHE_KEY),
+    redisCache.del(buildCacheKey('metadata', 'categories_subcategories_difficulties')),
   ];
   if (categoryId) ops.push(redisCache.del(subcategoriesKey(categoryId)));
+  if (subcategoryId) ops.push(redisCache.del(buildCacheKey('page_content', subcategoryId)));
   await Promise.all(ops);
-  console.log(`[Cache] Invalidated taxonomy:categories + init:public + init:user:* + homepage:data${categoryId ? ` + taxonomy:subcategories:${categoryId}` : ''} (subcategory change)`);
+  console.log(`[Cache] Invalidated taxonomy:categories + init:public + init:user:* + homepage:data + metadata${categoryId ? ` + taxonomy:subcategories:${categoryId}` : ''}${subcategoryId ? ` + page_content:${subcategoryId}` : ''} (subcategory change)`);
 };
 
-const fetchSubcategoryRecord = async (categoryId, subcategorySlug, select = 'id, name, slug, description, category_id, logo_url, display_order, is_active, created_at, updated_at', includeActiveFilter = true) => {
+const fetchSubcategoryRecord = async (categoryId, subcategorySlug, select = 'id, name, slug, description, category_id, logo_url, display_order, is_active, show_mock_tests_tab, show_previous_papers_tab, created_at, updated_at', includeActiveFilter = true) => {
   let baseQuery = supabase
     .from('exam_subcategories')
     .select(select)
@@ -115,7 +120,7 @@ const deleteSubcategory = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to delete subcategory' });
     }
 
-    await invalidateSubcategoryCache(subcategory.category_id);
+    await invalidateSubcategoryCache(subcategory.category_id, id);
     res.json({ success: true, message: 'Subcategory deleted successfully' });
   } catch (error) {
     logger.error('Delete subcategory error:', error);
@@ -451,7 +456,7 @@ const getSubcategories = async (req, res) => {
       console.log(`[Cache] MISS taxonomy:subcategories:${category_id} — fetching from DB`);
     }
 
-    const baseSelect = 'id, category_id, name, slug, description, logo_url, display_order, is_active, created_at, updated_at, exam_categories(name, slug)';
+    const baseSelect = 'id, category_id, name, slug, description, logo_url, display_order, is_active, show_mock_tests_tab, show_previous_papers_tab, created_at, updated_at, exam_categories(name, slug)';
     let query = supabase
       .from('exam_subcategories')
       .select(baseSelect)
@@ -504,7 +509,7 @@ const getSubcategories = async (req, res) => {
 
 const createSubcategory = async (req, res) => {
   try {
-    const { category_id, name, description, slug, display_order, is_active } = req.body;
+    const { category_id, name, description, slug, display_order, is_active, show_mock_tests_tab, show_previous_papers_tab } = req.body;
     const logoFile = req.file;
 
     if (!category_id || !name) {
@@ -537,7 +542,9 @@ const createSubcategory = async (req, res) => {
       slug: uniqueSlug,
       logo_url,
       display_order: display_order ? parseInt(display_order) : 0,
-      is_active: is_active !== undefined ? is_active === 'true' || is_active === true : true
+      is_active: is_active !== undefined ? is_active === 'true' || is_active === true : true,
+      show_mock_tests_tab: show_mock_tests_tab !== undefined ? show_mock_tests_tab === 'true' || show_mock_tests_tab === true : true,
+      show_previous_papers_tab: show_previous_papers_tab !== undefined ? show_previous_papers_tab === 'true' || show_previous_papers_tab === true : true
     };
 
     const { data, error } = await supabase
@@ -562,7 +569,7 @@ const createSubcategory = async (req, res) => {
 const updateSubcategory = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, description, slug, display_order, is_active } = req.body;
+    const { name, description, slug, display_order, is_active, show_mock_tests_tab, show_previous_papers_tab } = req.body;
     const logoFile = req.file;
 
     if (!name) {
@@ -596,6 +603,14 @@ const updateSubcategory = async (req, res) => {
 
     if (is_active !== undefined) {
       updateData.is_active = is_active === 'true' || is_active === true;
+    }
+
+    if (show_mock_tests_tab !== undefined) {
+      updateData.show_mock_tests_tab = show_mock_tests_tab === 'true' || show_mock_tests_tab === true;
+    }
+
+    if (show_previous_papers_tab !== undefined) {
+      updateData.show_previous_papers_tab = show_previous_papers_tab === 'true' || show_previous_papers_tab === true;
     }
 
     if (logoFile) {
@@ -636,7 +651,7 @@ const updateSubcategory = async (req, res) => {
       return res.status(500).json({ success: false, message: 'Failed to update subcategory' });
     }
 
-    await invalidateSubcategoryCache(existingSubcategory.category_id);
+    await invalidateSubcategoryCache(existingSubcategory.category_id, id);
     res.json({ success: true, data });
   } catch (error) {
     logger.error('Update subcategory error:', error);
@@ -754,7 +769,7 @@ const getSubcategoryById = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Subcategory identifier is required' });
     }
 
-    const detailedSelect = 'id, name, slug, description, category_id, logo_url, display_order, is_active, created_at, updated_at';
+    const detailedSelect = 'id, name, slug, description, category_id, logo_url, display_order, is_active, show_mock_tests_tab, show_previous_papers_tab, created_at, updated_at';
     const fallbackSelect = 'id, name, slug, description, category_id, logo_url, created_at, updated_at';
 
     let { data, error } = await supabase
@@ -1068,11 +1083,20 @@ const getSubcategoryByOwnSlug = async (req, res) => {
   try {
     const { slug } = req.params;
 
-    const { data: subcategories, error } = await supabase
+    let { data: subcategories, error } = await supabase
       .from('exam_subcategories')
-      .select('id, name, slug, description, category_id, logo_url, display_order, is_active, created_at, updated_at')
+      .select('id, name, slug, description, category_id, logo_url, display_order, is_active, show_mock_tests_tab, show_previous_papers_tab, created_at, updated_at')
       .eq('slug', slug)
       .or('is_active.eq.true,is_active.is.null');
+
+    // Tab-visibility columns not yet migrated — retry without them
+    if (error?.code === '42703') {
+      ({ data: subcategories, error } = await supabase
+        .from('exam_subcategories')
+        .select('id, name, slug, description, category_id, logo_url, display_order, is_active, created_at, updated_at')
+        .eq('slug', slug)
+        .or('is_active.eq.true,is_active.is.null'));
+    }
 
     const subcategory = subcategories?.[0];
     if (error || !subcategory) {
