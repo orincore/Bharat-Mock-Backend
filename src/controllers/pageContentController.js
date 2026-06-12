@@ -27,6 +27,11 @@ const debugLog = (label, payload) => {
 
 const isTempId = (value) => typeof value === 'string' && value.startsWith('temp-');
 
+// Tab slugs owned by the page template itself (Overview + the reserved
+// Mock Tests / Previous Papers tabs). A custom tab must never claim one of
+// these URLs, otherwise it shadows or gets shadowed by the reserved tab.
+const RESERVED_TAB_KEYS = new Set(['overview', 'mock-tests', 'previous-papers', 'question-papers']);
+
 const pageContentController = {
   // Get all content for a subcategory page
   getPageContent: async (req, res) => {
@@ -1410,6 +1415,13 @@ const pageContentController = {
 
       const normalizedKey = (tab_key || slugify(title)).slice(0, 190);
 
+      if (RESERVED_TAB_KEYS.has(normalizedKey)) {
+        return res.status(400).json({
+          success: false,
+          message: `"${normalizedKey}" is a reserved tab URL. Please choose a different tab title or key.`,
+        });
+      }
+
       const { data: orderRow } = await supabase
         .from('subcategory_custom_tabs')
         .select('display_order')
@@ -1455,12 +1467,36 @@ const pageContentController = {
       const { tabId } = req.params;
       const { title, description, display_order, is_active, tab_key } = req.body || {};
 
+      let nextTabKey = tab_key ? slugify(tab_key).slice(0, 190) : undefined;
+
+      // Self-heal legacy collisions: if this tab currently squats on a reserved
+      // URL (e.g. tab_key 'previous-papers' left over from an old title) and the
+      // admin renames it, regenerate the key from the new title.
+      if (nextTabKey === undefined && title) {
+        const { data: existing } = await supabase
+          .from('subcategory_custom_tabs')
+          .select('tab_key')
+          .eq('id', tabId)
+          .maybeSingle();
+
+        if (existing && RESERVED_TAB_KEYS.has(existing.tab_key)) {
+          nextTabKey = slugify(title).slice(0, 190);
+        }
+      }
+
+      if (nextTabKey !== undefined && RESERVED_TAB_KEYS.has(nextTabKey)) {
+        return res.status(400).json({
+          success: false,
+          message: `"${nextTabKey}" is a reserved tab URL. Please choose a different tab title or key.`,
+        });
+      }
+
       const updates = {
         title: title ?? undefined,
         description: description ?? undefined,
         display_order: display_order ?? undefined,
         is_active: typeof is_active === 'boolean' ? is_active : undefined,
-        tab_key: tab_key ? tab_key.slice(0, 190) : undefined,
+        tab_key: nextTabKey,
         updated_by: req.user?.id || null
       };
 
