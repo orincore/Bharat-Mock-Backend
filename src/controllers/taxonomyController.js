@@ -88,7 +88,7 @@ const deleteSubcategory = async (req, res) => {
 
     const { data: subcategory, error: fetchError } = await supabase
       .from('exam_subcategories')
-      .select('logo_url')
+      .select('logo_url, category_id')
       .eq('id', id)
       .single();
 

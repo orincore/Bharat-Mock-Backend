@@ -207,7 +207,7 @@ const resolveFilteredTestSeriesIds = async ({ metadata, category, subcategory, d
 
 const getAllTestSeries = async (req, res) => {
   try {
-    const { page = 1, limit = 10, search, category, subcategory, difficulty, is_published } = req.query;
+    const { page = 1, limit = 10, search, category, subcategory, difficulty, is_published, exclude_hidden } = req.query;
 
     const pageNumber = Math.max(1, parseInt(page, 10));
     const limitNumber = Math.min(50, Math.max(1, parseInt(limit, 10)));
@@ -215,7 +215,7 @@ const getAllTestSeries = async (req, res) => {
 
     const cacheKey = buildCacheKey(
       'test_series_list', pageNumber, limitNumber,
-      search || '', category || '', subcategory || '', difficulty || '', is_published || ''
+      search || '', category || '', subcategory || '', difficulty || '', is_published || '', exclude_hidden || ''
     );
 
     const cachedResponse = await redisCache.get(cacheKey);
@@ -249,7 +249,7 @@ const getAllTestSeries = async (req, res) => {
     let query = supabase
       .from('test_series')
       .select(
-        'id, title, description, category_id, subcategory_id, difficulty_id, logo_url, slug, is_published, display_order, created_at, updated_at',
+        'id, title, description, category_id, subcategory_id, difficulty_id, logo_url, slug, is_published, hidden_from_listing, display_order, created_at, updated_at',
         { count: 'exact' }
       )
       .is('deleted_at', null)
@@ -268,6 +268,13 @@ const getAllTestSeries = async (req, res) => {
 
     if (is_published !== undefined && is_published !== '') {
       query = query.eq('is_published', is_published === 'true');
+    }
+
+    // Public listings (e.g. /mock-test-series) pass exclude_hidden=true so that
+    // admin-hidden series (like the quizzes container series) don't appear as cards.
+    // Admin surfaces omit the param and still see every series.
+    if (exclude_hidden === 'true') {
+      query = query.eq('hidden_from_listing', false);
     }
 
     const { data: testSeries, error, count } = await query;
@@ -470,7 +477,7 @@ const createTestSeries = async (req, res) => {
   try {
     const {
       title, slug: customSlug, description, category_id, subcategory_id, difficulty_id,
-      is_published, is_free, price, display_order, logo_url, thumbnail_url,
+      is_published, is_free, price, display_order, logo_url, thumbnail_url, hidden_from_listing,
     } = req.body;
 
     if (!title) return res.status(400).json({ error: 'Title is required' });
@@ -499,6 +506,7 @@ const createTestSeries = async (req, res) => {
         price: price || 0,
         display_order: display_order || 0,
         logo_url, thumbnail_url,
+        hidden_from_listing: hidden_from_listing || false,
       })
       .select()
       .single();
@@ -521,7 +529,7 @@ const updateTestSeries = async (req, res) => {
     const { id } = req.params;
     const {
       title, slug, description, category_id, subcategory_id, difficulty_id,
-      is_published, is_free, price, display_order, logo_url, thumbnail_url,
+      is_published, is_free, price, display_order, logo_url, thumbnail_url, hidden_from_listing,
     } = req.body;
 
     const updateData = { updated_at: new Date().toISOString() };
@@ -571,6 +579,7 @@ const updateTestSeries = async (req, res) => {
     if (display_order !== undefined) updateData.display_order = display_order;
     if (logo_url !== undefined) updateData.logo_url = logo_url;
     if (thumbnail_url !== undefined) updateData.thumbnail_url = thumbnail_url;
+    if (hidden_from_listing !== undefined) updateData.hidden_from_listing = hidden_from_listing;
 
     const { data: testSeries, error } = await supabase
       .from('test_series')
