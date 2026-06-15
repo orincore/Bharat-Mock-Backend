@@ -3,6 +3,16 @@ const { uploadToR2 } = require('../utils/fileUpload');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
 
+// Admin-entered JSON-LD schemas. The editor may send a parsed object/array (valid JSON)
+// or a raw string (e.g. pasted <script> tags or several objects). Store as text so any
+// of those round-trips; the public blog page parses it back into one or more schemas.
+const normalizeStructuredData = (value) => {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === 'string') return value.trim() || null;
+  try { return JSON.stringify(value); } catch { return null; }
+};
+
 const BLOG_TTL = 1800; // 30 minutes — invalidated on every write
 const blogSlugKey  = (slug)   => buildCacheKey('blog_slug', slug);
 const blogContentKey = (blogId) => buildCacheKey('blog_content', blogId);
@@ -342,6 +352,7 @@ const blogController = {
         og_description,
         og_image_url,
         canonical_url,
+        structured_data,
         is_current_affairs_note,
         current_affairs_tag,
         status: requestedStatus
@@ -379,6 +390,7 @@ const blogController = {
         og_description: og_description || null,
         og_image_url: og_image_url || null,
         canonical_url: canonical_url || null,
+        structured_data: normalizeStructuredData(structured_data) ?? null,
         is_current_affairs_note: Boolean(is_current_affairs_note),
         current_affairs_tag: current_affairs_tag || null,
         created_by: req.user?.id || null,
@@ -421,6 +433,7 @@ const blogController = {
         og_description,
         og_image_url,
         canonical_url,
+        structured_data,
         is_current_affairs_note,
         current_affairs_tag,
         status: requestedStatus
@@ -458,6 +471,7 @@ const blogController = {
       if (og_description !== undefined) payload.og_description = og_description;
       if (og_image_url !== undefined) payload.og_image_url = og_image_url;
       if (canonical_url !== undefined) payload.canonical_url = canonical_url;
+      if (structured_data !== undefined) payload.structured_data = normalizeStructuredData(structured_data);
       if (is_current_affairs_note !== undefined) payload.is_current_affairs_note = Boolean(is_current_affairs_note);
       if (current_affairs_tag !== undefined) payload.current_affairs_tag = current_affairs_tag || null;
       if (req.body.author_id !== undefined) payload.author_id = req.body.author_id || null;
