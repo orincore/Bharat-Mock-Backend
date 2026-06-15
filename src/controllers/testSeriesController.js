@@ -870,6 +870,32 @@ const reorderExams = async (req, res) => {
   }
 };
 
+// Reorders the test series cards shown on the public /mock-test-series page.
+// orderedIds is the full list of series ids in the desired display order.
+const reorderTestSeries = async (req, res) => {
+  try {
+    const { orderedIds } = req.body;
+    if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'orderedIds must be a non-empty array' });
+    }
+
+    const updates = orderedIds.map((id, index) =>
+      supabase.from('test_series').update({ display_order: index }).eq('id', id)
+    );
+    const results = await Promise.all(updates);
+    const failed = results.find(r => r.error);
+    if (failed) {
+      logger.error('Reorder test series error:', failed.error);
+      return res.status(500).json({ success: false, message: 'Failed to reorder test series' });
+    }
+    await invalidateTestSeriesCaches();
+    res.json({ success: true, message: 'Test series reordered successfully' });
+  } catch (error) {
+    logger.error('Reorder test series error:', error);
+    res.status(500).json({ success: false, message: 'Server error while reordering test series' });
+  }
+};
+
 const uploadTestSeriesLogo = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1024,6 +1050,7 @@ module.exports = {
   reorderSections,
   reorderTopics,
   reorderExams,
+  reorderTestSeries,
   uploadTestSeriesLogo,
   uploadTestSeriesThumbnail,
   deleteTestSeriesLogo,

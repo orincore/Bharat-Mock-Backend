@@ -18,6 +18,7 @@ const {
   reorderSections,
   reorderTopics,
   reorderExams,
+  reorderTestSeries,
   uploadTestSeriesLogo,
   uploadTestSeriesThumbnail,
   deleteTestSeriesLogo,
@@ -47,6 +48,7 @@ router.put('/topics/:id', authenticate, adminAuth, updateTopic);
 router.delete('/topics/:id', authenticate, adminAuth, deleteTopic);
 
 // Reorder routes
+router.post('/reorder', authenticate, adminAuth, reorderTestSeries);
 router.post('/sections/reorder', authenticate, adminAuth, reorderSections);
 router.post('/topics/reorder', authenticate, adminAuth, reorderTopics);
 router.post('/exams/reorder', authenticate, adminAuth, reorderExams);

@@ -1,3 +1,4 @@
+const { randomUUID } = require('crypto');
 const supabase = require('../config/database');
 const logger = require('../config/logger');
 
@@ -59,7 +60,10 @@ const sanitizeSocialLinks = (links = []) => {
   return links
     .filter((link) => link && link.platform && link.url)
     .map((link, index) => ({
-      id: link.id,
+      // New links arrive without an id; generate one so the NOT NULL `id` column is
+      // satisfied (a null id is rejected — the column DEFAULT only fires when id is
+      // omitted) and the upsert's onConflict:'id' has a stable key for every row.
+      id: link.id || randomUUID(),
       platform: link.platform,
       label: link.label || link.platform,
       url: link.url,

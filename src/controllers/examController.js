@@ -1314,11 +1314,14 @@ const getQuizGroups = async (req, res) => {
     const { data: exams, error } = await supabase
       .from('exams')
       .select(
-        'id, title, duration, total_marks, total_questions, category_id, subcategory_id, difficulty, difficulty_id, status, start_date, end_date, exam_date, is_free, image_url, logo_url, thumbnail_url, allow_anytime, supports_hindi, exam_type, is_premium, slug, url_path, created_at, attempts, test_series_id, test_series_section_id, test_series_topic_id'
+        'id, title, duration, total_marks, total_questions, category_id, subcategory_id, difficulty, difficulty_id, status, start_date, end_date, exam_date, is_free, image_url, logo_url, thumbnail_url, allow_anytime, supports_hindi, exam_type, is_premium, slug, url_path, created_at, attempts, display_order, test_series_id, test_series_section_id, test_series_topic_id'
       )
       .eq('is_published', true)
       .eq('exam_type', 'short_quiz')
       .is('deleted_at', null)
+      // Respect the admin-configured quiz order (same as the test-series detail page),
+      // newest-first only as a tiebreaker when display_order matches.
+      .order('display_order', { ascending: true })
       .order('created_at', { ascending: false })
       .limit(limitNum);
 
@@ -1356,6 +1359,7 @@ const getQuizGroups = async (req, res) => {
         section_order: section?.display_order ?? null,
         topic_name: topic?.name || null,
         topic_order: topic?.display_order ?? null,
+        display_order: exam.display_order ?? null,
       };
     });
 
