@@ -160,6 +160,30 @@ class RedisCache {
     return true;
   }
 
+  // Flush every cache entry owned by this application (keys prefixed with
+  // "bharat_mock:"). Falls back to clearing the in-memory store. Returns the
+  // number of Redis keys removed (0 when only the memory fallback was cleared).
+  async flushAll() {
+    let removed = 0;
+    if (this.isConnected && this.client) {
+      try {
+        let cursor = '0';
+        do {
+          const [next, keys] = await this.client.scan(cursor, 'MATCH', 'bharat_mock:*', 'COUNT', 500);
+          cursor = next;
+          if (keys.length > 0) {
+            removed += keys.length;
+            await this.client.del(...keys);
+          }
+        } while (cursor !== '0');
+      } catch (e) {
+        logger.warn('Redis flushAll failed — clearing memory cache only:', e.message);
+      }
+    }
+    memStore.clear();
+    return removed;
+  }
+
   async mget(keys) {
     if (!keys.length) return {};
 

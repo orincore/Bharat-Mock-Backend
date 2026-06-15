@@ -59,6 +59,7 @@ const { adminGetAbout, adminUpsertAbout } = require('../controllers/aboutControl
 const { adminGetPrivacyPolicy, adminUpsertPrivacyPolicy } = require('../controllers/privacyController');
 const { adminGetDisclaimer, adminUpsertDisclaimer } = require('../controllers/disclaimerController');
 const { adminGetRefundPolicy, adminUpsertRefundPolicy } = require('../controllers/refundController');
+const { clearCache } = require('../controllers/cacheController');
 
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -172,6 +173,9 @@ router.post('/exams/:id/upload-pdf-en', checkPermission('exams', 'update'), acti
 router.post('/exams/:id/upload-pdf-hi', checkPermission('exams', 'update'), activityLogger('UPLOAD_EXAM_PDF_HI', 'exam'), uploadPdf.single('pdf'), uploadExamPdfHi);
 router.delete('/exams/:id/remove-pdf-en', requireRole('admin'), activityLogger('REMOVE_EXAM_PDF_EN', 'exam'), removeExamPdfEn);
 router.delete('/exams/:id/remove-pdf-hi', requireRole('admin'), activityLogger('REMOVE_EXAM_PDF_HI', 'exam'), removeExamPdfHi);
+
+// Clear all Redis/application cache (admin only)
+router.post('/cache/clear', requireRole('admin'), activityLogger('CLEAR_CACHE', 'cache'), clearCache);
 
 router.get('/users', requireRole('admin'), getAllUsers);
 router.get('/users/:id', requireRole('admin'), getUserDetails);
