@@ -110,6 +110,11 @@ const deleteSubcategory = async (req, res) => {
     // Null out subcategory_id on exams referencing this subcategory
     await supabase.from('exams').update({ subcategory_id: null }).eq('subcategory_id', id);
 
+    // Test series also reference this subcategory via a nullable FK
+    // (test_series_subcategory_id_fkey) with no ON DELETE action, so the delete is
+    // blocked until those references are cleared. Detach them like we do for exams.
+    await supabase.from('test_series').update({ subcategory_id: null }).eq('subcategory_id', id);
+
     const { error } = await supabase
       .from('exam_subcategories')
       .delete()
@@ -240,6 +245,14 @@ deleteCategory = async (req, res) => {
         return res.status(500).json({ success: false, message: 'Failed to delete linked exams' });
       }
     }
+
+    // Detach test series that reference this category or its subcategories via nullable
+    // FKs (no ON DELETE action), otherwise the subcategory/category deletes below are
+    // blocked by test_series_subcategory_id_fkey / test_series_category_id_fkey.
+    if (subIds.length > 0) {
+      await supabase.from('test_series').update({ subcategory_id: null }).in('subcategory_id', subIds);
+    }
+    await supabase.from('test_series').update({ category_id: null }).eq('category_id', id);
 
     // Delete subcategory logos + records
     for (const sub of subcategories || []) {
