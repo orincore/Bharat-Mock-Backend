@@ -17,7 +17,7 @@
 //     key). This lets admins remove a schema field without it lingering, while a
 //     config-only save leaves the existing schema untouched.
 
-const INTERNAL_KEYS = ['tab_headings', 'toc_order', 'tab_seo'];
+const INTERNAL_KEYS = ['tab_headings', 'toc_order', 'tab_seo', 'pdf_url'];
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 

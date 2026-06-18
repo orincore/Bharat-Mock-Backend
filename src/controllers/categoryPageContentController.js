@@ -105,6 +105,7 @@ const categoryPageContentController = {
       const tocOrder = (seo?.structured_data?.toc_order) || {};
       const tabHeadings = (seo?.structured_data?.tab_headings) || {};
       const tabSeo = (seo?.structured_data?.tab_seo) || {};
+      const pdfUrl = (seo?.structured_data?.pdf_url) || null;
 
       const responsePayload = {
         sections: groupedBlocks,
@@ -113,7 +114,8 @@ const categoryPageContentController = {
         customTabs: customTabs || [],
         tocOrder,
         tabHeadings,
-        tabSeo
+        tabSeo,
+        pdfUrl
       };
 
       if (!isAdminOrEditor) {
