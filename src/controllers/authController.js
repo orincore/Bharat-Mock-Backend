@@ -41,14 +41,17 @@ const normalizePlanRecord = (planData) => {
   };
 };
 
-const generateToken = (userId, role) => {
-  return jwt.sign({ userId, role: role || 'user' }, process.env.JWT_SECRET, {
+// `tv` (token version) is embedded in every token. The auth middleware rejects a
+// token whose tv no longer matches the user's current token_version, so bumping that
+// column invalidates outstanding sessions.
+const generateToken = (userId, role, tokenVersion = 0) => {
+  return jwt.sign({ userId, role: role || 'user', tv: tokenVersion ?? 0 }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || '7d'
   });
 };
 
-const generateRefreshToken = (userId) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET, {
+const generateRefreshToken = (userId, tokenVersion = 0) => {
+  return jwt.sign({ userId, tv: tokenVersion ?? 0 }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d'
   });
 };
@@ -246,7 +249,7 @@ const login = async (req, res) => {
 
     const { data: user, error: fetchError } = await supabase
       .from('users')
-      .select('id, email, password_hash, name, avatar_url, phone, date_of_birth, role, is_blocked, block_reason, deleted_at, created_at')
+      .select('id, email, password_hash, name, avatar_url, phone, role, is_blocked, block_reason, deleted_at, created_at, token_version')
       .eq('email', email)
       .single();
 
@@ -285,11 +288,11 @@ const login = async (req, res) => {
       });
     }
 
-    const token = generateToken(user.id, user.role);
-    const refreshToken = generateRefreshToken(user.id);
+    const token = generateToken(user.id, user.role, user.token_version);
+    const refreshToken = generateRefreshToken(user.id, user.token_version);
 
     // eslint-disable-next-line no-unused-vars
-    const { password_hash, ...userWithoutPassword } = user;
+    const { password_hash, token_version, ...userWithoutPassword } = user;
 
     res.json({
       success: true,
@@ -327,7 +330,6 @@ const getProfile = async (req, res) => {
         name,
         phone,
         avatar_url,
-        date_of_birth,
         role,
         bio,
         is_verified,
@@ -406,12 +408,11 @@ const getProfile = async (req, res) => {
 
 const updateProfile = async (req, res) => {
   try {
-    const { name, phone, date_of_birth, education, preferences, bio } = req.body;
+    const { name, phone, education, preferences, bio } = req.body;
 
     const updateData = {};
     if (name) updateData.name = name;
     if (phone) updateData.phone = phone;
-    if (date_of_birth) updateData.date_of_birth = date_of_birth;
     if (bio !== undefined) updateData.bio = bio;
 
     if (Object.keys(updateData).length > 0) {
@@ -554,7 +555,7 @@ const resetPassword = async (req, res) => {
 
     const { data: user } = await supabase
       .from('users')
-      .select('password_hash, email, name')
+      .select('password_hash, email, name, token_version')
       .eq('id', resetToken.user_id)
       .single();
 
@@ -568,10 +569,19 @@ const resetPassword = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
+    // Bump token_version to revoke EVERY existing session for this account. After a
+    // password reset the legitimate owner must sign in again with the new password,
+    // and anyone who had hijacked a session is logged out immediately.
     await supabase
       .from('users')
-      .update({ password_hash: hashedPassword })
+      .update({
+        password_hash: hashedPassword,
+        token_version: (user.token_version ?? 0) + 1
+      })
       .eq('id', resetToken.user_id);
+
+    // Drop the cached profile/init so no revoked session is served stale data.
+    await bustUserCaches(resetToken.user_id);
 
     await supabase
       .from('password_reset_tokens')
@@ -597,43 +607,147 @@ const resetPassword = async (req, res) => {
   }
 };
 
-const changePassword = async (req, res) => {
-  try {
-    const { currentPassword, newPassword } = req.body;
+// Mask an email for safe display in the UI: jo****@gmail.com
+const maskEmail = (email = '') => {
+  const [local, domain] = email.split('@');
+  if (!domain) return email;
+  const visible = local.slice(0, 2);
+  return `${visible}${'*'.repeat(Math.max(local.length - 2, 1))}@${domain}`;
+};
 
+// Step 1 of the authenticated change-password flow: email a 6-digit OTP to the
+// logged-in user's registered address. Reuses the password_reset_tokens store.
+const sendChangePasswordOtp = async (req, res) => {
+  try {
     const { data: user } = await supabase
       .from('users')
-      .select('password_hash')
+      .select('id, email, name')
       .eq('id', req.user.id)
+      .is('deleted_at', null)
       .single();
 
-    const isPasswordValid = await bcrypt.compare(currentPassword, user.password_hash);
-
-    if (!isPasswordValid) {
-      return res.status(401).json({
-        success: false,
-        message: 'Current password is incorrect'
-      });
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    const isSamePassword = await bcrypt.compare(newPassword, user.password_hash);
-    if (isSamePassword) {
-      return res.status(400).json({
-        success: false,
-        message: 'New password must be different from the current password'
-      });
-    }
+    const otp = generateNumericOtp();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
 
-    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    // Invalidate any previous unused codes for this user.
+    await supabase
+      .from('password_reset_tokens')
+      .update({ is_used: true })
+      .eq('user_id', user.id)
+      .eq('is_used', false);
 
     await supabase
-      .from('users')
-      .update({ password_hash: hashedPassword })
-      .eq('id', req.user.id);
+      .from('password_reset_tokens')
+      .insert({
+        user_id: user.id,
+        token: otp,
+        expires_at: expiresAt.toISOString(),
+        is_used: false
+      });
+
+    try {
+      await sendPasswordOtpEmail(user.email, user.name, otp);
+    } catch (emailError) {
+      logger.error('Failed to send change-password OTP email:', emailError);
+      return res.status(500).json({ success: false, message: 'Failed to send verification code' });
+    }
 
     res.json({
       success: true,
-      message: 'Password changed successfully'
+      message: 'A verification code has been sent to your email',
+      email: maskEmail(user.email)
+    });
+  } catch (error) {
+    logger.error('Send change-password OTP error:', error);
+    res.status(500).json({ success: false, message: 'Failed to send verification code' });
+  }
+};
+
+// Step 2: verify the OTP and set the new password.
+const changePassword = async (req, res) => {
+  try {
+    const { otp, newPassword } = req.body;
+
+    const { data: resetToken } = await supabase
+      .from('password_reset_tokens')
+      .select('id, expires_at, is_used')
+      .eq('user_id', req.user.id)
+      .eq('token', otp)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!resetToken || resetToken.is_used) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid or expired verification code'
+      });
+    }
+
+    if (new Date(resetToken.expires_at) < new Date()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Verification code has expired. Please request a new one.'
+      });
+    }
+
+    const { data: user } = await supabase
+      .from('users')
+      .select('password_hash, email, name, role, token_version')
+      .eq('id', req.user.id)
+      .single();
+
+    if (user.password_hash) {
+      const isSamePassword = await bcrypt.compare(newPassword, user.password_hash);
+      if (isSamePassword) {
+        return res.status(400).json({
+          success: false,
+          message: 'New password must be different from the current password'
+        });
+      }
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    const nextTokenVersion = (user.token_version ?? 0) + 1;
+
+    // Bump token_version: this revokes ALL sessions (every outstanding token carries the
+    // old tv). We then immediately mint fresh tokens for THIS session below, so the user
+    // who initiated the change stays logged in while every other device — including a
+    // hijacker's — is signed out.
+    await supabase
+      .from('users')
+      .update({
+        password_hash: hashedPassword,
+        token_version: nextTokenVersion
+      })
+      .eq('id', req.user.id);
+
+    await bustUserCaches(req.user.id);
+
+    await supabase
+      .from('password_reset_tokens')
+      .update({ is_used: true })
+      .eq('id', resetToken.id);
+
+    try {
+      await sendPasswordChangedEmail(user.email, user.name);
+    } catch (emailError) {
+      logger.error('Failed to send password changed email:', emailError);
+    }
+
+    // Fresh tokens for the current session, stamped with the new tv so they survive the
+    // revocation. The client must replace its stored tokens with these.
+    const newToken = generateToken(req.user.id, user.role, nextTokenVersion);
+    const newRefreshToken = generateRefreshToken(req.user.id, nextTokenVersion);
+
+    res.json({
+      success: true,
+      message: 'Password changed successfully',
+      data: { token: newToken, refreshToken: newRefreshToken }
     });
   } catch (error) {
     logger.error('Change password error:', error);
@@ -659,8 +773,8 @@ const googleCallback = async (req, res) => {
       );
     }
 
-    const token = generateToken(user.id, user.role);
-    const refreshToken = generateRefreshToken(user.id);
+    const token = generateToken(user.id, user.role, user.token_version);
+    const refreshToken = generateRefreshToken(user.id, user.token_version);
 
     const redirectUrl = user.is_onboarded
       ? `${process.env.FRONTEND_URL}/auth/callback?token=${token}&refresh=${refreshToken}`
@@ -677,7 +791,7 @@ const googleCallback = async (req, res) => {
 // complete details. Consumes the short-lived onboarding token from googleCallback.
 const completeGoogleRegistration = async (req, res) => {
   try {
-    const { pendingToken, phone, date_of_birth, interested_categories, password } = req.body;
+    const { pendingToken, phone, password } = req.body;
 
     if (!pendingToken) {
       return res.status(400).json({
@@ -697,10 +811,10 @@ const completeGoogleRegistration = async (req, res) => {
       });
     }
 
-    if (!phone || !date_of_birth || !Array.isArray(interested_categories) || interested_categories.length === 0) {
+    if (!phone) {
       return res.status(400).json({
         success: false,
-        message: 'Phone, date of birth, and at least one interested category are required.'
+        message: 'Phone number is required.'
       });
     }
 
@@ -738,14 +852,13 @@ const completeGoogleRegistration = async (req, res) => {
         avatar_url: pending.avatar_url || null,
         password_hash: passwordHash,
         phone,
-        date_of_birth,
         role: 'user',
         is_verified: true,
         is_onboarded: true,
         auth_provider: 'google',
         google_id: pending.google_id
       })
-      .select('id, email, name, phone, avatar_url, date_of_birth, role, is_verified, is_onboarded, created_at')
+      .select('id, email, name, phone, avatar_url, role, is_verified, is_onboarded, created_at')
       .single();
 
     if (createError || !newUser) {
@@ -763,19 +876,6 @@ const completeGoogleRegistration = async (req, res) => {
       newsletter: true,
       exam_reminders: true
     });
-
-    const categoryInserts = interested_categories.map(categoryId => ({
-      user_id: newUser.id,
-      category_id: categoryId
-    }));
-
-    const { error: categoryError } = await supabase
-      .from('user_interested_categories')
-      .insert(categoryInserts);
-
-    if (categoryError) {
-      logger.error('Category insert error (google registration):', categoryError);
-    }
 
     try {
       await sendWelcomeEmail(newUser.email, newUser.name);
@@ -799,7 +899,7 @@ const completeGoogleRegistration = async (req, res) => {
 
 const completeOnboarding = async (req, res) => {
   try {
-    const { phone, date_of_birth, interested_categories, password } = req.body;
+    const { phone, password } = req.body;
     const userId = req.user.id;
     const alreadyOnboarded = req.user.is_onboarded;
     const isGoogleUser = req.user.auth_provider === 'google';
@@ -813,7 +913,6 @@ const completeOnboarding = async (req, res) => {
 
     const updatePayload = {
       phone,
-      date_of_birth,
       is_onboarded: true
     };
 
@@ -838,19 +937,6 @@ const completeOnboarding = async (req, res) => {
     // would keep returning is_onboarded=false and bounce the user back to onboarding.
     await bustUserCaches(userId);
 
-    const categoryInserts = interested_categories.map(categoryId => ({
-      user_id: userId,
-      category_id: categoryId
-    }));
-
-    const { error: categoryError } = await supabase
-      .from('user_interested_categories')
-      .insert(categoryInserts);
-
-    if (categoryError) {
-      logger.error('Category insert error:', categoryError);
-    }
-
     const { data: updatedUser } = await supabase
       .from('users')
       .select(`
@@ -859,7 +945,6 @@ const completeOnboarding = async (req, res) => {
         name,
         phone,
         avatar_url,
-        date_of_birth,
         role,
         is_verified,
         is_onboarded,
@@ -912,7 +997,7 @@ const refreshAuthToken = async (req, res) => {
     const userId = decoded.userId;
     const { data: user } = await supabase
       .from('users')
-      .select('id, role, is_blocked, block_reason')
+      .select('id, role, is_blocked, block_reason, token_version')
       .eq('id', userId)
       .maybeSingle();
 
@@ -923,6 +1008,17 @@ const refreshAuthToken = async (req, res) => {
       });
     }
 
+    // A refresh token minted before a password reset/change is no longer valid — its
+    // tv lags behind the user's current token_version. Block it so a stolen refresh
+    // token can't mint fresh access tokens.
+    if ((decoded.tv ?? 0) !== (user.token_version ?? 0)) {
+      return res.status(401).json({
+        success: false,
+        code: 'SESSION_REVOKED',
+        message: 'Your session has expired. Please sign in again.'
+      });
+    }
+
     if (user.is_blocked) {
       return res.status(403).json({
         success: false,
@@ -930,8 +1026,8 @@ const refreshAuthToken = async (req, res) => {
       });
     }
 
-    const newAccessToken = generateToken(userId, user.role);
-    const newRefreshToken = generateRefreshToken(userId);
+    const newAccessToken = generateToken(userId, user.role, user.token_version);
+    const newRefreshToken = generateRefreshToken(userId, user.token_version);
 
     res.json({
       success: true,
@@ -1028,6 +1124,7 @@ module.exports = {
   getPublicProfile,
   forgotPassword,
   resetPassword,
+  sendChangePasswordOtp,
   changePassword,
   googleCallback,
   completeOnboarding,

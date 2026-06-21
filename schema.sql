@@ -16,9 +16,11 @@ CREATE TABLE users (
     name VARCHAR(255) NOT NULL,
     phone VARCHAR(20),
     avatar_url TEXT,
-    date_of_birth DATE,
     is_verified BOOLEAN DEFAULT FALSE,
     is_blocked BOOLEAN DEFAULT FALSE,
+    -- Bumped to revoke outstanding JWTs (password reset/change). Tokens carry a `tv`
+    -- claim that must match this value or auth is rejected.
+    token_version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     deleted_at TIMESTAMP WITH TIME ZONE

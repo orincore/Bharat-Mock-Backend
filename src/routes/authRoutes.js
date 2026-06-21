@@ -54,7 +54,6 @@ router.put('/profile',
   [
     body('name').optional().trim().notEmpty().withMessage('Name cannot be empty'),
     body('phone').optional({ nullable: true, checkFalsy: true }).isString().withMessage('Valid phone number required'),
-    body('date_of_birth').optional({ nullable: true, checkFalsy: true }).isISO8601().withMessage('Valid date required'),
     body('bio').optional({ nullable: true }).isString().withMessage('Bio must be a string'),
     validate
   ],
@@ -78,10 +77,17 @@ router.post('/reset-password',
   authController.resetPassword
 );
 
+// Step 1: email an OTP to the logged-in user's registered address.
+router.post('/change-password/send-otp',
+  authenticate,
+  authController.sendChangePasswordOtp
+);
+
+// Step 2: verify the OTP and set the new password.
 router.post('/change-password',
   authenticate,
   [
-    body('currentPassword').notEmpty().withMessage('Current password is required'),
+    body('otp').isLength({ min: 6, max: 6 }).withMessage('A valid 6-digit code is required'),
     body('newPassword').isLength({ min: 8 }).withMessage('New password must be at least 8 characters'),
     validate
   ],
@@ -106,8 +112,6 @@ router.post('/google/complete-registration',
   [
     body('pendingToken').notEmpty().withMessage('Onboarding session is required'),
     body('phone').matches(/^\+?[1-9]\d{7,14}$/).withMessage('Valid phone number required'),
-    body('date_of_birth').isISO8601().withMessage('Valid date required'),
-    body('interested_categories').isArray({ min: 1 }).withMessage('At least one category must be selected'),
     body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
     validate
   ],
@@ -120,8 +124,6 @@ router.post('/onboarding',
     body('phone')
       .matches(/^\+?[1-9]\d{7,14}$/)
       .withMessage('Valid phone number required'),
-    body('date_of_birth').isISO8601().withMessage('Valid date required'),
-    body('interested_categories').isArray({ min: 1 }).withMessage('At least one category must be selected'),
     body('password').optional().isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
     validate
   ],

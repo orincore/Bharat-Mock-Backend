@@ -233,7 +233,6 @@ const getUserDetails = async (req, res) => {
         block_reason,
         is_onboarded,
         auth_provider,
-        date_of_birth,
         is_premium,
         subscription_plan_id,
         subscription_expires_at,
@@ -1614,7 +1613,7 @@ const updateUser = async (req, res) => {
       .from('users')
       .update(updateData)
       .eq('id', id)
-      .select('id, email, name, phone, bio, role, is_verified, is_blocked, block_reason, avatar_url, date_of_birth, auth_provider, is_onboarded, is_premium, subscription_plan_id, subscription_expires_at, subscription_auto_renew, created_at')
+      .select('id, email, name, phone, bio, role, is_verified, is_blocked, block_reason, avatar_url, auth_provider, is_onboarded, is_premium, subscription_plan_id, subscription_expires_at, subscription_auto_renew, created_at')
       .single();
 
     if (error) {

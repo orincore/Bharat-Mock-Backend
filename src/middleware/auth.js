@@ -4,13 +4,12 @@ const logger = require('../config/logger');
 
 // A Google OAuth signup that never finished the "Complete Your Profile" step is
 // considered incomplete. is_onboarded is the authoritative flag (set only on
-// completion); phone + date_of_birth are checked as defense in depth. Scoped to
-// Google users so email/password accounts — which never go through onboarding — are
-// unaffected.
+// completion); phone is checked as defense in depth. Scoped to Google users so
+// email/password accounts — which never go through onboarding — are unaffected.
 const isProfileIncomplete = (user) =>
   !!user &&
   user.auth_provider === 'google' &&
-  (!user.is_onboarded || !user.phone || !user.date_of_birth);
+  (!user.is_onboarded || !user.phone);
 
 // Identity endpoints an incomplete user must still reach: read their own profile,
 // finish onboarding, change/reset password, refresh token, log out, delete account.
@@ -38,10 +37,22 @@ const authenticate = async (req, res, next) => {
     
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, email, name, avatar_url, phone, date_of_birth, is_blocked, is_verified, is_onboarded, auth_provider, role')
+      .select('id, email, name, avatar_url, phone, is_blocked, is_verified, is_onboarded, auth_provider, role, token_version')
       .eq('id', decoded.userId)
       .is('deleted_at', null)
       .maybeSingle();
+
+    // Session-revocation check: a token whose tv lags the user's current token_version
+    // was minted before a password reset/change and is no longer trusted. Only enforced
+    // when we have a real DB row (the fallback path below is for resilience when the DB
+    // is unreachable and cannot be revoked anyway).
+    if (user && (decoded.tv ?? 0) !== (user.token_version ?? 0)) {
+      return res.status(401).json({
+        success: false,
+        code: 'SESSION_REVOKED',
+        message: 'Your session has ended. Please sign in again.'
+      });
+    }
 
     let resolvedUser = user;
 
@@ -53,7 +64,6 @@ const authenticate = async (req, res, next) => {
         name: decoded.name || null,
         avatar_url: decoded.avatar_url || null,
         phone: decoded.phone || null,
-        date_of_birth: decoded.date_of_birth || null,
         is_blocked: false,
         is_verified: true,
         is_onboarded: true,
