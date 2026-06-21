@@ -256,6 +256,54 @@ const getUserStats = async (req, res) => {
   }
 };
 
+// Robustly load section-wise analysis for a result. Previously this relied solely on a
+// PostgREST FK embed whose error was silently discarded — any embed/resolution hiccup
+// made the whole section breakdown vanish ("Section-wise analysis is not available").
+// Here we fetch the rows first (keyed by the real result id) and resolve section names
+// in a second query, so the breakdown shows whenever rows exist.
+const loadSectionWiseAnalysis = async (resultId, attemptLanguage = 'en') => {
+  if (!resultId) return [];
+
+  const { data: rows, error } = await supabase
+    .from('section_analysis')
+    .select('id, section_id, score, total_marks, correct_answers, wrong_answers, unattempted, accuracy, time_taken')
+    .eq('result_id', resultId);
+
+  if (error) {
+    logger.error('Failed to load section_analysis:', error, { resultId });
+    return [];
+  }
+  if (!rows || rows.length === 0) return [];
+
+  const sectionIds = [...new Set(rows.map(r => r.section_id).filter(Boolean))];
+  const sectionById = new Map();
+  if (sectionIds.length > 0) {
+    const { data: sections } = await supabase
+      .from('exam_sections')
+      .select('id, name, name_hi')
+      .in('id', sectionIds);
+    (sections || []).forEach(s => sectionById.set(s.id, s));
+  }
+
+  return rows.map(r => {
+    const section = sectionById.get(r.section_id);
+    const sectionName = attemptLanguage === 'hi' && section?.name_hi
+      ? section.name_hi
+      : (section?.name || 'Section');
+    return {
+      sectionId: r.section_id,
+      sectionName,
+      score: r.score,
+      totalMarks: r.total_marks,
+      correctAnswers: r.correct_answers,
+      wrongAnswers: r.wrong_answers,
+      unattempted: r.unattempted,
+      accuracy: r.accuracy,
+      timeTaken: r.time_taken,
+    };
+  });
+};
+
 const getResultByAttemptId = async (req, res) => {
   try {
     const { attemptId } = req.params;
@@ -271,38 +319,7 @@ const getResultByAttemptId = async (req, res) => {
 
     const attemptLanguage = result.exam_attempts?.language || 'en';
 
-    const { data: sectionAnalysis } = await supabase
-      .from('section_analysis')
-      .select(`
-        id,
-        score,
-        total_marks,
-        correct_answers,
-        wrong_answers,
-        unattempted,
-        accuracy,
-        time_taken,
-        exam_sections (
-          id,
-          name,
-          name_hi
-        )
-      `)
-      .eq('result_id', result.id);
-
-    result.sectionWiseAnalysis = sectionAnalysis?.map(sa => ({
-      sectionId: sa.exam_sections.id,
-      sectionName: attemptLanguage === 'hi' && sa.exam_sections.name_hi 
-        ? sa.exam_sections.name_hi 
-        : sa.exam_sections.name,
-      score: sa.score,
-      totalMarks: sa.total_marks,
-      correctAnswers: sa.correct_answers,
-      wrongAnswers: sa.wrong_answers,
-      unattempted: sa.unattempted,
-      accuracy: sa.accuracy,
-      timeTaken: sa.time_taken
-    })) || [];
+    result.sectionWiseAnalysis = await loadSectionWiseAnalysis(result.id, attemptLanguage);
 
     result.exam = {
       ...result.exams,
@@ -387,35 +404,12 @@ const getResultById = async (req, res) => {
       result = ensured.result;
     }
 
-    const { data: sectionAnalysis } = await supabase
-      .from('section_analysis')
-      .select(`
-        id,
-        score,
-        total_marks,
-        correct_answers,
-        wrong_answers,
-        unattempted,
-        accuracy,
-        time_taken,
-        exam_sections (
-          id,
-          name
-        )
-      `)
-      .eq('result_id', id);
-
-    result.sectionWiseAnalysis = sectionAnalysis.map(sa => ({
-      sectionId: sa.exam_sections.id,
-      sectionName: sa.exam_sections.name,
-      score: sa.score,
-      totalMarks: sa.total_marks,
-      correctAnswers: sa.correct_answers,
-      wrongAnswers: sa.wrong_answers,
-      unattempted: sa.unattempted,
-      accuracy: sa.accuracy,
-      timeTaken: sa.time_taken
-    }));
+    // Use the resolved result.id (the URL param may be an attempt id) and the resilient
+    // loader so the breakdown is keyed correctly and never crashes on a missing embed.
+    result.sectionWiseAnalysis = await loadSectionWiseAnalysis(
+      result.id,
+      result.exam_attempts?.language || result.language || 'en'
+    );
 
     result.comparison = await enrichResultComparisons(result);
     if (!result.rank && result.comparison?.computedRank) {

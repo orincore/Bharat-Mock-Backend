@@ -1176,7 +1176,12 @@ const evaluateExam = async (attemptId, examId, userId) => {
     const sectionAnalysisRows = [];
     for (const [sectionId, scores] of Object.entries(sectionScores)) {
       const section = sectionMap[sectionId];
-      if (!section || section.language !== attemptLanguage) continue;
+      // Every section in sectionScores already passed the language/content filter via
+      // allowedSectionIds, so we only guard against a genuinely missing section here.
+      // (The previous `section.language !== attemptLanguage` re-check could drop every
+      // row when the attempt language fell back to English, leaving the result with no
+      // section-wise breakdown.)
+      if (!section) continue;
       const sectionTotal = sectionTotals[sectionId]?.totalMarks || (section.total_questions * section.marks_per_question);
       const accuracy = (scores.correct + scores.wrong) > 0
         ? (scores.correct / (scores.correct + scores.wrong)) * 100 : 0;
@@ -1189,7 +1194,14 @@ const evaluateExam = async (attemptId, examId, userId) => {
     }
 
     if (sectionAnalysisRows.length > 0) {
-      await supabase.from('section_analysis').insert(sectionAnalysisRows);
+      const { error: sectionAnalysisError } = await supabase
+        .from('section_analysis')
+        .insert(sectionAnalysisRows);
+      if (sectionAnalysisError) {
+        logger.error('Failed to insert section_analysis rows:', sectionAnalysisError, { attemptId, resultId: result.id });
+      }
+    } else {
+      logger.warn('No section_analysis rows generated for result', { attemptId, resultId: result.id });
     }
 
     return result.id;

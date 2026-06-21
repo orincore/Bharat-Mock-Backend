@@ -99,6 +99,21 @@ router.get('/google/callback',
   authController.googleCallback
 );
 
+// Public — creates the Google user's account once onboarding details are submitted.
+// No authenticate middleware: the user has no account/session yet, only a short-lived
+// onboarding token (validated inside the controller).
+router.post('/google/complete-registration',
+  [
+    body('pendingToken').notEmpty().withMessage('Onboarding session is required'),
+    body('phone').matches(/^\+?[1-9]\d{7,14}$/).withMessage('Valid phone number required'),
+    body('date_of_birth').isISO8601().withMessage('Valid date required'),
+    body('interested_categories').isArray({ min: 1 }).withMessage('At least one category must be selected'),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
+    validate
+  ],
+  authController.completeGoogleRegistration
+);
+
 router.post('/onboarding',
   authenticate,
   [

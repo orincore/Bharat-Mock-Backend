@@ -2,6 +2,25 @@ const jwt = require('jsonwebtoken');
 const supabase = require('../config/database');
 const logger = require('../config/logger');
 
+// A Google OAuth signup that never finished the "Complete Your Profile" step is
+// considered incomplete. is_onboarded is the authoritative flag (set only on
+// completion); phone + date_of_birth are checked as defense in depth. Scoped to
+// Google users so email/password accounts — which never go through onboarding — are
+// unaffected.
+const isProfileIncomplete = (user) =>
+  !!user &&
+  user.auth_provider === 'google' &&
+  (!user.is_onboarded || !user.phone || !user.date_of_birth);
+
+// Identity endpoints an incomplete user must still reach: read their own profile,
+// finish onboarding, change/reset password, refresh token, log out, delete account.
+// Everything else is blocked until onboarding is complete.
+const isOnboardingExemptPath = (req) => {
+  const path = req.originalUrl || req.url || '';
+  // All /auth/* routes are identity operations and never expose protected content.
+  return path.includes('/auth/');
+};
+
 const authenticate = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
@@ -19,7 +38,7 @@ const authenticate = async (req, res, next) => {
     
     const { data: user, error } = await supabase
       .from('users')
-      .select('id, email, name, avatar_url, is_blocked, is_verified, is_onboarded, auth_provider, role')
+      .select('id, email, name, avatar_url, phone, date_of_birth, is_blocked, is_verified, is_onboarded, auth_provider, role')
       .eq('id', decoded.userId)
       .is('deleted_at', null)
       .maybeSingle();
@@ -33,6 +52,8 @@ const authenticate = async (req, res, next) => {
         email: decoded.email || null,
         name: decoded.name || null,
         avatar_url: decoded.avatar_url || null,
+        phone: decoded.phone || null,
+        date_of_birth: decoded.date_of_birth || null,
         is_blocked: false,
         is_verified: true,
         is_onboarded: true,
@@ -42,9 +63,20 @@ const authenticate = async (req, res, next) => {
     }
 
     if (resolvedUser.is_blocked) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Your account has been blocked' 
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been blocked'
+      });
+    }
+
+    // Hard server-side onboarding gate. The client redirect alone is bypassable, so
+    // we reject every protected request from an incomplete profile here (except the
+    // /auth/* identity endpoints needed to actually complete onboarding or log out).
+    if (isProfileIncomplete(resolvedUser) && !isOnboardingExemptPath(req)) {
+      return res.status(403).json({
+        success: false,
+        code: 'PROFILE_INCOMPLETE',
+        message: 'Please complete your profile before accessing this resource.'
       });
     }
 

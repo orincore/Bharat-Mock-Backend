@@ -53,6 +53,37 @@ const generateRefreshToken = (userId) => {
   });
 };
 
+// A SEPARATE secret for the pre-registration onboarding token. Signing it with a
+// different key than JWT_SECRET guarantees it can never be accepted as a session token
+// by the auth middleware (which verifies with JWT_SECRET) — so this token grants no
+// access to anything except completing registration.
+const GOOGLE_ONBOARDING_SECRET =
+  process.env.GOOGLE_ONBOARDING_SECRET || `${process.env.JWT_SECRET}::google-onboarding`;
+const GOOGLE_ONBOARDING_EXPIRES_IN = process.env.GOOGLE_ONBOARDING_EXPIRES_IN || '30m';
+
+// Short-lived token that carries a verified Google identity through the onboarding form
+// BEFORE any user row exists. Created in googleCallback, consumed by completeGoogleRegistration.
+const generateOnboardingToken = (profile) =>
+  jwt.sign(
+    {
+      purpose: 'google_onboarding',
+      email: profile.email,
+      name: profile.name,
+      avatar_url: profile.avatar_url || null,
+      google_id: profile.google_id
+    },
+    GOOGLE_ONBOARDING_SECRET,
+    { expiresIn: GOOGLE_ONBOARDING_EXPIRES_IN }
+  );
+
+const verifyOnboardingToken = (token) => {
+  const decoded = jwt.verify(token, GOOGLE_ONBOARDING_SECRET);
+  if (decoded.purpose !== 'google_onboarding') {
+    throw new Error('Invalid onboarding token purpose');
+  }
+  return decoded;
+};
+
 const register = async (req, res) => {
   try {
     const { email, password, name, phone } = req.body;
@@ -616,11 +647,22 @@ const changePassword = async (req, res) => {
 const googleCallback = async (req, res) => {
   try {
     const user = req.user;
-    
+
+    // Brand-new Google signup — no DB row exists yet. Hand the user a short-lived
+    // ONBOARDING token (not a login token) and send them to the onboarding form. The
+    // account is created only when they submit complete details, so an incomplete
+    // profile can never exist or log in.
+    if (user.isPendingRegistration) {
+      const onboardingToken = generateOnboardingToken(user);
+      return res.redirect(
+        `${process.env.FRONTEND_URL}/onboarding?pending=${encodeURIComponent(onboardingToken)}`
+      );
+    }
+
     const token = generateToken(user.id, user.role);
     const refreshToken = generateRefreshToken(user.id);
 
-    const redirectUrl = user.is_onboarded 
+    const redirectUrl = user.is_onboarded
       ? `${process.env.FRONTEND_URL}/auth/callback?token=${token}&refresh=${refreshToken}`
       : `${process.env.FRONTEND_URL}/onboarding?token=${token}&refresh=${refreshToken}`;
 
@@ -628,6 +670,130 @@ const googleCallback = async (req, res) => {
   } catch (error) {
     logger.error('Google callback error:', error);
     res.redirect(`${process.env.FRONTEND_URL}/login?error=oauth_failed`);
+  }
+};
+
+// Creates the Google user's account ONLY after the onboarding form is submitted with
+// complete details. Consumes the short-lived onboarding token from googleCallback.
+const completeGoogleRegistration = async (req, res) => {
+  try {
+    const { pendingToken, phone, date_of_birth, interested_categories, password } = req.body;
+
+    if (!pendingToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing onboarding session. Please sign in with Google again.'
+      });
+    }
+
+    let pending;
+    try {
+      pending = verifyOnboardingToken(pendingToken);
+    } catch (err) {
+      return res.status(401).json({
+        success: false,
+        code: 'ONBOARDING_TOKEN_INVALID',
+        message: 'Your onboarding session has expired. Please sign in with Google again.'
+      });
+    }
+
+    if (!phone || !date_of_birth || !Array.isArray(interested_categories) || interested_categories.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone, date of birth, and at least one interested category are required.'
+      });
+    }
+
+    if (!password || password.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please set a password of at least 8 characters.'
+      });
+    }
+
+    // Guard against a duplicate (completed in another tab, or an email account already
+    // uses this address). Never create a second row for the same email.
+    const { data: existing } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', pending.email)
+      .is('deleted_at', null)
+      .maybeSingle();
+
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        code: 'ACCOUNT_EXISTS',
+        message: 'An account with this email already exists. Please sign in instead.'
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const { data: newUser, error: createError } = await supabase
+      .from('users')
+      .insert({
+        email: pending.email,
+        name: pending.name,
+        avatar_url: pending.avatar_url || null,
+        password_hash: passwordHash,
+        phone,
+        date_of_birth,
+        role: 'user',
+        is_verified: true,
+        is_onboarded: true,
+        auth_provider: 'google',
+        google_id: pending.google_id
+      })
+      .select('id, email, name, phone, avatar_url, date_of_birth, role, is_verified, is_onboarded, created_at')
+      .single();
+
+    if (createError || !newUser) {
+      logger.error('Google registration create error:', createError);
+      return res.status(500).json({
+        success: false,
+        message: 'Failed to create your account. Please try again.'
+      });
+    }
+
+    // Default preferences (mirror email registration).
+    await supabase.from('user_preferences').insert({
+      user_id: newUser.id,
+      notifications: true,
+      newsletter: true,
+      exam_reminders: true
+    });
+
+    const categoryInserts = interested_categories.map(categoryId => ({
+      user_id: newUser.id,
+      category_id: categoryId
+    }));
+
+    const { error: categoryError } = await supabase
+      .from('user_interested_categories')
+      .insert(categoryInserts);
+
+    if (categoryError) {
+      logger.error('Category insert error (google registration):', categoryError);
+    }
+
+    try {
+      await sendWelcomeEmail(newUser.email, newUser.name);
+    } catch (emailError) {
+      logger.error('Failed to send welcome email:', emailError);
+    }
+
+    const token = generateToken(newUser.id, newUser.role);
+    const refreshToken = generateRefreshToken(newUser.id);
+
+    res.status(201).json({
+      success: true,
+      message: 'Registration completed successfully',
+      data: { user: newUser, token, refreshToken }
+    });
+  } catch (error) {
+    logger.error('Complete Google registration error:', error);
+    res.status(500).json({ success: false, message: 'Failed to complete registration' });
   }
 };
 
@@ -667,6 +833,10 @@ const completeOnboarding = async (req, res) => {
         message: 'Failed to update profile'
       });
     }
+
+    // The profile is cached (getProfile). Without busting it, a follow-up getProfile
+    // would keep returning is_onboarded=false and bounce the user back to onboarding.
+    await bustUserCaches(userId);
 
     const categoryInserts = interested_categories.map(categoryId => ({
       user_id: userId,
@@ -861,6 +1031,7 @@ module.exports = {
   changePassword,
   googleCallback,
   completeOnboarding,
+  completeGoogleRegistration,
   refreshAuthToken,
   deleteAccount
 };

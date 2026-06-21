@@ -1,6 +1,5 @@
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const bcrypt = require('bcryptjs');
 const supabase = require('./database');
 
 const {
@@ -55,29 +54,19 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_CALLBACK_URL) {
             return done(null, refreshedUser);
           }
 
-          const hashedPlaceholder = await bcrypt.hash(profile.id + Date.now().toString(), 10);
-
-          const { data: newUser, error: createError } = await supabase
-            .from('users')
-            .insert({
-              email,
-              name,
-              avatar_url,
-              password_hash: hashedPlaceholder,
-              role: 'user',
-              is_verified: true,
-              is_onboarded: false,
-              auth_provider: 'google',
-              google_id: profile.id
-            })
-            .select()
-            .single();
-
-          if (createError) {
-            return done(createError, null);
-          }
-
-          return done(null, newUser);
+          // Brand-new Google user: do NOT create a profile yet. Account creation is
+          // deferred until the onboarding form is submitted with complete details, so an
+          // incomplete profile never exists in the database (incomplete info = no profile
+          // = no login). Carry the verified Google identity forward as a transient
+          // "pending registration"; googleCallback turns it into a short-lived onboarding
+          // token, and completeGoogleRegistration creates the row once details are filled.
+          return done(null, {
+            isPendingRegistration: true,
+            email,
+            name,
+            avatar_url: avatar_url || null,
+            google_id: profile.id
+          });
         } catch (error) {
           return done(error, null);
         }

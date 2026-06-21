@@ -30,6 +30,15 @@ const buildErrorResponse = (res, message, error) => {
   return res.status(500).json({ error: message });
 };
 
+// The public blog pages send `Cache-Control: no-cache` (and a `?_t=` buster) on every
+// request specifically to read fresh content right after an admin publishes/edits.
+// Honor that here by skipping the Redis READ (we still WRITE fresh cache so normal
+// traffic stays fast). Without this, a stale empty-content cache can mask a freshly
+// published article ("No content available yet.").
+const wantsFreshContent = (req) =>
+  /no-cache|no-store/i.test(req.headers['cache-control'] || '') ||
+  /no-cache/i.test(req.headers['pragma'] || '');
+
 const VALID_STATUSES = new Set(['draft', 'pending', 'published']);
 
 const normalizeStatus = (candidate, fallback = 'draft') => {
@@ -141,8 +150,8 @@ const blogController = {
       const { slug } = req.params;
       const isPrivileged = req.user && ['admin', 'editor', 'author'].includes(req.user.role);
 
-      // Serve from cache for public requests
-      if (!isPrivileged) {
+      // Serve from cache for public requests (unless the caller explicitly asked for fresh data)
+      if (!isPrivileged && !wantsFreshContent(req)) {
         const cacheKey = blogSlugKey(slug);
         const cached = await redisCache.get(cacheKey);
         if (cached) {
@@ -232,8 +241,8 @@ const blogController = {
       const { blogId } = req.params;
       const isPrivileged = req.user && ['admin', 'editor', 'author'].includes(req.user.role);
 
-      // Serve from cache for public requests
-      if (!isPrivileged) {
+      // Serve from cache for public requests (unless the caller explicitly asked for fresh data)
+      if (!isPrivileged && !wantsFreshContent(req)) {
         const cacheKey = blogContentKey(blogId);
         const cached = await redisCache.get(cacheKey);
         if (cached) {
