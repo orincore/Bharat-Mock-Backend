@@ -793,6 +793,15 @@ const getExamQuestions = async (req, res) => {
     // Use the section's own language when set; otherwise leave as null so languageUsed (resolved after filtering) takes over
     const sections = (sectionsData || []).map(s => ({ ...s, language: s.language || null }));
 
+    // A language-partitioned exam keeps separate per-language question sets in
+    // sections explicitly tagged with a language. Only those exams should drop
+    // questions when a language is selected. The common case (one shared question
+    // set rendered in either language — Hindi via stored text_hi or client-side
+    // Google translation) must return EVERY question regardless of language;
+    // otherwise questions that happen to lack a Hindi translation vanish (the
+    // "Hindi shows only 3 of 75" bug).
+    const isLanguagePartitioned = (sectionsData || []).some(s => s.language === 'en' || s.language === 'hi');
+
     const { data: questions, error: questionsError } = await supabase
       .from('questions')
       .select(`
@@ -845,15 +854,31 @@ const getExamQuestions = async (req, res) => {
     };
 
     let languageUsed = attemptLanguage;
-    let filteredQuestions = buildFilteredQuestions(languageUsed);
+    let filteredQuestions;
 
-    if (filteredQuestions.length === 0 && attemptLanguage === 'hi') {
-      languageUsed = 'en';
+    if (!isLanguagePartitioned) {
+      // Shared question set: keep every question that has any renderable content.
+      // Hindi rendering falls back to English (or client-side translation) per
+      // question, so untranslated questions must NOT be dropped.
+      filteredQuestions = questions.filter(q => questionHasContent(q, 'en') || questionHasContent(q, 'hi'));
+      logger.info(`Non-partitioned exam: keeping ${filteredQuestions.length}/${questions.length} questions for language ${languageUsed}`);
+      if (filteredQuestions.length === 0) {
+        languageUsed = 'en';
+        filteredQuestions = questions;
+      }
+    } else {
+      // Language-partitioned exam: show only questions that exist in the selected
+      // language (separate English/Hindi question sets).
       filteredQuestions = buildFilteredQuestions(languageUsed);
-    }
-    if (filteredQuestions.length === 0) {
-      languageUsed = 'en';
-      filteredQuestions = questions;
+
+      if (filteredQuestions.length === 0 && attemptLanguage === 'hi') {
+        languageUsed = 'en';
+        filteredQuestions = buildFilteredQuestions(languageUsed);
+      }
+      if (filteredQuestions.length === 0) {
+        languageUsed = 'en';
+        filteredQuestions = questions;
+      }
     }
 
     const questionsWithAnswers = filteredQuestions.map(q => ({
@@ -877,8 +902,12 @@ const getExamQuestions = async (req, res) => {
         if (sectionQuestions.length === 0) return null;
         return {
           id: section.id, name: section.name, name_hi: section.name_hi || null,
-          // Always report the actual content language so the frontend renders correctly
-          language: languageUsed,
+          // Report the section's TRUE partition language (null/'en' for a shared
+          // question set, 'hi'/'en' for partitioned exams) — NOT the render
+          // language. The client uses this only to decide whether to filter by
+          // language; relabeling a shared section as 'hi' makes the client collapse
+          // it to the few translated questions on a language re-toggle.
+          language: isLanguagePartitioned ? (section.language || languageUsed) : 'en',
           totalQuestions: sectionQuestions.length,
           marksPerQuestion: section.marks_per_question, duration: section.duration,
           sectionOrder: section.section_order, questions: sectionQuestions,
@@ -1058,18 +1087,25 @@ const evaluateExam = async (attemptId, examId, userId) => {
       );
     };
 
+    // Correctness lives on the option (is_correct), which is identical across
+    // languages, so a shared (non-partitioned) question set must be scored in full
+    // regardless of which language was selected. Dropping questions that lack Hindi
+    // content here would only score the few translated questions. Strict
+    // per-language scoring applies ONLY to language-partitioned exams (separate
+    // English/Hindi question sets in language-tagged sections).
+    const isLanguagePartitioned = sectionsData.some(s => s.language === 'en' || s.language === 'hi');
     let languageUsed = attemptLanguage;
     let filteredQuestions = questions.filter(q =>
-      allowedSectionIds.has(q.section_id) && questionHasContent(q, languageUsed)
+      allowedSectionIds.has(q.section_id) && (!isLanguagePartitioned || questionHasContent(q, languageUsed))
     );
 
-    if (filteredQuestions.length === 0 && attemptLanguage === 'hi') {
+    if (isLanguagePartitioned && filteredQuestions.length === 0 && attemptLanguage === 'hi') {
       languageUsed = 'en';
       filteredQuestions = questions.filter(q =>
         allowedSectionIds.has(q.section_id) && questionHasContent(q, languageUsed)
       );
     }
-    
+
     if (filteredQuestions.length === 0) {
       languageUsed = 'en';
       filteredQuestions = questions.filter(q => allowedSectionIds.has(q.section_id));
