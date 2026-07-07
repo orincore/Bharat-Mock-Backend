@@ -51,19 +51,36 @@ const OPTION_BATCH_SIZE = 50;
 
 const batchInsert = async (table, rows, selectColumns = '*', batchSize = QUESTION_BATCH_SIZE) => {
   if (!rows.length) return [];
-  const allCreated = [];
+
+  const chunks = [];
   for (let i = 0; i < rows.length; i += batchSize) {
-    const chunk = rows.slice(i, i + batchSize);
-    const { data, error } = await supabase
-      .from(table)
-      .insert(chunk)
-      .select(selectColumns);
+    chunks.push(rows.slice(i, i + batchSize));
+  }
+
+  // Fire all chunk inserts concurrently instead of awaiting them one at a time —
+  // Promise.all preserves chunk order in the results array regardless of completion order,
+  // so the final flattened list still lines up 1:1 with the input `rows` order.
+  const results = await Promise.all(
+    chunks.map((chunk, idx) =>
+      supabase
+        .from(table)
+        .insert(chunk)
+        .select(selectColumns)
+        .then((res) => ({ ...res, idx }))
+        .catch((error) => ({ error, idx }))
+    )
+  );
+
+  const allCreated = [];
+  for (const { data, error, idx } of results) {
     if (error) {
-      logger.error(`Batch insert error on ${table} (chunk ${Math.floor(i / batchSize) + 1}, rows ${i}-${i + chunk.length - 1}):`, error);
+      const start = idx * batchSize;
+      logger.error(`Batch insert error on ${table} (chunk ${idx + 1}, rows ${start}-${start + chunks[idx].length - 1}):`, error);
     } else if (data) {
       allCreated.push(...data);
     }
   }
+
   if (allCreated.length !== rows.length) {
     logger.warn(`${table}: expected ${rows.length} rows, inserted ${allCreated.length}`);
   }
@@ -2027,30 +2044,35 @@ const bulkCreateExamWithContent = async (req, res) => {
         logger.info(`Bulk create: ${createdQuestions.length}/${allQuestionInserts.length} questions inserted`);
 
         let questionIdMap = [];
-        
+
         if (createdQuestions.length > 0) {
           const allOptionInserts = [];
-          const optionQuestionMap = [];
+          // See updateExamWithContent for why this uses precomputed [start, count] ranges
+          // instead of findIndex + slice/filter — that was O(n) per option lookup (each call
+          // allocating a new array), making the mapping step O(n^3) overall.
+          const questionOptionRanges = new Array(createdQuestions.length);
           for (let qi = 0; qi < createdQuestions.length; qi++) {
             const { question } = questionSectionMap[qi];
-            if (!question.options?.length) continue;
-            for (const option of question.options) {
-              optionQuestionMap.push({ questionIndex: qi, originalOption: option });
-              allOptionInserts.push({
-                question_id: createdQuestions[qi].id,
-                option_text: option.option_text,
-                option_text_hi: option.option_text_hi || null,
-                is_correct: option.is_correct === true || option.is_correct === 'true',
-                option_order: option.option_order,
-                image_url: option.image_url || null
-              });
+            const start = allOptionInserts.length;
+            if (question.options?.length) {
+              for (const option of question.options) {
+                allOptionInserts.push({
+                  question_id: createdQuestions[qi].id,
+                  option_text: option.option_text,
+                  option_text_hi: option.option_text_hi || null,
+                  is_correct: option.is_correct === true || option.is_correct === 'true',
+                  option_order: option.option_order,
+                  image_url: option.image_url || null
+                });
+              }
             }
+            questionOptionRanges[qi] = { start, count: question.options?.length || 0 };
           }
 
           logger.info(`Bulk create: inserting ${allOptionInserts.length} options in chunks of ${OPTION_BATCH_SIZE}`);
 
           const createdOptions = await batchInsert('question_options', allOptionInserts, 'id', OPTION_BATCH_SIZE);
-          
+
           // Build question and option ID mappings
           for (let qi = 0; qi < createdQuestions.length; qi++) {
             const { question } = questionSectionMap[qi];
@@ -2060,21 +2082,16 @@ const bulkCreateExamWithContent = async (req, res) => {
               hasImage: !!question.image_url,
               options: []
             };
-            
-            // Map options for this question
-            if (question.options?.length) {
-              for (let oi = 0; oi < question.options.length; oi++) {
-                const optionIdx = optionQuestionMap.findIndex(
-                  (om, idx) => om.questionIndex === qi && 
-                  optionQuestionMap.slice(0, idx).filter(x => x.questionIndex === qi).length === oi
-                );
-                if (optionIdx >= 0 && createdOptions[optionIdx]) {
-                  questionMapping.options.push({
-                    oldId: question.options[oi].id,
-                    newId: createdOptions[optionIdx].id,
-                    hasImage: !!question.options[oi].image_url
-                  });
-                }
+
+            const { start, count } = questionOptionRanges[qi];
+            for (let oi = 0; oi < count; oi++) {
+              const createdOption = createdOptions[start + oi];
+              if (createdOption) {
+                questionMapping.options.push({
+                  oldId: question.options[oi].id,
+                  newId: createdOption.id,
+                  hasImage: !!question.options[oi].image_url
+                });
               }
             }
             questionIdMap.push(questionMapping);
@@ -2397,30 +2414,36 @@ const updateExamWithContent = async (req, res) => {
         logger.info(`Update exam: ${createdQuestions.length}/${allQuestionInserts.length} questions inserted`);
 
         let questionIdMap = [];
-        
+
         if (createdQuestions.length > 0) {
           const allOptionInserts = [];
-          const optionQuestionMap = [];
+          // Track each question's option range as a plain [start, count] pair rather than
+          // re-deriving it later via findIndex — that previous approach was O(n) per option
+          // lookup (with an inner slice+filter allocation on every call), making the overall
+          // mapping step O(n^3) for exams with many questions/options. This is O(n) instead.
+          const questionOptionRanges = new Array(createdQuestions.length);
           for (let qi = 0; qi < createdQuestions.length; qi++) {
             const { question } = questionSectionMap[qi];
-            if (!question.options?.length) continue;
-            for (const option of question.options) {
-              optionQuestionMap.push({ questionIndex: qi, originalOption: option });
-              allOptionInserts.push({
-                question_id: createdQuestions[qi].id,
-                option_text: option.option_text,
-                option_text_hi: option.option_text_hi || null,
-                is_correct: bool(option.is_correct),
-                option_order: numberOrNull(option.option_order),
-                image_url: option.image_url || null
-              });
+            const start = allOptionInserts.length;
+            if (question.options?.length) {
+              for (const option of question.options) {
+                allOptionInserts.push({
+                  question_id: createdQuestions[qi].id,
+                  option_text: option.option_text,
+                  option_text_hi: option.option_text_hi || null,
+                  is_correct: bool(option.is_correct),
+                  option_order: numberOrNull(option.option_order),
+                  image_url: option.image_url || null
+                });
+              }
             }
+            questionOptionRanges[qi] = { start, count: question.options?.length || 0 };
           }
 
           logger.info(`Update exam: inserting ${allOptionInserts.length} options in chunks of ${OPTION_BATCH_SIZE}`);
 
           const createdOptions = await batchInsert('question_options', allOptionInserts, 'id', OPTION_BATCH_SIZE);
-          
+
           // Build question and option ID mappings
           for (let qi = 0; qi < createdQuestions.length; qi++) {
             const { question } = questionSectionMap[qi];
@@ -2430,21 +2453,17 @@ const updateExamWithContent = async (req, res) => {
               hasImage: !!question.image_url,
               options: []
             };
-            
-            // Map options for this question
-            if (question.options?.length) {
-              for (let oi = 0; oi < question.options.length; oi++) {
-                const optionIdx = optionQuestionMap.findIndex(
-                  (om, idx) => om.questionIndex === qi && 
-                  optionQuestionMap.slice(0, idx).filter(x => x.questionIndex === qi).length === oi
-                );
-                if (optionIdx >= 0 && createdOptions[optionIdx]) {
-                  questionMapping.options.push({
-                    oldId: question.options[oi].id,
-                    newId: createdOptions[optionIdx].id,
-                    hasImage: !!question.options[oi].image_url
-                  });
-                }
+
+            // Map options for this question using its precomputed range
+            const { start, count } = questionOptionRanges[qi];
+            for (let oi = 0; oi < count; oi++) {
+              const createdOption = createdOptions[start + oi];
+              if (createdOption) {
+                questionMapping.options.push({
+                  oldId: question.options[oi].id,
+                  newId: createdOption.id,
+                  hasImage: !!question.options[oi].image_url
+                });
               }
             }
             questionIdMap.push(questionMapping);
