@@ -52,6 +52,10 @@ jobs:
           host: ${{ secrets.KVM2_HOST }}
           username: ${{ secrets.KVM2_SSH_USER }}
           key: ${{ secrets.KVM2_SSH_KEY }}
+          # Default connect timeout (30s) can be tight for the GH-runner ->
+          # Hostinger network path; bumped to ride out transient jitter
+          # rather than fail a build that already succeeded.
+          timeout: 60s
           script: |
             set -euo pipefail
             export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
