@@ -1,12 +1,20 @@
 # Resource budget note (KVM2 = 2 vCPU / 8GB total, shared with the frontend,
 # Redis, and the k3s control plane + Traefik + metrics-server):
 #   requests: 200m CPU / 300Mi mem  x up to 4 replicas (HPA, see backend-hpa.yaml)
-#   limits:   600m CPU / 900Mi mem  — the 900Mi ceiling gives headroom for the
-#             one shared Chromium instance src/utils/pdfBrowser.js keeps alive
-#             per-pod for PDF exports (~150-250MB resident on its own).
-# At max replicas (4) this reserves ~800m CPU / 1.2GB mem in requests, leaving
-# room for the frontend's own HPA range + ~400-500m/1.5GB fixed cluster overhead
-# under the box's 2000m/8GB ceiling.
+#   limits:   600m CPU / 1.75Gi mem
+# The memory LIMIT is deliberately large (1.75Gi, not the API's ~90Mi idle
+# footprint) purely for PDF export: src/utils/pdfBrowser.js renders exams with
+# headless Chromium, keeps one shared Chromium instance resident per pod, and
+# merges up to 3 rendered documents (cover + content + back). The old 900Mi
+# ceiling OOM-killed the pod mid-render (Node heap capped at 768MB via
+# NODE_OPTIONS + a Chromium child that spikes several hundred MB > 900Mi),
+# which surfaced to the browser as "PDF generation failed: Failed to fetch"
+# (the OOM severs the in-flight HTTP connection). 1.75Gi gives Node + Chromium
+# room even on a large exam. Only the LIMIT changed — requests stay at 300Mi
+# (idle baseline is ~90Mi), so the scheduler doesn't over-reserve; the ceiling
+# is burstable and only reached during an actual export.
+# Memory usage is safe on the box: requests reserve ~600Mi (2 backend replicas),
+# and even both replicas peaking is ~3.5Gi against ~6.3GB free.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,7 +57,7 @@ spec:
               memory: "300Mi"
             limits:
               cpu: "600m"
-              memory: "900Mi"
+              memory: "1792Mi" # 1.75Gi — headroom for Chromium PDF export (see top note)
           readinessProbe:
             httpGet:
               path: /health
