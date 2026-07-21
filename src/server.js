@@ -47,8 +47,12 @@ const { Prisma } = require('./generated/prisma');
 
 const app = express();
 
-// Trust first proxy (Nginx) so rate limiting & logging use the real client IP.
-app.set('trust proxy', 1);
+// Trust the first 2 hops — Cloudflare's edge, then Traefik (k3s ingress) —
+// so rate limiting & logging resolve req.ip to the real visitor, not one of
+// the proxies. With this at 1 (its old single-nginx-hop value), every
+// visitor's rate-limit bucket collapsed onto Cloudflare's edge IP, exhausting
+// the global window almost immediately regardless of who was actually asking.
+app.set('trust proxy', 2);
 
 // Prisma Decimal fields (score, marks, percentage, accuracy, etc.) serialize to
 // strings by default, which silently breaks any frontend code expecting a number
