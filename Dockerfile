@@ -32,7 +32,7 @@ WORKDIR /app
 RUN apk add --no-cache \
       chromium nss freetype harfbuzz ca-certificates ttf-freefont \
       tini openssl \
-    && addgroup -S app && adduser -S app -G app
+    && addgroup -g 1001 -S app && adduser -u 1001 -S app -G app
 
 ENV NODE_ENV=production \
     PUPPETEER_SKIP_DOWNLOAD=true \
@@ -51,7 +51,7 @@ COPY --from=build --chown=app:app /app ./
 # tree for no benefit and add ~40s to every build.
 RUN mkdir -p logs && chown app:app /app logs
 
-USER app
+USER 1001
 EXPOSE 8000
 
 # Matches the pod's readinessProbe/livenessProbe in k8s/backend-deployment.yaml —

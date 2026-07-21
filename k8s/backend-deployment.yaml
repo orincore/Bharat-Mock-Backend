@@ -32,6 +32,7 @@ spec:
       terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
+        runAsUser: 1001 # matches the fixed UID the Dockerfile's `app` user is created with
       containers:
         - name: backend
           image: ghcr.io/orincore/bharat-mock-backend:latest # replaced by CI on every deploy
