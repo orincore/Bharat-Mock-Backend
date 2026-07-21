@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { uploadToR2, deleteFromR2 } = require('../utils/fileUpload');
 const { R2_PUBLIC_URL } = require('../config/r2');
@@ -10,11 +10,10 @@ const parsePagination = (query) => {
 };
 
 const verifySubcategory = async (subcategoryId) => {
-  const { data: subcategory } = await supabase
-    .from('exam_subcategories')
-    .select('id')
-    .eq('id', subcategoryId)
-    .single();
+  const subcategory = await prisma.exam_subcategories.findUnique({
+    where: { id: subcategoryId },
+    select: { id: true }
+  });
   return Boolean(subcategory);
 };
 
@@ -47,14 +46,14 @@ const uploadHeroImage = async (req, res) => {
       return res.status(400).json(formatError('Image file is required'));
     }
 
-    const { data: overview, error: overviewError } = await supabase
-      .from('subcategory_overviews')
-      .select('id, hero_image_url')
-      .eq('subcategory_id', subcategoryId)
-      .maybeSingle();
-
-    if (overviewError && overviewError.code !== 'PGRST116') {
-      logger.error('Fetch overview for hero upload error:', overviewError);
+    let overview;
+    try {
+      overview = await prisma.subcategory_overviews.findUnique({
+        where: { subcategory_id: subcategoryId },
+        select: { id: true, hero_image_url: true }
+      });
+    } catch (error) {
+      logger.error('Fetch overview for hero upload error:', error);
       return res.status(500).json(formatError('Failed to process existing overview'));
     }
 
@@ -81,31 +80,29 @@ const uploadHeroImage = async (req, res) => {
       updated_by: req.user?.id || null
     };
 
-    let dbResponse;
-    if (overview?.id) {
-      dbResponse = await supabase
-        .from('subcategory_overviews')
-        .update(payload)
-        .eq('id', overview.id)
-        .select('hero_image_url')
-        .single();
-    } else {
-      dbResponse = await supabase
-        .from('subcategory_overviews')
-        .insert({ ...payload, created_by: req.user?.id || null })
-        .select('hero_image_url')
-        .single();
-    }
-
-    if (dbResponse.error) {
-      logger.error('Save hero image url error:', dbResponse.error);
+    let dbResult;
+    try {
+      if (overview?.id) {
+        dbResult = await prisma.subcategory_overviews.update({
+          where: { id: overview.id },
+          data: payload,
+          select: { hero_image_url: true }
+        });
+      } else {
+        dbResult = await prisma.subcategory_overviews.create({
+          data: { ...payload, created_by: req.user?.id || null },
+          select: { hero_image_url: true }
+        });
+      }
+    } catch (error) {
+      logger.error('Save hero image url error:', error);
       return res.status(500).json(formatError('Failed to save hero image url'));
     }
 
     return res.json({
       success: true,
       data: {
-        hero_image_url: dbResponse.data.hero_image_url
+        hero_image_url: dbResult.hero_image_url
       }
     });
   } catch (error) {
@@ -122,13 +119,10 @@ const getOverview = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { data, error } = await supabase
-      .from('subcategory_overviews')
-      .select('*')
-      .eq('subcategory_id', subcategoryId)
-      .single();
-
-    if (error && error.code !== 'PGRST116') {
+    let data;
+    try {
+      data = await prisma.subcategory_overviews.findUnique({ where: { subcategory_id: subcategoryId } });
+    } catch (error) {
       logger.error('Get overview error:', error);
       return res.status(500).json(formatError('Failed to fetch overview'));
     }
@@ -179,34 +173,29 @@ const upsertOverview = async (req, res) => {
       updated_by: req.user?.id || null
     });
 
-    const { data: existing } = await supabase
-      .from('subcategory_overviews')
-      .select('id')
-      .eq('subcategory_id', subcategoryId)
-      .single();
+    const existing = await prisma.subcategory_overviews.findUnique({
+      where: { subcategory_id: subcategoryId },
+      select: { id: true }
+    });
 
-    let response;
-    if (existing) {
-      response = await supabase
-        .from('subcategory_overviews')
-        .update(payload)
-        .eq('subcategory_id', subcategoryId)
-        .select()
-        .single();
-    } else {
-      response = await supabase
-        .from('subcategory_overviews')
-        .insert({ ...payload, created_by: req.user?.id || null })
-        .select()
-        .single();
-    }
-
-    if (response.error) {
-      logger.error('Upsert overview error:', response.error);
+    let data;
+    try {
+      if (existing) {
+        data = await prisma.subcategory_overviews.update({
+          where: { subcategory_id: subcategoryId },
+          data: payload
+        });
+      } else {
+        data = await prisma.subcategory_overviews.create({
+          data: { ...payload, created_by: req.user?.id || null }
+        });
+      }
+    } catch (error) {
+      logger.error('Upsert overview error:', error);
       return res.status(500).json(formatError('Failed to save overview'));
     }
 
-    return res.json({ success: true, data: response.data });
+    return res.json({ success: true, data });
   } catch (error) {
     logger.error('Upsert overview exception:', error);
     return res.status(500).json(formatError('Server error while saving overview'));
@@ -222,15 +211,18 @@ const getUpdates = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { data, error, count } = await supabase
-      .from('subcategory_updates')
-      .select('*', { count: 'exact' })
-      .eq('subcategory_id', subcategoryId)
-      .order('update_date', { ascending: false })
-      .order('display_order', { ascending: true })
-      .range(offset, offset + limit - 1);
-
-    if (error) {
+    let data, count;
+    try {
+      [data, count] = await Promise.all([
+        prisma.subcategory_updates.findMany({
+          where: { subcategory_id: subcategoryId },
+          orderBy: [{ update_date: 'desc' }, { display_order: 'asc' }],
+          skip: offset,
+          take: limit
+        }),
+        prisma.subcategory_updates.count({ where: { subcategory_id: subcategoryId } })
+      ]);
+    } catch (error) {
       logger.error('Get updates error:', error);
       return res.status(500).json(formatError('Failed to fetch updates'));
     }
@@ -277,35 +269,35 @@ const upsertUpdate = async (req, res) => {
       title,
       description: description || null,
       update_type,
-      update_date,
+      update_date: new Date(update_date),
       link_url: link_url || null,
       is_active: is_active === true || is_active === 'true',
       display_order: parseInt(display_order, 10) || 0
     });
 
-    let response;
-    if (updateId) {
-      response = await supabase
-        .from('subcategory_updates')
-        .update({ ...payload, updated_by: req.user?.id || null })
-        .eq('id', updateId)
-        .eq('subcategory_id', subcategoryId)
-        .select()
-        .single();
-    } else {
-      response = await supabase
-        .from('subcategory_updates')
-        .insert({ ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null })
-        .select()
-        .single();
-    }
-
-    if (response.error) {
-      logger.error('Upsert update error:', response.error);
+    let data;
+    try {
+      if (updateId) {
+        const result = await prisma.subcategory_updates.updateMany({
+          where: { id: updateId, subcategory_id: subcategoryId },
+          data: { ...payload, updated_by: req.user?.id || null }
+        });
+        if (result.count === 0) {
+          logger.error('Upsert update error: no matching row for', { updateId, subcategoryId });
+          return res.status(500).json(formatError('Failed to save update'));
+        }
+        data = await prisma.subcategory_updates.findUnique({ where: { id: updateId } });
+      } else {
+        data = await prisma.subcategory_updates.create({
+          data: { ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null }
+        });
+      }
+    } catch (error) {
+      logger.error('Upsert update error:', error);
       return res.status(500).json(formatError('Failed to save update'));
     }
 
-    return res.json({ success: true, data: response.data });
+    return res.json({ success: true, data });
   } catch (error) {
     logger.error('Upsert update exception:', error);
     return res.status(500).json(formatError('Server error while saving update'));
@@ -320,13 +312,9 @@ const deleteUpdate = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { error } = await supabase
-      .from('subcategory_updates')
-      .delete()
-      .eq('id', updateId)
-      .eq('subcategory_id', subcategoryId);
-
-    if (error) {
+    try {
+      await prisma.subcategory_updates.deleteMany({ where: { id: updateId, subcategory_id: subcategoryId } });
+    } catch (error) {
       logger.error('Delete update error:', error);
       return res.status(500).json(formatError('Failed to delete update'));
     }
@@ -346,13 +334,13 @@ const getHighlights = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { data, error } = await supabase
-      .from('subcategory_highlights')
-      .select('*')
-      .eq('subcategory_id', subcategoryId)
-      .order('display_order', { ascending: true });
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.subcategory_highlights.findMany({
+        where: { subcategory_id: subcategoryId },
+        orderBy: { display_order: 'asc' }
+      });
+    } catch (error) {
       logger.error('Get highlights error:', error);
       return res.status(500).json(formatError('Failed to fetch highlights'));
     }
@@ -364,6 +352,10 @@ const getHighlights = async (req, res) => {
   }
 };
 
+// ⚠️ PRE-EXISTING BUG (not introduced by this migration, preserved faithfully — see
+// MIGRATION_TRACKER.md §4.5e): subcategory_highlights has no `highlight_type` column,
+// and its real `value` column (NOT NULL) is never set here. Every create/update via this
+// endpoint has always failed in production (confirmed: 0 real rows exist in this table).
 const upsertHighlight = async (req, res) => {
   try {
     const { subcategoryId, highlightId } = req.params;
@@ -394,29 +386,29 @@ const upsertHighlight = async (req, res) => {
       is_active: is_active === true || is_active === 'true'
     });
 
-    let response;
-    if (highlightId) {
-      response = await supabase
-        .from('subcategory_highlights')
-        .update({ ...payload, updated_by: req.user?.id || null })
-        .eq('id', highlightId)
-        .eq('subcategory_id', subcategoryId)
-        .select()
-        .single();
-    } else {
-      response = await supabase
-        .from('subcategory_highlights')
-        .insert({ ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null })
-        .select()
-        .single();
-    }
-
-    if (response.error) {
-      logger.error('Upsert highlight error:', response.error);
+    let data;
+    try {
+      if (highlightId) {
+        const result = await prisma.subcategory_highlights.updateMany({
+          where: { id: highlightId, subcategory_id: subcategoryId },
+          data: { ...payload, updated_by: req.user?.id || null }
+        });
+        if (result.count === 0) {
+          logger.error('Upsert highlight error: no matching row for', { highlightId, subcategoryId });
+          return res.status(500).json(formatError('Failed to save highlight'));
+        }
+        data = await prisma.subcategory_highlights.findUnique({ where: { id: highlightId } });
+      } else {
+        data = await prisma.subcategory_highlights.create({
+          data: { ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null }
+        });
+      }
+    } catch (error) {
+      logger.error('Upsert highlight error:', error);
       return res.status(500).json(formatError('Failed to save highlight'));
     }
 
-    return res.json({ success: true, data: response.data });
+    return res.json({ success: true, data });
   } catch (error) {
     logger.error('Upsert highlight exception:', error);
     return res.status(500).json(formatError('Server error while saving highlight'));
@@ -431,13 +423,9 @@ const deleteHighlight = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { error } = await supabase
-      .from('subcategory_highlights')
-      .delete()
-      .eq('id', highlightId)
-      .eq('subcategory_id', subcategoryId);
-
-    if (error) {
+    try {
+      await prisma.subcategory_highlights.deleteMany({ where: { id: highlightId, subcategory_id: subcategoryId } });
+    } catch (error) {
       logger.error('Delete highlight error:', error);
       return res.status(500).json(formatError('Failed to delete highlight'));
     }
@@ -457,13 +445,13 @@ const getExamStats = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { data, error } = await supabase
-      .from('subcategory_exam_stats')
-      .select('*')
-      .eq('subcategory_id', subcategoryId)
-      .order('display_order', { ascending: true });
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.subcategory_exam_stats.findMany({
+        where: { subcategory_id: subcategoryId },
+        orderBy: { display_order: 'asc' }
+      });
+    } catch (error) {
       logger.error('Get exam stats error:', error);
       return res.status(500).json(formatError('Failed to fetch exam stats'));
     }
@@ -475,6 +463,10 @@ const getExamStats = async (req, res) => {
   }
 };
 
+// ⚠️ PRE-EXISTING BUG (preserved faithfully — see MIGRATION_TRACKER.md §4.5e):
+// subcategory_exam_stats.metric and .metric_year are NOT NULL columns with no default,
+// and neither is ever set by this endpoint. Every create has always failed in
+// production (confirmed: 0 real rows exist in this table).
 const upsertExamStat = async (req, res) => {
   try {
     const { subcategoryId, statId } = req.params;
@@ -505,29 +497,29 @@ const upsertExamStat = async (req, res) => {
       is_active: is_active === true || is_active === 'true'
     });
 
-    let response;
-    if (statId) {
-      response = await supabase
-        .from('subcategory_exam_stats')
-        .update({ ...payload, updated_by: req.user?.id || null })
-        .eq('id', statId)
-        .eq('subcategory_id', subcategoryId)
-        .select()
-        .single();
-    } else {
-      response = await supabase
-        .from('subcategory_exam_stats')
-        .insert({ ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null })
-        .select()
-        .single();
-    }
-
-    if (response.error) {
-      logger.error('Upsert exam stat error:', response.error);
+    let data;
+    try {
+      if (statId) {
+        const result = await prisma.subcategory_exam_stats.updateMany({
+          where: { id: statId, subcategory_id: subcategoryId },
+          data: { ...payload, updated_by: req.user?.id || null }
+        });
+        if (result.count === 0) {
+          logger.error('Upsert exam stat error: no matching row for', { statId, subcategoryId });
+          return res.status(500).json(formatError('Failed to save exam stat'));
+        }
+        data = await prisma.subcategory_exam_stats.findUnique({ where: { id: statId } });
+      } else {
+        data = await prisma.subcategory_exam_stats.create({
+          data: { ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null }
+        });
+      }
+    } catch (error) {
+      logger.error('Upsert exam stat error:', error);
       return res.status(500).json(formatError('Failed to save exam stat'));
     }
 
-    return res.json({ success: true, data: response.data });
+    return res.json({ success: true, data });
   } catch (error) {
     logger.error('Upsert exam stat exception:', error);
     return res.status(500).json(formatError('Server error while saving exam stat'));
@@ -542,13 +534,9 @@ const deleteExamStat = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { error } = await supabase
-      .from('subcategory_exam_stats')
-      .delete()
-      .eq('id', statId)
-      .eq('subcategory_id', subcategoryId);
-
-    if (error) {
+    try {
+      await prisma.subcategory_exam_stats.deleteMany({ where: { id: statId, subcategory_id: subcategoryId } });
+    } catch (error) {
       logger.error('Delete exam stat error:', error);
       return res.status(500).json(formatError('Failed to delete exam stat'));
     }
@@ -568,13 +556,13 @@ const getSections = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { data, error } = await supabase
-      .from('subcategory_sections')
-      .select('*')
-      .eq('subcategory_id', subcategoryId)
-      .order('display_order', { ascending: true });
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.subcategory_sections.findMany({
+        where: { subcategory_id: subcategoryId },
+        orderBy: { display_order: 'asc' }
+      });
+    } catch (error) {
       logger.error('Get sections error:', error);
       return res.status(500).json(formatError('Failed to fetch sections'));
     }
@@ -586,6 +574,10 @@ const getSections = async (req, res) => {
   }
 };
 
+// ⚠️ PRE-EXISTING BUG (preserved faithfully — see MIGRATION_TRACKER.md §4.5e):
+// subcategory_sections has no `section_type` column, and its real `slug` column
+// (NOT NULL) is never set here. Every create/update has always failed in production
+// (confirmed: 0 real rows exist in this table).
 const upsertSection = async (req, res) => {
   try {
     const { subcategoryId, sectionId } = req.params;
@@ -622,29 +614,29 @@ const upsertSection = async (req, res) => {
       is_active: is_active === true || is_active === 'true'
     });
 
-    let response;
-    if (sectionId) {
-      response = await supabase
-        .from('subcategory_sections')
-        .update({ ...payload, updated_by: req.user?.id || null })
-        .eq('id', sectionId)
-        .eq('subcategory_id', subcategoryId)
-        .select()
-        .single();
-    } else {
-      response = await supabase
-        .from('subcategory_sections')
-        .insert({ ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null })
-        .select()
-        .single();
-    }
-
-    if (response.error) {
-      logger.error('Upsert section error:', response.error);
+    let data;
+    try {
+      if (sectionId) {
+        const result = await prisma.subcategory_sections.updateMany({
+          where: { id: sectionId, subcategory_id: subcategoryId },
+          data: { ...payload, updated_by: req.user?.id || null }
+        });
+        if (result.count === 0) {
+          logger.error('Upsert section error: no matching row for', { sectionId, subcategoryId });
+          return res.status(500).json(formatError('Failed to save section'));
+        }
+        data = await prisma.subcategory_sections.findUnique({ where: { id: sectionId } });
+      } else {
+        data = await prisma.subcategory_sections.create({
+          data: { ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null }
+        });
+      }
+    } catch (error) {
+      logger.error('Upsert section error:', error);
       return res.status(500).json(formatError('Failed to save section'));
     }
 
-    return res.json({ success: true, data: response.data });
+    return res.json({ success: true, data });
   } catch (error) {
     logger.error('Upsert section exception:', error);
     return res.status(500).json(formatError('Server error while saving section'));
@@ -659,13 +651,9 @@ const deleteSection = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { error } = await supabase
-      .from('subcategory_sections')
-      .delete()
-      .eq('id', sectionId)
-      .eq('subcategory_id', subcategoryId);
-
-    if (error) {
+    try {
+      await prisma.subcategory_sections.deleteMany({ where: { id: sectionId, subcategory_id: subcategoryId } });
+    } catch (error) {
       logger.error('Delete section error:', error);
       return res.status(500).json(formatError('Failed to delete section'));
     }
@@ -685,13 +673,18 @@ const getTables = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { data, error } = await supabase
-      .from('subcategory_tables')
-      .select('id, title, description, display_order, is_active, created_at, updated_at, subcategory_table_rows(id, row_data, display_order)')
-      .eq('subcategory_id', subcategoryId)
-      .order('display_order', { ascending: true });
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.subcategory_tables.findMany({
+        where: { subcategory_id: subcategoryId },
+        select: {
+          id: true, title: true, description: true, display_order: true, is_active: true,
+          created_at: true, updated_at: true,
+          subcategory_table_rows: { select: { id: true, row_data: true, display_order: true } }
+        },
+        orderBy: { display_order: 'asc' }
+      });
+    } catch (error) {
       logger.error('Get tables error:', error);
       return res.status(500).json(formatError('Failed to fetch tables'));
     }
@@ -703,6 +696,10 @@ const getTables = async (req, res) => {
   }
 };
 
+// ⚠️ PRE-EXISTING BUG (preserved faithfully — see MIGRATION_TRACKER.md §4.5e):
+// subcategory_tables' real `slug` column (NOT NULL, part of a unique compound index
+// with subcategory_id) is never set here. Every create/update has always failed in
+// production (confirmed: 0 real rows exist in this table).
 const upsertTable = async (req, res) => {
   try {
     const { subcategoryId, tableId } = req.params;
@@ -732,35 +729,32 @@ const upsertTable = async (req, res) => {
       is_active: is_active === true || is_active === 'true'
     });
 
-    let response;
-    if (tableId) {
-      response = await supabase
-        .from('subcategory_tables')
-        .update({ ...payload, updated_by: req.user?.id || null })
-        .eq('id', tableId)
-        .eq('subcategory_id', subcategoryId)
-        .select('id')
-        .single();
-    } else {
-      response = await supabase
-        .from('subcategory_tables')
-        .insert({ ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null })
-        .select('id')
-        .single();
-    }
-
-    if (response.error) {
-      logger.error('Upsert table error:', response.error);
+    let savedTableId;
+    try {
+      if (tableId) {
+        const result = await prisma.subcategory_tables.updateMany({
+          where: { id: tableId, subcategory_id: subcategoryId },
+          data: { ...payload, updated_by: req.user?.id || null }
+        });
+        if (result.count === 0) {
+          logger.error('Upsert table error: no matching row for', { tableId, subcategoryId });
+          return res.status(500).json(formatError('Failed to save table'));
+        }
+        savedTableId = tableId;
+      } else {
+        const created = await prisma.subcategory_tables.create({
+          data: { ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null },
+          select: { id: true }
+        });
+        savedTableId = created.id;
+      }
+    } catch (error) {
+      logger.error('Upsert table error:', error);
       return res.status(500).json(formatError('Failed to save table'));
     }
 
-    const savedTableId = response.data.id;
-
     if (Array.isArray(rows)) {
-      await supabase
-        .from('subcategory_table_rows')
-        .delete()
-        .eq('table_id', savedTableId);
+      await prisma.subcategory_table_rows.deleteMany({ where: { table_id: savedTableId } });
 
       if (rows.length) {
         const rowPayload = rows.map((row, index) => ({
@@ -768,7 +762,7 @@ const upsertTable = async (req, res) => {
           row_data: row.row_data || row,
           display_order: row.display_order ?? index
         }));
-        await supabase.from('subcategory_table_rows').insert(rowPayload);
+        await prisma.subcategory_table_rows.createMany({ data: rowPayload });
       }
     }
 
@@ -787,13 +781,9 @@ const deleteTable = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { error } = await supabase
-      .from('subcategory_tables')
-      .delete()
-      .eq('id', tableId)
-      .eq('subcategory_id', subcategoryId);
-
-    if (error) {
+    try {
+      await prisma.subcategory_tables.deleteMany({ where: { id: tableId, subcategory_id: subcategoryId } });
+    } catch (error) {
       logger.error('Delete table error:', error);
       return res.status(500).json(formatError('Failed to delete table'));
     }
@@ -814,21 +804,32 @@ const getQuestionPapers = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { data, error, count } = await supabase
-      .from('subcategory_question_papers')
-      .select(`
-        *,
-        exam:exams(id, title, slug, url_path, total_questions, duration, total_marks, difficulty, is_free, logo_url, thumbnail_url, supports_hindi)
-      `, { count: 'exact' })
-      .eq('subcategory_id', subcategoryId)
-      .order('year', { ascending: false })
-      .order('display_order', { ascending: true })
-      .range(offset, offset + limit - 1);
-
-    if (error) {
+    let rows, count;
+    try {
+      [rows, count] = await Promise.all([
+        prisma.subcategory_question_papers.findMany({
+          where: { subcategory_id: subcategoryId },
+          include: {
+            exams: {
+              select: {
+                id: true, title: true, slug: true, url_path: true, total_questions: true,
+                duration: true, total_marks: true, difficulty: true, is_free: true,
+                logo_url: true, thumbnail_url: true, supports_hindi: true
+              }
+            }
+          },
+          orderBy: [{ year: 'desc' }, { display_order: 'asc' }],
+          skip: offset,
+          take: limit
+        }),
+        prisma.subcategory_question_papers.count({ where: { subcategory_id: subcategoryId } })
+      ]);
+    } catch (error) {
       logger.error('Get question papers error:', error);
       return res.status(500).json(formatError('Failed to fetch question papers'));
     }
+
+    const data = rows.map(({ exams, ...rest }) => ({ ...rest, exam: exams }));
 
     return res.json({
       success: true,
@@ -872,12 +873,7 @@ const upsertQuestionPaper = async (req, res) => {
     }
 
     if (exam_id) {
-      const { data: exam } = await supabase
-        .from('exams')
-        .select('id')
-        .eq('id', exam_id)
-        .single();
-      
+      const exam = await prisma.exams.findUnique({ where: { id: exam_id }, select: { id: true } });
       if (!exam) {
         return res.status(404).json(formatError('Exam not found'));
       }
@@ -887,7 +883,11 @@ const upsertQuestionPaper = async (req, res) => {
       subcategory_id: subcategoryId,
       exam_id: exam_id || null,
       title: title || null,
-      year: year ? parseInt(year, 10) : null,
+      // year is a VARCHAR(10) column, not numeric — PostgREST silently accepted a JS
+      // number here via implicit Postgres casting, but Prisma's client is stricter and
+      // rejects a number for a String field outright. Keep it a string; this is a type
+      // adaptation for the stricter client, not a business-logic change.
+      year: year ? String(year) : null,
       shift: shift || null,
       language: language || null,
       paper_type: paper_type || null,
@@ -898,29 +898,29 @@ const upsertQuestionPaper = async (req, res) => {
       is_active: is_active === true || is_active === 'true'
     });
 
-    let response;
-    if (paperId) {
-      response = await supabase
-        .from('subcategory_question_papers')
-        .update({ ...payload, updated_by: req.user?.id || null })
-        .eq('id', paperId)
-        .eq('subcategory_id', subcategoryId)
-        .select()
-        .single();
-    } else {
-      response = await supabase
-        .from('subcategory_question_papers')
-        .insert({ ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null })
-        .select()
-        .single();
-    }
-
-    if (response.error) {
-      logger.error('Upsert question paper error:', response.error);
+    let data;
+    try {
+      if (paperId) {
+        const result = await prisma.subcategory_question_papers.updateMany({
+          where: { id: paperId, subcategory_id: subcategoryId },
+          data: { ...payload, updated_by: req.user?.id || null }
+        });
+        if (result.count === 0) {
+          logger.error('Upsert question paper error: no matching row for', { paperId, subcategoryId });
+          return res.status(500).json(formatError('Failed to save question paper'));
+        }
+        data = await prisma.subcategory_question_papers.findUnique({ where: { id: paperId } });
+      } else {
+        data = await prisma.subcategory_question_papers.create({
+          data: { ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null }
+        });
+      }
+    } catch (error) {
+      logger.error('Upsert question paper error:', error);
       return res.status(500).json(formatError('Failed to save question paper'));
     }
 
-    return res.json({ success: true, data: response.data });
+    return res.json({ success: true, data });
   } catch (error) {
     logger.error('Upsert question paper exception:', error);
     return res.status(500).json(formatError('Server error while saving question paper'));
@@ -935,13 +935,9 @@ const deleteQuestionPaper = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { error } = await supabase
-      .from('subcategory_question_papers')
-      .delete()
-      .eq('id', paperId)
-      .eq('subcategory_id', subcategoryId);
-
-    if (error) {
+    try {
+      await prisma.subcategory_question_papers.deleteMany({ where: { id: paperId, subcategory_id: subcategoryId } });
+    } catch (error) {
       logger.error('Delete question paper error:', error);
       return res.status(500).json(formatError('Failed to delete question paper'));
     }
@@ -961,13 +957,13 @@ const getFAQs = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { data, error } = await supabase
-      .from('subcategory_faqs')
-      .select('*')
-      .eq('subcategory_id', subcategoryId)
-      .order('display_order', { ascending: true });
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.subcategory_faqs.findMany({
+        where: { subcategory_id: subcategoryId },
+        orderBy: { display_order: 'asc' }
+      });
+    } catch (error) {
       logger.error('Get FAQs error:', error);
       return res.status(500).json(formatError('Failed to fetch FAQs'));
     }
@@ -979,6 +975,9 @@ const getFAQs = async (req, res) => {
   }
 };
 
+// ⚠️ PRE-EXISTING BUG (preserved faithfully — see MIGRATION_TRACKER.md §4.5e):
+// subcategory_faqs has no `faq_category` column. Every create/update has always failed
+// in production (confirmed: 0 real rows exist in this table).
 const upsertFAQ = async (req, res) => {
   try {
     const { subcategoryId, faqId } = req.params;
@@ -1007,29 +1006,29 @@ const upsertFAQ = async (req, res) => {
       is_active: is_active === true || is_active === 'true'
     });
 
-    let response;
-    if (faqId) {
-      response = await supabase
-        .from('subcategory_faqs')
-        .update({ ...payload, updated_by: req.user?.id || null })
-        .eq('id', faqId)
-        .eq('subcategory_id', subcategoryId)
-        .select()
-        .single();
-    } else {
-      response = await supabase
-        .from('subcategory_faqs')
-        .insert({ ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null })
-        .select()
-        .single();
-    }
-
-    if (response.error) {
-      logger.error('Upsert FAQ error:', response.error);
+    let data;
+    try {
+      if (faqId) {
+        const result = await prisma.subcategory_faqs.updateMany({
+          where: { id: faqId, subcategory_id: subcategoryId },
+          data: { ...payload, updated_by: req.user?.id || null }
+        });
+        if (result.count === 0) {
+          logger.error('Upsert FAQ error: no matching row for', { faqId, subcategoryId });
+          return res.status(500).json(formatError('Failed to save FAQ'));
+        }
+        data = await prisma.subcategory_faqs.findUnique({ where: { id: faqId } });
+      } else {
+        data = await prisma.subcategory_faqs.create({
+          data: { ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null }
+        });
+      }
+    } catch (error) {
+      logger.error('Upsert FAQ error:', error);
       return res.status(500).json(formatError('Failed to save FAQ'));
     }
 
-    return res.json({ success: true, data: response.data });
+    return res.json({ success: true, data });
   } catch (error) {
     logger.error('Upsert FAQ exception:', error);
     return res.status(500).json(formatError('Server error while saving FAQ'));
@@ -1044,13 +1043,9 @@ const deleteFAQ = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { error } = await supabase
-      .from('subcategory_faqs')
-      .delete()
-      .eq('id', faqId)
-      .eq('subcategory_id', subcategoryId);
-
-    if (error) {
+    try {
+      await prisma.subcategory_faqs.deleteMany({ where: { id: faqId, subcategory_id: subcategoryId } });
+    } catch (error) {
       logger.error('Delete FAQ error:', error);
       return res.status(500).json(formatError('Failed to delete FAQ'));
     }
@@ -1070,13 +1065,13 @@ const getResources = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { data, error } = await supabase
-      .from('subcategory_resources')
-      .select('*')
-      .eq('subcategory_id', subcategoryId)
-      .order('display_order', { ascending: true });
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.subcategory_resources.findMany({
+        where: { subcategory_id: subcategoryId },
+        orderBy: { display_order: 'asc' }
+      });
+    } catch (error) {
       logger.error('Get resources error:', error);
       return res.status(500).json(formatError('Failed to fetch resources'));
     }
@@ -1088,6 +1083,11 @@ const getResources = async (req, res) => {
   }
 };
 
+// ⚠️ PRE-EXISTING BUG (preserved faithfully — see MIGRATION_TRACKER.md §4.5e):
+// subcategory_resources' real columns are `label`/`link_url` (both NOT NULL), not
+// `title`/`resource_url` — and `resource_type`/`thumbnail_url`/`is_active` don't exist
+// on this table at all. Every create/update has always failed in production (confirmed:
+// 0 real rows exist in this table).
 const upsertResource = async (req, res) => {
   try {
     const { subcategoryId, resourceId } = req.params;
@@ -1120,29 +1120,29 @@ const upsertResource = async (req, res) => {
       is_active: is_active === true || is_active === 'true'
     });
 
-    let response;
-    if (resourceId) {
-      response = await supabase
-        .from('subcategory_resources')
-        .update({ ...payload, updated_by: req.user?.id || null })
-        .eq('id', resourceId)
-        .eq('subcategory_id', subcategoryId)
-        .select()
-        .single();
-    } else {
-      response = await supabase
-        .from('subcategory_resources')
-        .insert({ ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null })
-        .select()
-        .single();
-    }
-
-    if (response.error) {
-      logger.error('Upsert resource error:', response.error);
+    let data;
+    try {
+      if (resourceId) {
+        const result = await prisma.subcategory_resources.updateMany({
+          where: { id: resourceId, subcategory_id: subcategoryId },
+          data: { ...payload, updated_by: req.user?.id || null }
+        });
+        if (result.count === 0) {
+          logger.error('Upsert resource error: no matching row for', { resourceId, subcategoryId });
+          return res.status(500).json(formatError('Failed to save resource'));
+        }
+        data = await prisma.subcategory_resources.findUnique({ where: { id: resourceId } });
+      } else {
+        data = await prisma.subcategory_resources.create({
+          data: { ...payload, created_by: req.user?.id || null, updated_by: req.user?.id || null }
+        });
+      }
+    } catch (error) {
+      logger.error('Upsert resource error:', error);
       return res.status(500).json(formatError('Failed to save resource'));
     }
 
-    return res.json({ success: true, data: response.data });
+    return res.json({ success: true, data });
   } catch (error) {
     logger.error('Upsert resource exception:', error);
     return res.status(500).json(formatError('Server error while saving resource'));
@@ -1157,13 +1157,9 @@ const deleteResource = async (req, res) => {
       return res.status(404).json(formatError('Subcategory not found'));
     }
 
-    const { error } = await supabase
-      .from('subcategory_resources')
-      .delete()
-      .eq('id', resourceId)
-      .eq('subcategory_id', subcategoryId);
-
-    if (error) {
+    try {
+      await prisma.subcategory_resources.deleteMany({ where: { id: resourceId, subcategory_id: subcategoryId } });
+    } catch (error) {
       logger.error('Delete resource error:', error);
       return res.status(500).json(formatError('Failed to delete resource'));
     }

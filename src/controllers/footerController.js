@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 const sanitizeNumber = (value, fallback = 0) => {
@@ -38,7 +38,7 @@ const sanitizeLinkPayload = (payload = {}, userId = null) => {
   };
 };
 
-const safeSelect = `id, section, section_order, label, href, display_order, is_active, open_in_new_tab, created_at, updated_at`;
+const safeSelect = { id: true, section: true, section_order: true, label: true, href: true, display_order: true, is_active: true, open_in_new_tab: true, created_at: true, updated_at: true };
 
 const handleSupabaseError = (res, message, error) => {
   logger.error(message, error);
@@ -47,19 +47,11 @@ const handleSupabaseError = (res, message, error) => {
 
 const getFooterLinks = async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('footer_links')
-      .select(safeSelect)
-      .is('deleted_at', null)
-      .eq('is_active', true)
-      .order('section_order', { ascending: true })
-      .order('section', { ascending: true })
-      .order('display_order', { ascending: true })
-      .order('created_at', { ascending: true });
-
-    if (error) {
-      return handleSupabaseError(res, 'Failed to fetch footer links', error);
-    }
+    const data = await prisma.footer_links.findMany({
+      where: { deleted_at: null, is_active: true },
+      select: safeSelect,
+      orderBy: [{ section_order: 'asc' }, { section: 'asc' }, { display_order: 'asc' }, { created_at: 'asc' }],
+    });
 
     return res.json({ success: true, data: data || [] });
   } catch (error) {
@@ -69,18 +61,11 @@ const getFooterLinks = async (req, res) => {
 
 const getAdminFooterLinks = async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('footer_links')
-      .select(safeSelect)
-      .is('deleted_at', null)
-      .order('section_order', { ascending: true })
-      .order('section', { ascending: true })
-      .order('display_order', { ascending: true })
-      .order('created_at', { ascending: true });
-
-    if (error) {
-      return handleSupabaseError(res, 'Failed to fetch footer links', error);
-    }
+    const data = await prisma.footer_links.findMany({
+      where: { deleted_at: null },
+      select: safeSelect,
+      orderBy: [{ section_order: 'asc' }, { section: 'asc' }, { display_order: 'asc' }, { created_at: 'asc' }],
+    });
 
     return res.json({ success: true, data: data || [] });
   } catch (error) {
@@ -93,15 +78,10 @@ const createFooterLink = async (req, res) => {
     const payload = sanitizeLinkPayload(req.body, req.user?.id || null);
     payload.created_by = req.user?.id || null;
 
-    const { data, error } = await supabase
-      .from('footer_links')
-      .insert(payload)
-      .select(safeSelect)
-      .single();
-
-    if (error) {
-      return handleSupabaseError(res, 'Failed to create footer link', error);
-    }
+    const data = await prisma.footer_links.create({
+      data: payload,
+      select: safeSelect,
+    });
 
     return res.status(201).json({ success: true, data });
   } catch (error) {
@@ -121,21 +101,16 @@ const updateFooterLink = async (req, res) => {
 
     const payload = sanitizeLinkPayload(req.body, req.user?.id || null);
 
-    const { data, error } = await supabase
-      .from('footer_links')
-      .update(payload)
-      .eq('id', id)
-      .is('deleted_at', null)
-      .select(safeSelect)
-      .single();
-
-    if (error) {
-      return handleSupabaseError(res, 'Failed to update footer link', error);
-    }
-
-    if (!data) {
+    const existing = await prisma.footer_links.findFirst({ where: { id, deleted_at: null } });
+    if (!existing) {
       return res.status(404).json({ success: false, message: 'Footer link not found' });
     }
+
+    const data = await prisma.footer_links.update({
+      where: { id },
+      data: payload,
+      select: safeSelect,
+    });
 
     return res.json({ success: true, data });
   } catch (error) {
@@ -153,15 +128,10 @@ const deleteFooterLink = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Footer link ID is required' });
     }
 
-    const { error } = await supabase
-      .from('footer_links')
-      .update({ deleted_at: new Date().toISOString(), is_active: false })
-      .eq('id', id)
-      .is('deleted_at', null);
-
-    if (error) {
-      return handleSupabaseError(res, 'Failed to delete footer link', error);
-    }
+    await prisma.footer_links.updateMany({
+      where: { id, deleted_at: null },
+      data: { deleted_at: new Date(), is_active: false },
+    });
 
     return res.json({ success: true, message: 'Footer link deleted successfully' });
   } catch (error) {
@@ -176,21 +146,22 @@ const reorderFooterLinks = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Order payload must be a non-empty array' });
     }
 
+    // The old supabase `.upsert(..., { onConflict: 'id' })` call only ever hits the
+    // UPDATE branch in practice (every id here comes from reordering existing links),
+    // and would actually violate NOT NULL constraints on `label`/`href` if it ever tried
+    // a real insert (those columns aren't in the payload). Using per-row `update` in a
+    // transaction is the faithful equivalent of how this endpoint is actually used.
     const updates = order.map((item, index) => ({
       id: item.id,
       section_order: sanitizeNumber(item.section_order ?? item.sectionIndex ?? 0),
       display_order: sanitizeNumber(item.display_order ?? index),
-      updated_at: new Date().toISOString(),
+      updated_at: new Date(),
       updated_by: req.user?.id || null
     }));
 
-    const { error } = await supabase
-      .from('footer_links')
-      .upsert(updates, { onConflict: 'id' });
-
-    if (error) {
-      return handleSupabaseError(res, 'Failed to reorder footer links', error);
-    }
+    await prisma.$transaction(
+      updates.map(({ id, ...data }) => prisma.footer_links.update({ where: { id }, data }))
+    );
 
     return getAdminFooterLinks(req, res);
   } catch (error) {

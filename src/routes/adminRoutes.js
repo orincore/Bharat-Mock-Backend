@@ -21,6 +21,7 @@ const {
   createOption,
   updateOption,
   bulkCreateExamWithContent,
+  generateExamPdf,
   saveDraftExam,
   uploadQuestionImage,
   removeQuestionImage,
@@ -60,6 +61,7 @@ const { adminGetPrivacyPolicy, adminUpsertPrivacyPolicy } = require('../controll
 const { adminGetDisclaimer, adminUpsertDisclaimer } = require('../controllers/disclaimerController');
 const { adminGetRefundPolicy, adminUpsertRefundPolicy } = require('../controllers/refundController');
 const { clearCache } = require('../controllers/cacheController');
+const passageController = require('../controllers/passageController');
 
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -109,6 +111,10 @@ router.post('/exams/draft', checkPermission('exams', 'create'), activityLogger('
 
 router.put('/exams/:id/content', checkPermission('exams', 'update'), activityLogger('UPDATE_EXAM_CONTENT', 'exam'), upload.any(), updateExamWithContent);
 
+// Server-side PDF generation (headless Chromium). Options (answers, banners,
+// header/footer, watermark) come from the JSON body.
+router.post('/exams/:examId/pdf', checkPermission('exams', 'read'), generateExamPdf);
+
 router.put('/exams/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_EXAM', 'exam'), upload.fields([
   { name: 'logo', maxCount: 1 },
   { name: 'thumbnail', maxCount: 1 }
@@ -123,6 +129,14 @@ router.delete('/exams/:id', requireRole('admin'), activityLogger('DELETE_EXAM', 
 router.post('/sections', checkPermission('exams', 'create'), activityLogger('CREATE_SECTION', 'section'), createSection);
 router.put('/sections/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_SECTION', 'section'), updateSection);
 router.delete('/sections/:id', requireRole('admin', 'editor'), activityLogger('DELETE_SECTION', 'section'), deleteSection);
+
+// Comprehension passages — a shared reading passage multiple questions can link to
+router.get('/exams/:examId/passages', checkPermission('exams', 'read'), passageController.listPassages);
+router.post('/exams/:examId/passages', checkPermission('exams', 'create'), activityLogger('CREATE_PASSAGE', 'passage'), passageController.createPassage);
+router.get('/passages/:id', checkPermission('exams', 'read'), passageController.getPassage);
+router.put('/passages/:id', checkPermission('exams', 'update'), activityLogger('UPDATE_PASSAGE', 'passage'), passageController.updatePassage);
+router.delete('/passages/:id', requireRole('admin', 'editor'), activityLogger('DELETE_PASSAGE', 'passage'), passageController.deletePassage);
+router.post('/upload/passage-image', checkPermission('exams', 'update'), activityLogger('UPLOAD_PASSAGE_IMAGE', 'passage'), upload.single('image'), passageController.uploadPassageImage);
 
 router.get('/navigation', requireRole('admin'), getAdminNavigationLinks);
 router.post('/navigation', requireRole('admin'), activityLogger('CREATE_NAVIGATION', 'navigation'), createNavigationLink);

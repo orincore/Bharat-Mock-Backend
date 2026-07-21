@@ -5,14 +5,9 @@ const helmet = require('helmet');
 const compression = require('compression');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
-const { ApolloServer } = require('@apollo/server');
-const { graphqlUploadExpress } = require('graphql-upload-minimal');
 const passport = require('./config/passport');
 const logger = require('./config/logger');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
-const typeDefs = require('./graphql/typeDefs');
-const resolvers = require('./graphql/resolvers');
-const { buildContext } = require('./graphql/context');
 
 const authRoutes = require('./routes/authRoutes');
 const examRoutes = require('./routes/examRoutes');
@@ -48,11 +43,22 @@ const currentAffairsRoutes = require('./routes/currentAffairsRoutes');
 const activityLogRoutes = require('./routes/activityLogRoutes');
 const sitemapRoutes = require('./routes/sitemapRoutes');
 const examTranslationsRoutes = require('./routes/examTranslationsRoutes');
+const { Prisma } = require('./generated/prisma');
 
 const app = express();
 
 // Trust first proxy (Nginx) so rate limiting & logging use the real client IP.
 app.set('trust proxy', 1);
+
+// Prisma Decimal fields (score, marks, percentage, accuracy, etc.) serialize to
+// strings by default, which silently breaks any frontend code expecting a number
+// (e.g. .toFixed()). JSON.stringify calls value.toJSON() BEFORE any replacer function
+// ever sees it, so a `json replacer` can't intercept Decimals — decimal.js's own
+// toJSON (== toString) always wins first. Overriding toJSON directly is the only hook
+// that actually runs for every res.json() call, at any nesting depth.
+Prisma.Decimal.prototype.toJSON = function decimalToJSONNumber() {
+  return this.toNumber();
+};
 
 app.use(helmet());
 
@@ -162,34 +168,10 @@ app.use(`/api/${API_VERSION}/activity`, activityLogRoutes);
 app.use(`/api/${API_VERSION}/sitemap`, sitemapRoutes);
 app.use(`/api/${API_VERSION}/exam-translations`, examTranslationsRoutes);
 
-const GRAPHQL_PATH = process.env.GRAPHQL_PATH || '/api/graphql';
-const MAX_UPLOAD_SIZE = parseInt(process.env.MAX_FILE_SIZE, 10) || 5242880; // 5MB default
-
 let server;
 
 const startServer = async () => {
   try {
-    const { expressMiddleware } = await import('@apollo/server/express4');
-
-    const apolloServer = new ApolloServer({
-      typeDefs,
-      resolvers,
-      formatError: (formattedError) => {
-        logger.error('GraphQL Error:', formattedError);
-        return formattedError;
-      }
-    });
-
-    await apolloServer.start();
-
-    app.use(
-      GRAPHQL_PATH,
-      graphqlUploadExpress({ maxFileSize: MAX_UPLOAD_SIZE, maxFiles: 10 }),
-      expressMiddleware(apolloServer, {
-        context: async ({ req }) => buildContext(req)
-      })
-    );
-
     app.use(notFound);
     app.use(errorHandler);
 
@@ -199,7 +181,6 @@ const startServer = async () => {
       logger.info(`Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
       console.log(`Server running on http://localhost:${PORT}`);
       console.log(`API: http://localhost:${PORT}/api/${API_VERSION}`);
-      console.log(`GraphQL: http://localhost:${PORT}${GRAPHQL_PATH}`);
     });
 
     server.keepAliveTimeout = 65000;

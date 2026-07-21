@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
 
@@ -17,9 +17,60 @@ const bustExamTranslationCache = async (examId) => {
 const bustExamListCaches = async () => {
   await redisCache.del(buildCacheKey('exam_years'));
   await redisCache.deleteByPattern(buildCacheKey('exams', '*'));
-  logger.info('[Cache] Busted exam_years + exams:* listings');
+  // Also drop the per-exam DETAIL cache. It is keyed `exam-detail:*` (by id,
+  // url_path, slug and short path), which the `exams:*` pattern above does NOT
+  // match — so without this, editing any exam field (instructions, marks, dates…)
+  // stayed invisible on the detail/attempt page until the TTL expired.
+  await redisCache.deleteByPattern('exam-detail:*');
+  logger.info('[Cache] Busted exam_years + exams:* listings + exam-detail:*');
 };
 const { uploadExamLogo, uploadExamThumbnail, uploadExamPdfEn, uploadExamPdfHi, uploadQuestionImage, uploadOptionImage, uploadExplanationImage, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
+const { fetchExamPdfData } = require('../utils/examPdfData');
+const { buildExamPdfDocument } = require('../utils/examPdfHtml');
+const { renderExamPdf } = require('../utils/pdfBrowser');
+
+const PDF_BASE_URL = process.env.PDF_BASE_URL || process.env.FRONTEND_URL || 'https://bharatmock.com';
+const pdfFileName = (title) =>
+  `${String(title || 'exam').replace(/[\\/:*?"<>|]+/g, '').trim() || 'exam'}.pdf`;
+
+// Admin: render ANY exam (published or not) to a PDF with full option control —
+// answers/explanations, language, watermark, cover page, header/footer text and
+// cover/footer/back banners (data URLs). Options come from the request body.
+const generateExamPdf = async (req, res) => {
+  try {
+    const { examId } = req.params;
+    const body = req.body || {};
+
+    const data = await fetchExamPdfData(prisma, examId, { publishedOnly: false });
+    if (!data) return res.status(404).json({ success: false, message: 'Exam not found' });
+
+    const built = await buildExamPdfDocument(data, {
+      showAnswers: body.showAnswers !== false,
+      showExplanations: body.showExplanations !== false,
+      language: body.language === 'hi' ? 'hi' : 'en',
+      showWatermark: body.showWatermark !== false,
+      showCoverPage: body.showCoverPage !== false,
+      headerText: typeof body.headerText === 'string' ? body.headerText : '',
+      footerText: typeof body.footerText === 'string' ? body.footerText : '',
+      coverBanner: body.coverBanner || null,
+      footerBanner: body.footerBanner || null,
+      backCoverBanner: body.backCoverBanner || null,
+      baseUrl: PDF_BASE_URL,
+    });
+
+    const pdf = await renderExamPdf(built);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${pdfFileName(data.exam.title)}"`);
+    res.setHeader('Content-Length', pdf.length);
+    return res.end(pdf);
+  } catch (error) {
+    logger.error('Admin generate exam PDF error:', error);
+    if (!res.headersSent) {
+      return res.status(500).json({ success: false, message: 'Failed to generate exam PDF' });
+    }
+    return res.end();
+  }
+};
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 const { sendRoleChangedEmail, sendSubscriptionActivatedEmail } = require('../utils/emailService');
 
@@ -27,6 +78,15 @@ const safeAverage = (numbers = []) => {
   const valid = numbers.filter((n) => typeof n === 'number' && !Number.isNaN(n));
   if (valid.length === 0) return 0;
   return parseFloat((valid.reduce((sum, value) => sum + value, 0) / valid.length).toFixed(1));
+};
+
+// Prisma's DateTime fields require a full ISO-8601 timestamp. Admin forms send
+// date-only strings (e.g. "2026-07-14"), which fail with "premature end of
+// input. Expected ISO-8601 DateTime." unless coerced through `new Date()` first.
+const toDateOrNull = (value) => {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 };
 
 // Generate a unique exam UID in BHMK######X format, verified against DB
@@ -39,7 +99,7 @@ const generateUniqueExamUid = async () => {
   };
   let uid = gen();
   for (let i = 0; i < 20; i++) {
-    const { data: existing } = await supabase.from('exams').select('id').eq('exam_uid', uid).maybeSingle();
+    const existing = await prisma.exams.findFirst({ where: { exam_uid: uid }, select: { id: true } });
     if (!existing) return uid;
     uid = gen();
   }
@@ -49,7 +109,13 @@ const generateUniqueExamUid = async () => {
 const QUESTION_BATCH_SIZE = 25;
 const OPTION_BATCH_SIZE = 50;
 
-const batchInsert = async (table, rows, selectColumns = '*', batchSize = QUESTION_BATCH_SIZE) => {
+// batchInsert now takes a Prisma model delegate (e.g. prisma.questions) instead of a
+// table-name string. Uses createManyAndReturn (not plain createMany, which doesn't
+// return rows) so callers can map generated ids back onto their in-memory question/
+// option trees exactly like the original's insert().select(selectColumns) did —
+// Postgres preserves row order for a single multi-row INSERT ... RETURNING, so the
+// original's positional array alignment still holds. See MIGRATION_TRACKER.md §4.5g.
+const batchInsert = async (model, rows, select = undefined, batchSize = QUESTION_BATCH_SIZE) => {
   if (!rows.length) return [];
 
   const chunks = [];
@@ -62,11 +128,8 @@ const batchInsert = async (table, rows, selectColumns = '*', batchSize = QUESTIO
   // so the final flattened list still lines up 1:1 with the input `rows` order.
   const results = await Promise.all(
     chunks.map((chunk, idx) =>
-      supabase
-        .from(table)
-        .insert(chunk)
-        .select(selectColumns)
-        .then((res) => ({ ...res, idx }))
+      model.createManyAndReturn(select ? { data: chunk, select } : { data: chunk })
+        .then((data) => ({ data, idx }))
         .catch((error) => ({ error, idx }))
     )
   );
@@ -75,14 +138,14 @@ const batchInsert = async (table, rows, selectColumns = '*', batchSize = QUESTIO
   for (const { data, error, idx } of results) {
     if (error) {
       const start = idx * batchSize;
-      logger.error(`Batch insert error on ${table} (chunk ${idx + 1}, rows ${start}-${start + chunks[idx].length - 1}):`, error);
+      logger.error(`Batch insert error (chunk ${idx + 1}, rows ${start}-${start + chunks[idx].length - 1}):`, error);
     } else if (data) {
       allCreated.push(...data);
     }
   }
 
   if (allCreated.length !== rows.length) {
-    logger.warn(`${table}: expected ${rows.length} rows, inserted ${allCreated.length}`);
+    logger.warn(`Expected ${rows.length} rows, inserted ${allCreated.length}`);
   }
   return allCreated;
 };
@@ -109,102 +172,73 @@ const getAdminExams = async (req, res) => {
     const limitNumber = parseInt(limit, 10) || 10;
     const offset = (pageNumber - 1) * limitNumber;
 
-    let query = supabase
-      .from('exams')
-      .select(`
-        id,
-        title,
-        duration,
-        total_marks,
-        total_questions,
-        category,
-        subcategory,
-        difficulty,
-        status,
-        start_date,
-        end_date,
-        pass_percentage,
-        is_free,
-        logo_url,
-        thumbnail_url,
-        negative_marking,
-        negative_mark_value,
-        is_published,
-        exam_date,
-        exam_type,
-        show_in_mock_tests,
-        is_premium,
-        exam_uid,
-        supports_hindi,
-        pdf_url_en,
-        pdf_url_hi,
-        created_at,
-        updated_at
-      `, { count: 'exact' });
+    const where = {};
 
+    // NOTE (disclosed simplification, not a silent bug fix): the original built a raw
+    // ILIKE pattern with spaces replaced by '%' (e.g. "ssc cgl" -> "%ssc%cgl%"), which
+    // matches "SSC Tier 1 CGL" (words in order, anything between) but not "CGL SSC"
+    // (wrong order). Prisma's query builder has no equivalent for an arbitrary embedded
+    // wildcard pattern without dropping to $queryRaw for this one admin-only internal
+    // search box. Used plain case-insensitive `contains` on the literal search term
+    // instead — matches a contiguous substring, which is simpler and, for the common
+    // case of an admin searching a remembered phrase, an equally reasonable (arguably
+    // more predictable) relevance behavior. Flagged here for the client; not a data
+    // correctness or security-relevant change, purely an admin search UX nuance.
     if (search) {
       const searchTerm = search.trim().replace(/\s+/g, ' ');
       const hasSpecialChars = /[(),]/.test(searchTerm);
-      const titlePattern = `%${searchTerm.replace(/ /g, '%')}%`;
       if (hasSpecialChars) {
-        query = query.ilike('title', titlePattern);
+        where.title = { contains: searchTerm, mode: 'insensitive' };
       } else {
-        const plainPattern = `%${searchTerm}%`;
-        query = query.or(`title.ilike.${titlePattern},slug.ilike.${plainPattern},exam_uid.ilike.${plainPattern}`);
+        where.OR = [
+          { title: { contains: searchTerm, mode: 'insensitive' } },
+          { slug: { contains: searchTerm, mode: 'insensitive' } },
+          { exam_uid: { contains: searchTerm, mode: 'insensitive' } }
+        ];
       }
     }
 
-    if (status) {
-      query = query.eq('status', status);
+    if (status) where.status = status;
+    if (category) where.category = category;
+    if (subcategory) where.subcategory = subcategory;
+    if (difficulty) where.difficulty = difficulty;
+    if (exam_type && exam_type !== 'all') where.exam_type = exam_type;
+
+    if (is_premium === 'true') where.is_premium = true;
+    else if (is_premium === 'false') where.is_premium = false;
+
+    if (is_published === 'true') where.is_published = true;
+    else if (is_published === 'false') where.is_published = false;
+
+    if (is_free === 'true') where.is_free = true;
+    else if (is_free === 'false') where.is_free = false;
+
+    if (date_from || date_to) {
+      where.exam_date = {};
+      if (date_from) where.exam_date.gte = new Date(date_from);
+      if (date_to) where.exam_date.lte = new Date(date_to);
     }
 
-    if (category) {
-      query = query.eq('category', category);
-    }
-
-    if (subcategory) {
-      query = query.eq('subcategory', subcategory);
-    }
-
-    if (difficulty) {
-      query = query.eq('difficulty', difficulty);
-    }
-
-    if (exam_type && exam_type !== 'all') {
-      query = query.eq('exam_type', exam_type);
-    }
-
-    if (is_premium === 'true') {
-      query = query.eq('is_premium', true);
-    } else if (is_premium === 'false') {
-      query = query.eq('is_premium', false);
-    }
-
-    if (is_published === 'true') {
-      query = query.eq('is_published', true);
-    } else if (is_published === 'false') {
-      query = query.eq('is_published', false);
-    }
-
-    if (is_free === 'true') {
-      query = query.eq('is_free', true);
-    } else if (is_free === 'false') {
-      query = query.eq('is_free', false);
-    }
-
-    if (date_from) {
-      query = query.gte('exam_date', date_from);
-    }
-
-    if (date_to) {
-      query = query.lte('exam_date', date_to);
-    }
-
-    query = query.order('created_at', { ascending: false }).range(offset, offset + limitNumber - 1);
-
-    const { data: exams, error, count } = await query;
-
-    if (error) {
+    let exams, count;
+    try {
+      [exams, count] = await Promise.all([
+        prisma.exams.findMany({
+          where,
+          select: {
+            id: true, title: true, duration: true, total_marks: true, total_questions: true,
+            category: true, subcategory: true, difficulty: true, status: true, start_date: true,
+            end_date: true, pass_percentage: true, is_free: true, logo_url: true, thumbnail_url: true,
+            negative_marking: true, negative_mark_value: true, is_published: true, exam_date: true,
+            exam_type: true, show_in_mock_tests: true, is_premium: true, exam_uid: true,
+            supports_hindi: true, pdf_url_en: true, pdf_url_hi: true, created_at: true, updated_at: true
+          },
+          orderBy: { created_at: 'desc' },
+          skip: offset,
+          take: limitNumber
+        }),
+        prisma.exams.count({ where })
+      ]);
+    } catch (error) {
       logger.error('Get admin exams error:', error);
       return res.status(500).json({
         success: false,
@@ -235,99 +269,63 @@ const getUserDetails = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: user, error: userError } = await supabase
-      .from('users')
-      .select(`
-        id,
-        email,
-        name,
-        phone,
-        bio,
-        avatar_url,
-        role,
-        is_verified,
-        is_blocked,
-        block_reason,
-        is_onboarded,
-        auth_provider,
-        is_premium,
-        subscription_plan_id,
-        subscription_expires_at,
-        subscription_auto_renew,
-        created_at,
-        deleted_at
-      `)
-      .eq('id', id)
-      .single();
+    const user = await prisma.users.findUnique({
+      where: { id },
+      select: {
+        id: true, email: true, name: true, phone: true, bio: true, avatar_url: true, role: true,
+        is_verified: true, is_blocked: true, block_reason: true, is_onboarded: true, auth_provider: true,
+        is_premium: true, subscription_plan_id: true, subscription_expires_at: true,
+        subscription_auto_renew: true, created_at: true, deleted_at: true
+      }
+    }).catch(() => null);
 
-    if (userError || !user) {
+    if (!user) {
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
 
-    const { data: allResults, error: resultsError } = await supabase
-      .from('results')
-      .select('score, total_marks, percentage, created_at, exam_id')
-      .eq('user_id', id)
-      .eq('is_published', true)
-      .order('created_at', { ascending: false });
-
-    if (resultsError) {
-      logger.error('Admin fetch user results error:', resultsError);
+    let allResults;
+    try {
+      allResults = await prisma.results.findMany({
+        where: { user_id: id, is_published: true },
+        select: { score: true, total_marks: true, percentage: true, created_at: true, exam_id: true },
+        orderBy: { created_at: 'desc' }
+      });
+    } catch (error) {
+      logger.error('Admin fetch user results error:', error);
+      allResults = [];
     }
 
-    const { data: recentResults } = await supabase
-      .from('results')
-      .select(`
-        id,
-        score,
-        total_marks,
-        percentage,
-        status,
-        created_at,
-        exam_id,
-        exams (
-          id,
-          title,
-          category,
-          difficulty
-        )
-      `)
-      .eq('user_id', id)
-      .eq('is_published', true)
-      .order('created_at', { ascending: false })
-      .limit(5);
+    const recentResults = await prisma.results.findMany({
+      where: { user_id: id, is_published: true },
+      select: {
+        id: true, score: true, total_marks: true, percentage: true, status: true, created_at: true, exam_id: true,
+        exams: { select: { id: true, title: true, category: true, difficulty: true } }
+      },
+      orderBy: { created_at: 'desc' },
+      take: 5
+    }).catch(() => []);
 
-    const { data: recentAttempts } = await supabase
-      .from('exam_attempts')
-      .select(`
-        id,
-        exam_id,
-        started_at,
-        submitted_at,
-        time_taken,
-        is_submitted,
-        exams (
-          id,
-          title,
-          category,
-          difficulty
-        )
-      `)
-      .eq('user_id', id)
-      .order('started_at', { ascending: false })
-      .limit(5);
+    const recentAttempts = await prisma.exam_attempts.findMany({
+      where: { user_id: id },
+      select: {
+        id: true, exam_id: true, started_at: true, submitted_at: true, time_taken: true, is_submitted: true,
+        exams: { select: { id: true, title: true, category: true, difficulty: true } }
+      },
+      orderBy: { started_at: 'desc' },
+      take: 5
+    }).catch(() => []);
 
-    const scores = (allResults || []).map((result) => result.percentage || 0);
+    const scores = (allResults || []).map((result) => Number(result.percentage) || 0);
     const stats = {
       totalExamsTaken: allResults?.length || 0,
       averageScore: safeAverage(scores),
       bestScore: scores.length ? Math.max(...scores) : 0,
       lastActive: allResults?.[0]?.created_at || user.created_at,
-      totalMarksEarned: (allResults || []).reduce((sum, r) => sum + (r.score || 0), 0),
-      totalMarksPossible: (allResults || []).reduce((sum, r) => sum + (r.total_marks || 0), 0)
+      totalMarksEarned: (allResults || []).reduce((sum, r) => sum + (Number(r.score) || 0), 0),
+      totalMarksPossible: (allResults || []).reduce((sum, r) => sum + (Number(r.total_marks) || 0), 0)
     };
 
     res.json({
@@ -368,68 +366,44 @@ const getExamSectionsWithQuestions = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: exam, error: examError } = await supabase
-      .from('exams')
-      .select('id')
-      .eq('id', id)
-      .is('deleted_at', null)
-      .single();
+    const exam = await prisma.exams.findFirst({ where: { id, deleted_at: null }, select: { id: true } });
 
-    if (examError || !exam) {
+    if (!exam) {
       return res.status(404).json({
         success: false,
         message: 'Exam not found'
       });
     }
 
-    const { data: sections, error: sectionsError } = await supabase
-      .from('exam_sections')
-      .select('id, name, name_hi, total_questions, marks_per_question, duration, section_order')
-      .eq('exam_id', id)
-      .order('section_order');
-
-    if (sectionsError) {
-      logger.error('Get sections error:', sectionsError);
+    let sections;
+    try {
+      sections = await prisma.exam_sections.findMany({
+        where: { exam_id: id },
+        select: { id: true, name: true, name_hi: true, total_questions: true, marks_per_question: true, duration: true, section_order: true },
+        orderBy: { section_order: 'asc' }
+      });
+    } catch (error) {
+      logger.error('Get sections error:', error);
       return res.status(500).json({
         success: false,
         message: 'Failed to fetch exam sections'
       });
     }
 
-    const { data: questions, error: questionsError } = await supabase
-      .from('questions')
-      .select(`
-        id,
-        section_id,
-        type,
-        text,
-        text_hi,
-        marks,
-        negative_marks,
-        explanation,
-        explanation_hi,
-        explanation_image_url,
-        difficulty,
-        image_url,
-        question_order,
-        question_number,
-        question_options (
-          id,
-          option_text,
-          option_text_hi,
-          is_correct,
-          option_order,
-          image_url
-        )
-      `)
-      .eq('exam_id', id)
-      .is('deleted_at', null)
-      .order('section_id', { ascending: true })
-      .order('question_order', { ascending: true })
-      .order('question_number', { ascending: true });
-
-    if (questionsError) {
-      logger.error('Get questions error:', questionsError);
+    let questions;
+    try {
+      questions = await prisma.questions.findMany({
+        where: { exam_id: id, deleted_at: null },
+        select: {
+          id: true, section_id: true, passage_id: true, type: true, text: true, text_hi: true, marks: true, negative_marks: true,
+          explanation: true, explanation_hi: true, explanation_image_url: true, difficulty: true, image_url: true,
+          question_order: true, question_number: true,
+          question_options: { select: { id: true, option_text: true, option_text_hi: true, is_correct: true, option_order: true, image_url: true } }
+        },
+        orderBy: [{ section_id: 'asc' }, { question_order: 'asc' }, { question_number: 'asc' }]
+      });
+    } catch (error) {
+      logger.error('Get questions error:', error);
       return res.status(500).json({
         success: false,
         message: 'Failed to fetch exam questions'
@@ -441,7 +415,7 @@ const getExamSectionsWithQuestions = async (req, res) => {
       name: section.name,
       name_hi: section.name_hi,
       total_questions: section.total_questions,
-      marks_per_question: section.marks_per_question,
+      marks_per_question: Number(section.marks_per_question),
       duration: section.duration,
       section_order: section.section_order,
       questions: questions
@@ -453,11 +427,16 @@ const getExamSectionsWithQuestions = async (req, res) => {
         })
         .map(q => ({
           id: q.id,
+          // Must be echoed back or the admin editor's "Linked Passage" dropdown
+          // resets to "— No Passage —" on every reload: the write path saves the
+          // link fine, but this mapper rebuilds the question object field by field,
+          // so anything omitted here is invisible to the client.
+          passage_id: q.passage_id,
           type: q.type,
           text: q.text,
           text_hi: q.text_hi,
-          marks: q.marks,
-          negative_marks: q.negative_marks,
+          marks: Number(q.marks),
+          negative_marks: Number(q.negative_marks),
           explanation: q.explanation,
           explanation_hi: q.explanation_hi,
           explanation_image_url: q.explanation_image_url,
@@ -495,67 +474,35 @@ const getAdminExamById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: exam, error } = await supabase
-      .from('exams')
-      .select(`
-        id,
-        title,
-        duration,
-        total_marks,
-        total_questions,
-        category,
-        category_id,
-        subcategory,
-        subcategory_id,
-        difficulty,
-        difficulty_id,
-        status,
-        start_date,
-        end_date,
-        pass_percentage,
-        is_free,
-        exam_type,
-        show_in_mock_tests,
-        is_premium,
-        is_published,
-        logo_url,
-        thumbnail_url,
-        pdf_url_en,
-        pdf_url_hi,
-        negative_marking,
-        negative_mark_value,
-        slug,
-        url_path,
-        syllabus,
-        allow_anytime,
-        is_test_series,
-        test_series_id,
-        test_series_section_id,
-        test_series_topic_id,
-        exam_date,
-        display_order,
-        paper_section_id,
-        paper_topic_id,
-        exam_uid,
-        is_current_affair
-      `)
-      .eq('id', id)
-      .is('deleted_at', null)
-      .single();
+    const exam = await prisma.exams.findFirst({
+      where: { id, deleted_at: null },
+      select: {
+        id: true, title: true, duration: true, total_marks: true, total_questions: true, category: true,
+        category_id: true, subcategory: true, subcategory_id: true, difficulty: true, difficulty_id: true,
+        status: true, start_date: true, end_date: true, pass_percentage: true, is_free: true, exam_type: true,
+        show_in_mock_tests: true, is_premium: true, is_published: true, logo_url: true, thumbnail_url: true,
+        pdf_url_en: true, pdf_url_hi: true, negative_marking: true, negative_mark_value: true, slug: true,
+        url_path: true, syllabus: true, allow_anytime: true, is_test_series: true, test_series_id: true,
+        test_series_section_id: true, test_series_topic_id: true, exam_date: true, display_order: true,
+        paper_section_id: true, paper_topic_id: true, exam_uid: true, is_current_affair: true,
+        instructions: true
+      }
+    }).catch(() => null);
 
-    if (error || !exam) {
+    if (!exam) {
       return res.status(404).json({
         success: false,
         message: 'Exam not found'
       });
     }
 
-    const { data: syllabusRows } = await supabase
-      .from('exam_syllabus')
-      .select('topic')
-      .eq('exam_id', id);
+    const syllabusRows = await prisma.exam_syllabus.findMany({ where: { exam_id: id }, select: { topic: true } });
 
     exam.syllabus = syllabusRows?.map(row => row.topic) || exam.syllabus || [];
+    // pass_percentage/negative_mark_value are Decimal — normalize to plain numbers
+    // (see MIGRATION_TRACKER.md §4.5 for why supabase-js never had this issue).
+    exam.pass_percentage = exam.pass_percentage !== null ? Number(exam.pass_percentage) : exam.pass_percentage;
+    exam.negative_mark_value = exam.negative_mark_value !== null ? Number(exam.negative_mark_value) : exam.negative_mark_value;
 
     res.json({
       success: true,
@@ -620,76 +567,75 @@ const createExam = async (req, res) => {
       }
     }
 
-    const examSlug = await ensureUniqueSlug(supabase, 'exams', slugify(customSlug || title));
-    
+    const examSlug = await ensureUniqueSlug(prisma.exams, slugify(customSlug || title));
+
     let categorySlug = category || '';
     let subcategorySlug = subcategory || '';
-    
+
     if (category_id) {
-      const { data: cat } = await supabase.from('exam_categories').select('slug').eq('id', category_id).single();
+      const cat = await prisma.exam_categories.findUnique({ where: { id: category_id }, select: { slug: true } });
       if (cat) categorySlug = cat.slug;
     }
-    
+
     if (subcategory_id) {
-      const { data: subcat } = await supabase.from('exam_subcategories').select('slug').eq('id', subcategory_id).single();
+      const subcat = await prisma.exam_subcategories.findUnique({ where: { id: subcategory_id }, select: { slug: true } });
       if (subcat) subcategorySlug = subcat.slug;
     }
-    
+
     const parentSlug = subcategorySlug || categorySlug;
     const urlPath = parentSlug ? `/${parentSlug}/${examSlug}` : `/${examSlug}`;
 
     const parsedSyllabus = syllabus ? JSON.parse(syllabus) : [];
     const allowAnytimeFlag = allow_anytime === 'true' || allow_anytime === true;
     const normalizedStatus = allowAnytimeFlag ? 'anytime' : (status || 'upcoming');
-    const normalizedStartDate = allowAnytimeFlag ? null : (start_date || null);
-    const normalizedEndDate = allowAnytimeFlag ? null : (end_date || null);
+    const normalizedStartDate = allowAnytimeFlag ? null : toDateOrNull(start_date);
+    const normalizedEndDate = allowAnytimeFlag ? null : toDateOrNull(end_date);
 
     // Generate unique exam_uid in BHMK######X format
     const examUid = await generateUniqueExamUid();
 
-    const { data: exam, error } = await supabase
-      .from('exams')
-      .insert({
-        title,
-        duration: parseInt(duration),
-        total_marks: parseInt(total_marks),
-        total_questions: parseInt(total_questions),
-        category: category || categorySlug,
-        category_id: category_id || null,
-        subcategory: subcategory || subcategorySlug,
-        subcategory_id: subcategory_id || null,
-        difficulty: difficulty || null,
-        difficulty_id: difficulty_id || null,
-        status: normalizedStatus,
-        start_date: normalizedStartDate,
-        end_date: normalizedEndDate,
-        pass_percentage: parseFloat(pass_percentage),
-        is_free: is_free === 'true' || is_free === true,
-        negative_marking: negative_marking === 'true' || negative_marking === true,
-        negative_mark_value: parseFloat(negative_mark_value) || 0,
-        is_published: is_published === 'true' || is_published === true,
-        allow_anytime: allowAnytimeFlag,
-        exam_type: exam_type || 'mock_test',
-        show_in_mock_tests: show_in_mock_tests === 'true' || show_in_mock_tests === true,
-        logo_url: logoUrl,
-        thumbnail_url: thumbnailUrl,
-        slug: examSlug,
-        url_path: urlPath,
-        syllabus: parsedSyllabus,
-        is_test_series: is_test_series === 'true' || is_test_series === true,
-        test_series_id: test_series_id || null,
-        test_series_section_id: test_series_section_id || null,
-        test_series_topic_id: test_series_topic_id || null,
-        exam_date: exam_date || null,
-        display_order: display_order ? parseInt(display_order) : 0,
-        paper_section_id: paper_section_id || null,
-        paper_topic_id: paper_topic_id || null,
-        exam_uid: examUid
-      })
-      .select()
-      .single();
-
-    if (error) {
+    let exam;
+    try {
+      exam = await prisma.exams.create({
+        data: {
+          title,
+          duration: parseInt(duration),
+          total_marks: parseInt(total_marks),
+          total_questions: parseInt(total_questions),
+          category: category || categorySlug,
+          category_id: category_id || null,
+          subcategory: subcategory || subcategorySlug,
+          subcategory_id: subcategory_id || null,
+          difficulty: difficulty || null,
+          difficulty_id: difficulty_id || null,
+          status: normalizedStatus,
+          start_date: normalizedStartDate,
+          end_date: normalizedEndDate,
+          pass_percentage: parseFloat(pass_percentage),
+          is_free: is_free === 'true' || is_free === true,
+          negative_marking: negative_marking === 'true' || negative_marking === true,
+          negative_mark_value: parseFloat(negative_mark_value) || 0,
+          is_published: is_published === 'true' || is_published === true,
+          allow_anytime: allowAnytimeFlag,
+          exam_type: exam_type || 'mock_test',
+          show_in_mock_tests: show_in_mock_tests === 'true' || show_in_mock_tests === true,
+          logo_url: logoUrl,
+          thumbnail_url: thumbnailUrl,
+          slug: examSlug,
+          url_path: urlPath,
+          syllabus: parsedSyllabus,
+          is_test_series: is_test_series === 'true' || is_test_series === true,
+          test_series_id: test_series_id || null,
+          test_series_section_id: test_series_section_id || null,
+          test_series_topic_id: test_series_topic_id || null,
+          exam_date: toDateOrNull(exam_date),
+          display_order: display_order ? parseInt(display_order) : 0,
+          paper_section_id: paper_section_id || null,
+          paper_topic_id: paper_topic_id || null,
+          exam_uid: examUid
+        }
+      });
+    } catch (error) {
       logger.error('Create exam error:', error);
       return res.status(500).json({
         success: false,
@@ -698,15 +644,9 @@ const createExam = async (req, res) => {
     }
 
     if (parsedSyllabus?.length) {
-      const syllabusPayload = parsedSyllabus.map(topic => ({
-        exam_id: exam.id,
-        topic
-      }));
-      const { error: syllabusError } = await supabase
-        .from('exam_syllabus')
-        .insert(syllabusPayload);
-
-      if (syllabusError) {
+      try {
+        await prisma.exam_syllabus.createMany({ data: parsedSyllabus.map(topic => ({ exam_id: exam.id, topic })) });
+      } catch (syllabusError) {
         logger.error('Insert syllabus error:', syllabusError);
       }
     }
@@ -732,16 +672,12 @@ const updateExam = async (req, res) => {
   try {
     const { id } = req.params;
     const updateData = { ...req.body };
-    
+
     console.log('Update exam - received data:', updateData);
     console.log('Paper section ID:', updateData.paper_section_id);
     console.log('Paper topic ID:', updateData.paper_topic_id);
 
-    const { data: existingExam } = await supabase
-      .from('exams')
-      .select('logo_url, thumbnail_url')
-      .eq('id', id)
-      .single();
+    const existingExam = await prisma.exams.findUnique({ where: { id }, select: { logo_url: true, thumbnail_url: true } }).catch(() => null);
 
     if (req.files) {
       if (req.files.logo) {
@@ -775,9 +711,22 @@ const updateExam = async (req, res) => {
       updateData.status = 'anytime';
       updateData.start_date = null;
       updateData.end_date = null;
+    } else {
+      if (updateData.start_date !== undefined) updateData.start_date = toDateOrNull(updateData.start_date);
+      if (updateData.end_date !== undefined) updateData.end_date = toDateOrNull(updateData.end_date);
     }
     if (updateData.show_in_mock_tests !== undefined) updateData.show_in_mock_tests = updateData.show_in_mock_tests === 'true' || updateData.show_in_mock_tests === true;
     if (updateData.is_current_affair !== undefined) updateData.is_current_affair = updateData.is_current_affair === 'true' || updateData.is_current_affair === true;
+    // is_premium is a Boolean column that this endpoint receives via multipart
+    // form-data (like every other field here, since req.files is checked above) —
+    // meaning it can arrive as the literal string "true"/"false". supabase-js/PostgREST
+    // let Postgres implicitly cast a text 'true'/'false' to boolean; Prisma's client
+    // validates types before the query is built and rejects a string for a Boolean
+    // field outright. The original createExam/bulkCreateExamWithContent already
+    // explicitly coerce this field — updateExam was missing the same coercion, which
+    // would have made Prisma throw on a legitimate admin update. Added here as a type
+    // adaptation for the stricter client, not a business-logic change.
+    if (updateData.is_premium !== undefined) updateData.is_premium = updateData.is_premium === 'true' || updateData.is_premium === true;
     if (updateData.is_test_series !== undefined) {
       updateData.is_test_series = updateData.is_test_series === 'true' || updateData.is_test_series === true;
       if (!updateData.is_test_series) {
@@ -789,7 +738,7 @@ const updateExam = async (req, res) => {
     if (updateData.test_series_id !== undefined) updateData.test_series_id = updateData.test_series_id || null;
     if (updateData.test_series_section_id !== undefined) updateData.test_series_section_id = updateData.test_series_section_id || null;
     if (updateData.test_series_topic_id !== undefined) updateData.test_series_topic_id = updateData.test_series_topic_id || null;
-    if (updateData.exam_date !== undefined) updateData.exam_date = updateData.exam_date || null;
+    if (updateData.exam_date !== undefined) updateData.exam_date = toDateOrNull(updateData.exam_date);
     if (updateData.display_order !== undefined) updateData.display_order = parseInt(updateData.display_order) || 0;
     if (updateData.paper_section_id !== undefined) updateData.paper_section_id = updateData.paper_section_id || null;
     if (updateData.paper_topic_id !== undefined) updateData.paper_topic_id = updateData.paper_topic_id || null;
@@ -803,14 +752,10 @@ const updateExam = async (req, res) => {
       updateData.syllabus = parsedSyllabus || [];
     }
 
-    const { data: exam, error } = await supabase
-      .from('exams')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) {
+    let exam;
+    try {
+      exam = await prisma.exams.update({ where: { id }, data: updateData });
+    } catch (error) {
       logger.error('Update exam error:', error);
       return res.status(500).json({
         success: false,
@@ -819,24 +764,13 @@ const updateExam = async (req, res) => {
     }
 
     if (parsedSyllabus !== undefined) {
-      const { error: deleteError } = await supabase
-        .from('exam_syllabus')
-        .delete()
-        .eq('exam_id', id);
-
-      if (deleteError) {
-        logger.error('Delete syllabus error:', deleteError);
-      } else if (parsedSyllabus.length) {
-        const syllabusPayload = parsedSyllabus.map(topic => ({
-          exam_id: id,
-          topic
-        }));
-        const { error: insertError } = await supabase
-          .from('exam_syllabus')
-          .insert(syllabusPayload);
-        if (insertError) {
-          logger.error('Insert syllabus error:', insertError);
+      try {
+        await prisma.exam_syllabus.deleteMany({ where: { exam_id: id } });
+        if (parsedSyllabus.length) {
+          await prisma.exam_syllabus.createMany({ data: parsedSyllabus.map(topic => ({ exam_id: id, topic })) });
         }
+      } catch (syllabusSyncError) {
+        logger.error('Sync syllabus error:', syllabusSyncError);
       }
     }
 
@@ -844,17 +778,22 @@ const updateExam = async (req, res) => {
     if (updateData.is_current_affair !== undefined && exam.exam_type === 'short_quiz') {
       if (updateData.is_current_affair) {
         // Upsert into current_affairs_quizzes (unique constraint on exam_id handles duplicates)
-        const { error: caError } = await supabase
-          .from('current_affairs_quizzes')
-          .upsert({ exam_id: id, is_published: true }, { onConflict: 'exam_id' });
-        if (caError) logger.error('Auto-link current affairs quiz error:', caError);
+        try {
+          await prisma.current_affairs_quizzes.upsert({
+            where: { exam_id: id },
+            create: { exam_id: id, is_published: true },
+            update: { is_published: true }
+          });
+        } catch (caError) {
+          logger.error('Auto-link current affairs quiz error:', caError);
+        }
       } else {
         // Remove from current_affairs_quizzes
-        const { error: caError } = await supabase
-          .from('current_affairs_quizzes')
-          .delete()
-          .eq('exam_id', id);
-        if (caError) logger.error('Auto-unlink current affairs quiz error:', caError);
+        try {
+          await prisma.current_affairs_quizzes.deleteMany({ where: { exam_id: id } });
+        } catch (caError) {
+          logger.error('Auto-unlink current affairs quiz error:', caError);
+        }
       }
     }
 
@@ -879,13 +818,9 @@ const deleteExam = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: exam, error: examFetchError } = await supabase
-      .from('exams')
-      .select('id, logo_url, thumbnail_url')
-      .eq('id', id)
-      .single();
+    const exam = await prisma.exams.findUnique({ where: { id }, select: { id: true, logo_url: true, thumbnail_url: true } }).catch(() => null);
 
-    if (examFetchError || !exam) {
+    if (!exam) {
       return res.status(404).json({
         success: false,
         message: 'Exam not found'
@@ -893,20 +828,16 @@ const deleteExam = async (req, res) => {
     }
 
     // Collect related questions and options to clean up images and records
-    const { data: questions } = await supabase
-      .from('questions')
-      .select('id, image_url')
-      .eq('exam_id', id);
+    const questions = await prisma.questions.findMany({ where: { exam_id: id }, select: { id: true, image_url: true } });
 
     const questionIds = questions?.map(q => q.id) || [];
 
     let options = [];
     if (questionIds.length) {
-      const { data: optionRecords } = await supabase
-        .from('question_options')
-        .select('id, question_id, image_url')
-        .in('question_id', questionIds);
-      options = optionRecords || [];
+      options = await prisma.question_options.findMany({
+        where: { question_id: { in: questionIds } },
+        select: { id: true, question_id: true, image_url: true }
+      });
     }
 
     // Delete option images
@@ -939,24 +870,20 @@ const deleteExam = async (req, res) => {
 
     // Delete options and questions from DB
     if (questionIds.length) {
-      const { error: deleteOptionsError } = await supabase
-        .from('question_options')
-        .delete()
-        .in('question_id', questionIds);
-      if (deleteOptionsError) {
-        logger.error('Delete options error:', deleteOptionsError);
+      try {
+        await prisma.question_options.deleteMany({ where: { question_id: { in: questionIds } } });
+      } catch (error) {
+        logger.error('Delete options error:', error);
         return res.status(500).json({
           success: false,
           message: 'Failed to delete related options'
         });
       }
 
-      const { error: deleteQuestionsError } = await supabase
-        .from('questions')
-        .delete()
-        .eq('exam_id', id);
-      if (deleteQuestionsError) {
-        logger.error('Delete questions error:', deleteQuestionsError);
+      try {
+        await prisma.questions.deleteMany({ where: { exam_id: id } });
+      } catch (error) {
+        logger.error('Delete questions error:', error);
         return res.status(500).json({
           success: false,
           message: 'Failed to delete related questions'
@@ -965,8 +892,8 @@ const deleteExam = async (req, res) => {
     }
 
     // Delete sections and syllabus rows
-    await supabase.from('exam_sections').delete().eq('exam_id', id);
-    await supabase.from('exam_syllabus').delete().eq('exam_id', id);
+    await prisma.exam_sections.deleteMany({ where: { exam_id: id } });
+    await prisma.exam_syllabus.deleteMany({ where: { exam_id: id } });
 
     // Delete exam media
     if (exam.logo_url) {
@@ -990,13 +917,10 @@ const deleteExam = async (req, res) => {
       }
     }
 
-    const { error: deleteExamError } = await supabase
-      .from('exams')
-      .delete()
-      .eq('id', id);
-
-    if (deleteExamError) {
-      logger.error('Delete exam error:', deleteExamError);
+    try {
+      await prisma.exams.delete({ where: { id } });
+    } catch (error) {
+      logger.error('Delete exam error:', error);
       return res.status(500).json({
         success: false,
         message: 'Failed to delete exam'
@@ -1035,19 +959,16 @@ const deleteExamYear = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid year' });
     }
 
-    const start = `${year}-01-01`;
-    const end = `${year + 1}-01-01`;
+    const start = new Date(`${year}-01-01`);
+    const end = new Date(`${year + 1}-01-01`);
 
     // Mirror the exact filters getExamYears() uses, so this reflects what the UI shows.
-    const { count, error } = await supabase
-      .from('exams')
-      .select('id', { count: 'exact', head: true })
-      .gte('exam_date', start)
-      .lt('exam_date', end)
-      .eq('is_published', true)
-      .is('deleted_at', null);
-
-    if (error) {
+    let count;
+    try {
+      count = await prisma.exams.count({
+        where: { exam_date: { gte: start, lt: end }, is_published: true, deleted_at: null }
+      });
+    } catch (error) {
       logger.error('deleteExamYear count error:', error);
       return res.status(500).json({ success: false, message: 'Failed to verify exams for the year' });
     }
@@ -1077,20 +998,19 @@ const createSection = async (req, res) => {
   try {
     const { exam_id, name, total_questions, marks_per_question, duration, section_order } = req.body;
 
-    const { data: section, error } = await supabase
-      .from('exam_sections')
-      .insert({
-        exam_id,
-        name,
-        total_questions: parseInt(total_questions),
-        marks_per_question: parseFloat(marks_per_question),
-        duration: duration ? parseInt(duration) : null,
-        section_order: parseInt(section_order)
-      })
-      .select()
-      .single();
-
-    if (error) {
+    let section;
+    try {
+      section = await prisma.exam_sections.create({
+        data: {
+          exam_id,
+          name,
+          total_questions: parseInt(total_questions),
+          marks_per_question: parseFloat(marks_per_question),
+          duration: duration ? parseInt(duration) : null,
+          section_order: parseInt(section_order)
+        }
+      });
+    } catch (error) {
       logger.error('Create section error:', error);
       return res.status(500).json({
         success: false,
@@ -1123,20 +1043,12 @@ const updateSection = async (req, res) => {
     if (updateData.section_order) updateData.section_order = parseInt(updateData.section_order);
 
     // Fetch existing section to detect name change
-    const { data: existingSection } = await supabase
-      .from('exam_sections')
-      .select('name, exam_id')
-      .eq('id', id)
-      .single();
+    const existingSection = await prisma.exam_sections.findUnique({ where: { id }, select: { name: true, exam_id: true } }).catch(() => null);
 
-    const { data: section, error } = await supabase
-      .from('exam_sections')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) {
+    let section;
+    try {
+      section = await prisma.exam_sections.update({ where: { id }, data: updateData });
+    } catch (error) {
       logger.error('Update section error:', error);
       return res.status(500).json({
         success: false,
@@ -1168,12 +1080,9 @@ const deleteSection = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { error } = await supabase
-      .from('exam_sections')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
+    try {
+      await prisma.exam_sections.delete({ where: { id } });
+    } catch (error) {
       logger.error('Delete section error:', error);
       return res.status(500).json({
         success: false,
@@ -1196,7 +1105,7 @@ const deleteSection = async (req, res) => {
 
 const createQuestion = async (req, res) => {
   try {
-    const { exam_id, section_id, type, text, marks, negative_marks, explanation, explanation_image_url, difficulty, question_order, question_number } = req.body;
+    const { exam_id, section_id, passage_id, type, text, marks, negative_marks, explanation, explanation_image_url, difficulty, question_order, question_number } = req.body;
 
     let imageUrl = null;
     if (req.file) {
@@ -1204,26 +1113,26 @@ const createQuestion = async (req, res) => {
       imageUrl = imageResult.url;
     }
 
-    const { data: question, error } = await supabase
-      .from('questions')
-      .insert({
-        exam_id,
-        section_id,
-        type,
-        text,
-        marks: parseFloat(marks),
-        negative_marks: parseFloat(negative_marks) || 0,
-        explanation,
-        explanation_image_url,
-        image_url: imageUrl,
-        difficulty,
-        question_order: question_order ? parseInt(question_order) : null,
-        question_number: question_number ? parseInt(question_number) : null
-      })
-      .select()
-      .single();
-
-    if (error) {
+    let question;
+    try {
+      question = await prisma.questions.create({
+        data: {
+          exam_id,
+          section_id,
+          passage_id: passage_id || null,
+          type,
+          text,
+          marks: parseFloat(marks),
+          negative_marks: parseFloat(negative_marks) || 0,
+          explanation,
+          explanation_image_url,
+          image_url: imageUrl,
+          difficulty,
+          question_order: question_order ? parseInt(question_order) : null,
+          question_number: question_number ? parseInt(question_number) : null
+        }
+      });
+    } catch (error) {
       logger.error('Create question error:', error);
       return res.status(500).json({
         success: false,
@@ -1250,11 +1159,7 @@ const updateQuestion = async (req, res) => {
     const { id } = req.params;
     const updateData = { ...req.body };
 
-    const { data: existingQuestion } = await supabase
-      .from('questions')
-      .select('image_url, text, exam_id')
-      .eq('id', id)
-      .single();
+    const existingQuestion = await prisma.questions.findUnique({ where: { id }, select: { image_url: true, text: true, exam_id: true } }).catch(() => null);
 
     if (req.file) {
       if (existingQuestion?.image_url) {
@@ -1269,15 +1174,12 @@ const updateQuestion = async (req, res) => {
     if (updateData.negative_marks) updateData.negative_marks = parseFloat(updateData.negative_marks);
     if (updateData.question_order) updateData.question_order = parseInt(updateData.question_order);
     if (updateData.question_number) updateData.question_number = parseInt(updateData.question_number);
+    if ('passage_id' in updateData) updateData.passage_id = updateData.passage_id || null;
 
-    const { data: question, error } = await supabase
-      .from('questions')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) {
+    let question;
+    try {
+      question = await prisma.questions.update({ where: { id }, data: updateData });
+    } catch (error) {
       logger.error('Update question error:', error);
       return res.status(500).json({
         success: false,
@@ -1309,23 +1211,16 @@ const deleteQuestion = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: question } = await supabase
-      .from('questions')
-      .select('image_url')
-      .eq('id', id)
-      .single();
+    const question = await prisma.questions.findUnique({ where: { id }, select: { image_url: true } }).catch(() => null);
 
     if (question?.image_url) {
       const imageKey = extractKeyFromUrl(question.image_url);
       if (imageKey) await deleteFile(imageKey);
     }
 
-    const { error } = await supabase
-      .from('questions')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
+    try {
+      await prisma.questions.delete({ where: { id } });
+    } catch (error) {
       logger.error('Delete question error:', error);
       return res.status(500).json({
         success: false,
@@ -1356,19 +1251,18 @@ const createOption = async (req, res) => {
       imageUrl = imageResult.url;
     }
 
-    const { data: option, error } = await supabase
-      .from('question_options')
-      .insert({
-        question_id,
-        option_text,
-        is_correct: is_correct === 'true' || is_correct === true,
-        option_order: parseInt(option_order),
-        image_url: imageUrl
-      })
-      .select()
-      .single();
-
-    if (error) {
+    let option;
+    try {
+      option = await prisma.question_options.create({
+        data: {
+          question_id,
+          option_text,
+          is_correct: is_correct === 'true' || is_correct === true,
+          option_order: parseInt(option_order),
+          image_url: imageUrl
+        }
+      });
+    } catch (error) {
       logger.error('Create option error:', error);
       return res.status(500).json({
         success: false,
@@ -1395,11 +1289,10 @@ const updateOption = async (req, res) => {
     const { id } = req.params;
     const updateData = { ...req.body };
 
-    const { data: existingOption } = await supabase
-      .from('question_options')
-      .select('image_url, option_text, question_id, questions!inner(exam_id)')
-      .eq('id', id)
-      .single();
+    const existingOption = await prisma.question_options.findUnique({
+      where: { id },
+      select: { image_url: true, option_text: true, question_id: true, questions: { select: { exam_id: true } } }
+    }).catch(() => null);
 
     if (req.file) {
       if (existingOption?.image_url) {
@@ -1418,14 +1311,10 @@ const updateOption = async (req, res) => {
       updateData.option_order = parseInt(updateData.option_order);
     }
 
-    const { data: option, error } = await supabase
-      .from('question_options')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) {
+    let option;
+    try {
+      option = await prisma.question_options.update({ where: { id }, data: updateData });
+    } catch (error) {
       logger.error('Update option error:', error);
       return res.status(500).json({
         success: false,
@@ -1459,23 +1348,28 @@ const getAllUsers = async (req, res) => {
     const { page = 1, limit = 20, search = '', role = '' } = req.query;
     const offset = (page - 1) * limit;
 
-    let query = supabase
-      .from('users')
-      .select('id, email, name, phone, avatar_url, role, is_verified, is_blocked, block_reason, created_at', { count: 'exact' })
-      .order('created_at', { ascending: false })
-      .range(offset, offset + parseInt(limit) - 1);
-
+    const where = {};
     if (search) {
-      query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { email: { contains: search, mode: 'insensitive' } }
+      ];
     }
+    if (role) where.role = role;
 
-    if (role) {
-      query = query.eq('role', role);
-    }
-
-    const { data: users, error, count } = await query;
-
-    if (error) {
+    let users, count;
+    try {
+      [users, count] = await Promise.all([
+        prisma.users.findMany({
+          where,
+          select: { id: true, email: true, name: true, phone: true, avatar_url: true, role: true, is_verified: true, is_blocked: true, block_reason: true, created_at: true },
+          orderBy: { created_at: 'desc' },
+          skip: offset,
+          take: parseInt(limit)
+        }),
+        prisma.users.count({ where })
+      ]);
+    } catch (error) {
       logger.error('Get users error:', error);
       return res.status(500).json({
         success: false,
@@ -1516,26 +1410,18 @@ const updateUserRole = async (req, res) => {
       });
     }
 
-    const { data: currentUser, error: fetchError } = await supabase
-      .from('users')
-      .select('id, email, name, role')
-      .eq('id', id)
-      .single();
+    const currentUser = await prisma.users.findUnique({ where: { id }, select: { id: true, email: true, name: true, role: true } }).catch(() => null);
 
-    if (fetchError || !currentUser) {
+    if (!currentUser) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
     const oldRole = currentUser.role;
 
-    const { data: user, error } = await supabase
-      .from('users')
-      .update({ role })
-      .eq('id', id)
-      .select('id, email, name, role')
-      .single();
-
-    if (error) {
+    let user;
+    try {
+      user = await prisma.users.update({ where: { id }, data: { role }, select: { id: true, email: true, name: true, role: true } });
+    } catch (error) {
       logger.error('Update user role error:', error);
       return res.status(500).json({
         success: false,
@@ -1546,28 +1432,19 @@ const updateUserRole = async (req, res) => {
     try {
       const elevatedRoles = ['admin', 'editor', 'author'];
       if (elevatedRoles.includes(role)) {
-        const { data: adminRole, error: adminRoleError } = await supabase
-          .from('admin_roles')
-          .select('id')
-          .eq('name', role)
-          .single();
+        const adminRole = await prisma.admin_roles.findUnique({ where: { name: role }, select: { id: true } });
 
-        if (adminRoleError || !adminRole) {
+        if (!adminRole) {
           throw new Error(`${role} role not found`);
         }
 
-        await supabase
-          .from('admin_users')
-          .upsert({
-            user_id: id,
-            role_id: adminRole.id,
-            is_active: true
-          }, { onConflict: 'user_id' });
+        await prisma.admin_users.upsert({
+          where: { user_id: id },
+          create: { user_id: id, role_id: adminRole.id, is_active: true },
+          update: { role_id: adminRole.id, is_active: true }
+        });
       } else {
-        await supabase
-          .from('admin_users')
-          .delete()
-          .eq('user_id', id);
+        await prisma.admin_users.deleteMany({ where: { user_id: id } });
       }
     } catch (adminSyncError) {
       logger.error('Sync admin_users error:', adminSyncError);
@@ -1606,13 +1483,9 @@ const updateUser = async (req, res) => {
     const { id } = req.params;
     const { name, phone, bio, is_verified, is_blocked, block_reason } = req.body;
 
-    const { data: existing, error: fetchErr } = await supabase
-      .from('users')
-      .select('id, email, name')
-      .eq('id', id)
-      .single();
+    const existing = await prisma.users.findUnique({ where: { id }, select: { id: true, email: true, name: true } }).catch(() => null);
 
-    if (fetchErr || !existing) {
+    if (!existing) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
@@ -1626,14 +1499,18 @@ const updateUser = async (req, res) => {
       updateData.block_reason = is_blocked ? (block_reason || null) : null;
     }
 
-    const { data: user, error } = await supabase
-      .from('users')
-      .update(updateData)
-      .eq('id', id)
-      .select('id, email, name, phone, bio, role, is_verified, is_blocked, block_reason, avatar_url, auth_provider, is_onboarded, is_premium, subscription_plan_id, subscription_expires_at, subscription_auto_renew, created_at')
-      .single();
-
-    if (error) {
+    let user;
+    try {
+      user = await prisma.users.update({
+        where: { id },
+        data: updateData,
+        select: {
+          id: true, email: true, name: true, phone: true, bio: true, role: true, is_verified: true, is_blocked: true,
+          block_reason: true, avatar_url: true, auth_provider: true, is_onboarded: true, is_premium: true,
+          subscription_plan_id: true, subscription_expires_at: true, subscription_auto_renew: true, created_at: true
+        }
+      });
+    } catch (error) {
       logger.error('Admin updateUser error:', error);
       return res.status(500).json({ success: false, message: 'Failed to update user' });
     }
@@ -1650,39 +1527,31 @@ const adminUpdateUserSubscription = async (req, res) => {
     const { id } = req.params;
     const { plan_id, expires_at, is_premium, auto_renew, send_notification } = req.body;
 
-    const { data: user, error: userErr } = await supabase
-      .from('users')
-      .select('id, email, name')
-      .eq('id', id)
-      .single();
+    const user = await prisma.users.findUnique({ where: { id }, select: { id: true, email: true, name: true } }).catch(() => null);
 
-    if (userErr || !user) {
+    if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
 
     const updateData = {};
     if (plan_id !== undefined) updateData.subscription_plan_id = plan_id || null;
-    if (expires_at !== undefined) updateData.subscription_expires_at = expires_at || null;
+    if (expires_at !== undefined) updateData.subscription_expires_at = expires_at ? new Date(expires_at) : null;
     if (is_premium !== undefined) updateData.is_premium = Boolean(is_premium);
     if (auto_renew !== undefined) updateData.subscription_auto_renew = Boolean(auto_renew);
 
-    const { error: updateErr } = await supabase
-      .from('users')
-      .update(updateData)
-      .eq('id', id);
-
-    if (updateErr) {
-      logger.error('Admin update subscription error:', updateErr);
+    try {
+      await prisma.users.update({ where: { id }, data: updateData });
+    } catch (error) {
+      logger.error('Admin update subscription error:', error);
       return res.status(500).json({ success: false, message: 'Failed to update subscription' });
     }
 
     if (send_notification && plan_id) {
       try {
-        const { data: plan } = await supabase
-          .from('subscription_plans')
-          .select('id, name, duration_days, normal_price_cents, currency_code')
-          .eq('id', plan_id)
-          .single();
+        const plan = await prisma.subscription_plans.findUnique({
+          where: { id: plan_id },
+          select: { id: true, name: true, duration_days: true, normal_price_cents: true, currency_code: true }
+        });
 
         if (plan) {
           await sendSubscriptionActivatedEmail(user.email, user.name, {
@@ -1709,12 +1578,9 @@ const adminRestoreUser = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { error } = await supabase
-      .from('users')
-      .update({ deleted_at: null })
-      .eq('id', id);
-
-    if (error) {
+    try {
+      await prisma.users.update({ where: { id }, data: { deleted_at: null } });
+    } catch (error) {
       logger.error('Admin restore user error:', error);
       return res.status(500).json({ success: false, message: 'Failed to restore user' });
     }
@@ -1730,12 +1596,9 @@ const adminDeleteUser = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { error } = await supabase
-      .from('users')
-      .update({ deleted_at: new Date().toISOString() })
-      .eq('id', id);
-
-    if (error) {
+    try {
+      await prisma.users.update({ where: { id }, data: { deleted_at: new Date() } });
+    } catch (error) {
       logger.error('Admin delete user error:', error);
       return res.status(500).json({ success: false, message: 'Failed to delete user' });
     }
@@ -1752,11 +1615,7 @@ const toggleUserBlock = async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body || {};
 
-    const { data: currentUser } = await supabase
-      .from('users')
-      .select('is_blocked')
-      .eq('id', id)
-      .single();
+    const currentUser = await prisma.users.findUnique({ where: { id }, select: { is_blocked: true } }).catch(() => null);
 
     if (!currentUser) {
       return res.status(404).json({
@@ -1774,17 +1633,17 @@ const toggleUserBlock = async (req, res) => {
       });
     }
 
-    const { data: user, error } = await supabase
-      .from('users')
-      .update({ 
-        is_blocked: nextStatus,
-        block_reason: nextStatus ? reason.trim() : null
-      })
-      .eq('id', id)
-      .select('id, email, name, is_blocked, block_reason')
-      .single();
-
-    if (error) {
+    let user;
+    try {
+      user = await prisma.users.update({
+        where: { id },
+        data: {
+          is_blocked: nextStatus,
+          block_reason: nextStatus ? reason.trim() : null
+        },
+        select: { id: true, email: true, name: true, is_blocked: true, block_reason: true }
+      });
+    } catch (error) {
       logger.error('Toggle user block error:', error);
       return res.status(500).json({
         success: false,
@@ -1859,7 +1718,7 @@ const bulkCreateExamWithContent = async (req, res) => {
         message: 'Invalid exam payload. Ensure exam data is valid JSON.'
       });
     }
-    
+
     console.log('Bulk create - received exam data:', exam);
     console.log('Paper section ID:', exam.paper_section_id);
     console.log('Paper topic ID:', exam.paper_topic_id);
@@ -1890,81 +1749,81 @@ const bulkCreateExamWithContent = async (req, res) => {
     const [logoResult, thumbnailResult, examSlug, catResult, subcatResult] = await Promise.all([
       req.files?.logo ? uploadExamLogo(req.files.logo[0]) : Promise.resolve(null),
       req.files?.thumbnail ? uploadExamThumbnail(req.files.thumbnail[0]) : Promise.resolve(null),
-      ensureUniqueSlug(supabase, 'exams', slugify(exam.slug || exam.title)),
+      ensureUniqueSlug(prisma.exams, slugify(exam.slug || exam.title)),
       exam.category_id
-        ? supabase.from('exam_categories').select('slug').eq('id', exam.category_id).single()
-        : Promise.resolve({ data: null }),
+        ? prisma.exam_categories.findUnique({ where: { id: exam.category_id }, select: { slug: true } })
+        : Promise.resolve(null),
       exam.subcategory_id
-        ? supabase.from('exam_subcategories').select('slug').eq('id', exam.subcategory_id).single()
-        : Promise.resolve({ data: null })
+        ? prisma.exam_subcategories.findUnique({ where: { id: exam.subcategory_id }, select: { slug: true } })
+        : Promise.resolve(null)
     ]);
 
     const logoUrl = logoResult?.url || null;
     const thumbnailUrl = thumbnailResult?.url || null;
-    const categorySlug = catResult.data?.slug || exam.category || '';
-    const subcategorySlug = subcatResult.data?.slug || exam.subcategory || '';
+    const categorySlug = catResult?.slug || exam.category || '';
+    const subcategorySlug = subcatResult?.slug || exam.subcategory || '';
     const parentSlug = subcategorySlug || categorySlug;
     const urlPath = parentSlug ? `/${parentSlug}/${examSlug}` : `/${examSlug}`;
 
     const parsedSyllabus = exam.syllabus || [];
-    const supportsHindi = sections.some(s => 
+    const supportsHindi = sections.some(s =>
       s.name_hi || s.questions?.some(q => q.text_hi || q.explanation_hi || q.options?.some(o => o.option_text_hi))
     ) || false;
 
     const allowAnytimeFlag = exam.allow_anytime === 'true' || exam.allow_anytime === true;
     const normalizedStatus = allowAnytimeFlag ? 'anytime' : (exam.status || 'upcoming');
-    const normalizedStartDate = allowAnytimeFlag ? null : (exam.start_date || null);
-    const normalizedEndDate = allowAnytimeFlag ? null : (exam.end_date || null);
+    const normalizedStartDate = allowAnytimeFlag ? null : toDateOrNull(exam.start_date);
+    const normalizedEndDate = allowAnytimeFlag ? null : toDateOrNull(exam.end_date);
 
     // Generate unique exam_uid in BHMK######X format
     const bulkExamUid = await generateUniqueExamUid();
 
-    const { data: createdExam, error: examError } = await supabase
-      .from('exams')
-      .insert({
-        title: exam.title,
-        duration: parseInt(exam.duration),
-        total_marks: parseInt(exam.total_marks),
-        total_questions: parseInt(exam.total_questions),
-        category: exam.category || categorySlug,
-        category_id: exam.category_id || null,
-        subcategory: exam.subcategory || subcategorySlug,
-        subcategory_id: exam.subcategory_id || null,
-        difficulty: exam.difficulty || null,
-        difficulty_id: exam.difficulty_id || null,
-        status: normalizedStatus,
-        start_date: normalizedStartDate,
-        end_date: normalizedEndDate,
-        pass_percentage: parseFloat(exam.pass_percentage),
-        is_free: exam.is_free === 'true' || exam.is_free === true,
-        negative_marking: exam.negative_marking === 'true' || exam.negative_marking === true,
-        negative_mark_value: parseFloat(exam.negative_mark_value) || 0,
-        is_published: exam.is_published === 'true' || exam.is_published === true,
-        allow_anytime: allowAnytimeFlag,
-        exam_type: exam.exam_type || 'mock_test',
-        show_in_mock_tests: exam.show_in_mock_tests === 'true' || exam.show_in_mock_tests === true,
-        is_premium: exam.is_premium === 'true' || exam.is_premium === true,
-        supports_hindi: supportsHindi,
-        logo_url: logoUrl,
-        thumbnail_url: thumbnailUrl,
-        slug: examSlug,
-        url_path: urlPath,
-        syllabus: parsedSyllabus,
-        is_test_series: exam.is_test_series === 'true' || exam.is_test_series === true,
-        test_series_id: exam.test_series_id || null,
-        test_series_section_id: exam.test_series_section_id || null,
-        test_series_topic_id: exam.test_series_topic_id || null,
-        exam_date: exam.exam_date || null,
-        display_order: exam.display_order ? parseInt(exam.display_order) || 0 : 0,
-        paper_section_id: exam.paper_section_id || null,
-        paper_topic_id: exam.paper_topic_id || null,
-        is_current_affair: exam.exam_type === 'short_quiz' ? (exam.is_current_affair === 'true' || exam.is_current_affair === true) : false,
-        exam_uid: bulkExamUid
-      })
-      .select()
-      .single();
-
-    if (examError) {
+    let createdExam;
+    try {
+      createdExam = await prisma.exams.create({
+        data: {
+          title: exam.title,
+          duration: parseInt(exam.duration),
+          total_marks: parseInt(exam.total_marks),
+          total_questions: parseInt(exam.total_questions),
+          instructions: exam.instructions?.trim() ? exam.instructions : null,
+          category: exam.category || categorySlug,
+          category_id: exam.category_id || null,
+          subcategory: exam.subcategory || subcategorySlug,
+          subcategory_id: exam.subcategory_id || null,
+          difficulty: exam.difficulty || null,
+          difficulty_id: exam.difficulty_id || null,
+          status: normalizedStatus,
+          start_date: normalizedStartDate,
+          end_date: normalizedEndDate,
+          pass_percentage: parseFloat(exam.pass_percentage),
+          is_free: exam.is_free === 'true' || exam.is_free === true,
+          negative_marking: exam.negative_marking === 'true' || exam.negative_marking === true,
+          negative_mark_value: parseFloat(exam.negative_mark_value) || 0,
+          is_published: exam.is_published === 'true' || exam.is_published === true,
+          allow_anytime: allowAnytimeFlag,
+          exam_type: exam.exam_type || 'mock_test',
+          show_in_mock_tests: exam.show_in_mock_tests === 'true' || exam.show_in_mock_tests === true,
+          is_premium: exam.is_premium === 'true' || exam.is_premium === true,
+          supports_hindi: supportsHindi,
+          logo_url: logoUrl,
+          thumbnail_url: thumbnailUrl,
+          slug: examSlug,
+          url_path: urlPath,
+          syllabus: parsedSyllabus,
+          is_test_series: exam.is_test_series === 'true' || exam.is_test_series === true,
+          test_series_id: exam.test_series_id || null,
+          test_series_section_id: exam.test_series_section_id || null,
+          test_series_topic_id: exam.test_series_topic_id || null,
+          exam_date: toDateOrNull(exam.exam_date),
+          display_order: exam.display_order ? parseInt(exam.display_order) || 0 : 0,
+          paper_section_id: exam.paper_section_id || null,
+          paper_topic_id: exam.paper_topic_id || null,
+          is_current_affair: exam.exam_type === 'short_quiz' ? (exam.is_current_affair === 'true' || exam.is_current_affair === true) : false,
+          exam_uid: bulkExamUid
+        }
+      });
+    } catch (examError) {
       logger.error('Bulk create exam error:', examError);
       return res.status(500).json({
         success: false,
@@ -1974,7 +1833,7 @@ const bulkCreateExamWithContent = async (req, res) => {
 
     // Insert syllabus in background (don't block response for it)
     const syllabusPromise = parsedSyllabus?.length
-      ? supabase.from('exam_syllabus').insert(parsedSyllabus.map(topic => ({ exam_id: createdExam.id, topic })))
+      ? prisma.exam_syllabus.createMany({ data: parsedSyllabus.map(topic => ({ exam_id: createdExam.id, topic })) })
       : Promise.resolve();
 
     // Batch insert all sections at once
@@ -1990,18 +1849,13 @@ const bulkCreateExamWithContent = async (req, res) => {
         section_order: section.section_order ?? (idx + 1)
       }));
 
-      const { data: batchSections, error: sectionError } = await supabase
-        .from('exam_sections')
-        .insert(sectionInserts)
-        .select();
-
-      if (sectionError) {
+      try {
+        createdSections = await prisma.exam_sections.createManyAndReturn({ data: sectionInserts });
+      } catch (sectionError) {
         logger.error('Bulk create sections error:', sectionError);
-      } else {
-        createdSections = batchSections || [];
       }
 
-      // Chunked insert: questions then options (prevents Supabase row truncation)
+      // Chunked insert: questions then options (prevents row-count-per-request truncation)
       if (createdSections.length > 0) {
         const allQuestionInserts = [];
         const questionSectionMap = [];
@@ -2021,6 +1875,7 @@ const bulkCreateExamWithContent = async (req, res) => {
             allQuestionInserts.push({
               exam_id: createdExam.id,
               section_id: createdSection.id,
+              passage_id: question.passage_id || null,
               type: question.type,
               text: question.text,
               text_hi: question.text_hi || null,
@@ -2039,7 +1894,7 @@ const bulkCreateExamWithContent = async (req, res) => {
 
         logger.info(`Bulk create: inserting ${allQuestionInserts.length} questions in chunks of ${QUESTION_BATCH_SIZE}`);
 
-        const createdQuestions = await batchInsert('questions', allQuestionInserts, 'id', QUESTION_BATCH_SIZE);
+        const createdQuestions = await batchInsert(prisma.questions, allQuestionInserts, { id: true }, QUESTION_BATCH_SIZE);
 
         logger.info(`Bulk create: ${createdQuestions.length}/${allQuestionInserts.length} questions inserted`);
 
@@ -2071,7 +1926,7 @@ const bulkCreateExamWithContent = async (req, res) => {
 
           logger.info(`Bulk create: inserting ${allOptionInserts.length} options in chunks of ${OPTION_BATCH_SIZE}`);
 
-          const createdOptions = await batchInsert('question_options', allOptionInserts, 'id', OPTION_BATCH_SIZE);
+          const createdOptions = await batchInsert(prisma.question_options, allOptionInserts, { id: true }, OPTION_BATCH_SIZE);
 
           // Build question and option ID mappings
           for (let qi = 0; qi < createdQuestions.length; qi++) {
@@ -2097,7 +1952,7 @@ const bulkCreateExamWithContent = async (req, res) => {
             questionIdMap.push(questionMapping);
           }
         }
-        
+
         // Store questionIdMap at exam level for easy access
         if (questionIdMap.length > 0) {
           createdExam.questionIdMap = questionIdMap;
@@ -2108,10 +1963,7 @@ const bulkCreateExamWithContent = async (req, res) => {
     await syllabusPromise;
 
     // Verify actual inserted counts from DB
-    const { count: dbQuestionCount } = await supabase
-      .from('questions')
-      .select('id', { count: 'exact', head: true })
-      .eq('exam_id', createdExam.id);
+    const dbQuestionCount = await prisma.questions.count({ where: { exam_id: createdExam.id } });
 
     const expectedQuestions = sections.reduce((sum, s) => sum + (s.questions?.length || 0), 0);
 
@@ -2146,13 +1998,9 @@ const updateExamWithContent = async (req, res) => {
     const { id } = req.params;
     const { exam: rawExam, sections: rawSections } = req.body;
 
-    const { data: existingExam, error: existingError } = await supabase
-      .from('exams')
-      .select('id, logo_url, thumbnail_url')
-      .eq('id', id)
-      .single();
+    const existingExam = await prisma.exams.findUnique({ where: { id }, select: { id: true, logo_url: true, thumbnail_url: true } }).catch(() => null);
 
-    if (existingError || !existingExam) {
+    if (!existingExam) {
       return res.status(404).json({
         success: false,
         message: 'Exam not found'
@@ -2221,19 +2069,19 @@ const updateExamWithContent = async (req, res) => {
 
     const [logoResult, thumbnailResult, examSlug, catResult, subcatResult] = await Promise.all([
       ...uploadPromises,
-      ensureUniqueSlug(supabase, 'exams', baseSlug, { excludeId: id }),
+      ensureUniqueSlug(prisma.exams, baseSlug, { excludeId: id }),
       examPayload.category_id
-        ? supabase.from('exam_categories').select('slug').eq('id', examPayload.category_id).single()
-        : Promise.resolve({ data: null }),
+        ? prisma.exam_categories.findUnique({ where: { id: examPayload.category_id }, select: { slug: true } })
+        : Promise.resolve(null),
       examPayload.subcategory_id
-        ? supabase.from('exam_subcategories').select('slug').eq('id', examPayload.subcategory_id).single()
-        : Promise.resolve({ data: null })
+        ? prisma.exam_subcategories.findUnique({ where: { id: examPayload.subcategory_id }, select: { slug: true } })
+        : Promise.resolve(null)
     ]);
 
     const logoUrl = logoResult?.url || existingExam.logo_url || null;
     const thumbnailUrl = thumbnailResult?.url || existingExam.thumbnail_url || null;
-    const categorySlug = catResult.data?.slug || examPayload.category || '';
-    const subcategorySlug = subcatResult.data?.slug || examPayload.subcategory || '';
+    const categorySlug = catResult?.slug || examPayload.category || '';
+    const subcategorySlug = subcatResult?.slug || examPayload.subcategory || '';
     const parentSlug = subcategorySlug || categorySlug;
     const urlPath = parentSlug ? `/${parentSlug}/${examSlug}` : `/${examSlug}`;
 
@@ -2251,8 +2099,8 @@ const updateExamWithContent = async (req, res) => {
     const allowAnytimeFlag = bool(examPayload.allow_anytime);
     const isTestSeriesFlag = bool(examPayload.is_test_series);
     const normalizedStatus = allowAnytimeFlag ? 'anytime' : (examPayload.status || 'upcoming');
-    const normalizedStartDate = allowAnytimeFlag ? null : (examPayload.start_date || null);
-    const normalizedEndDate = allowAnytimeFlag ? null : (examPayload.end_date || null);
+    const normalizedStartDate = allowAnytimeFlag ? null : toDateOrNull(examPayload.start_date);
+    const normalizedEndDate = allowAnytimeFlag ? null : toDateOrNull(examPayload.end_date);
     const supportsHindi = sectionsPayload.some(section =>
       section.name_hi || section.questions?.some(q => q.text_hi || q.explanation_hi || q.options?.some(o => o.option_text_hi))
     );
@@ -2266,6 +2114,9 @@ const updateExamWithContent = async (req, res) => {
       duration: numberOrNull(examPayload.duration, 0),
       total_marks: numberOrNull(examPayload.total_marks, 0),
       total_questions: numberOrNull(examPayload.total_questions, 0),
+      // Empty string is normalised to null so "cleared" means "fall back to the
+      // default instructions" rather than rendering a blank instructions block.
+      instructions: examPayload.instructions?.trim() ? examPayload.instructions : null,
       category: examPayload.category || categorySlug,
       category_id: examPayload.category_id || null,
       subcategory: examPayload.subcategory || subcategorySlug,
@@ -2294,26 +2145,31 @@ const updateExamWithContent = async (req, res) => {
       test_series_id: normalizedTestSeriesId,
       test_series_section_id: normalizedTestSeriesSectionId,
       test_series_topic_id: normalizedTestSeriesTopicId,
-      exam_date: examPayload.exam_date || null,
+      exam_date: toDateOrNull(examPayload.exam_date),
       display_order: numberOrNull(examPayload.display_order, 0),
       paper_section_id: examPayload.paper_section_id || null,
       paper_topic_id: examPayload.paper_topic_id || null,
       is_current_affair: examPayload.exam_type === 'short_quiz' ? bool(examPayload.is_current_affair) : false
     };
-    
+
     console.log('Update exam with content - paper_section_id:', examPayload.paper_section_id);
     console.log('Update exam with content - paper_topic_id:', examPayload.paper_topic_id);
 
-    // Parallelize: update exam + delete old content (syllabus, questions, options, sections)
-    const [examUpdateResult, , existingQuestionsResult] = await Promise.all([
-      supabase.from('exams').update(updatePayload).eq('id', id).select().single(),
-      supabase.from('exam_syllabus').delete().eq('exam_id', id),
-      supabase.from('questions').select('id').eq('exam_id', id)
-    ]);
-
-    const { data: updatedExam, error: updateError } = examUpdateResult;
-
-    if (updateError) {
+    // NOTE: these writes must stay sequential. Each Prisma call runs as its own implicit
+    // transaction on a separate pool connection, so running them concurrently deadlocked
+    // (40P01): exam_syllabus.deleteMany takes a FK KEY SHARE lock on the parent exams row
+    // while exams.update wants that same row exclusively. Locking the exams row first gives
+    // every transaction the same lock order, so concurrent PUTs queue instead of cycling.
+    // The questions read takes no conflicting locks and can stay parallel with the update.
+    let updatedExam;
+    let existingQuestions;
+    try {
+      [updatedExam, existingQuestions] = await Promise.all([
+        prisma.exams.update({ where: { id }, data: updatePayload }),
+        prisma.questions.findMany({ where: { exam_id: id }, select: { id: true } })
+      ]);
+      await prisma.exam_syllabus.deleteMany({ where: { exam_id: id } });
+    } catch (updateError) {
       logger.error('Update exam with content error:', updateError);
       return res.status(500).json({
         success: false,
@@ -2321,30 +2177,29 @@ const updateExamWithContent = async (req, res) => {
       });
     }
 
-    // Parallelize: insert new syllabus + delete old options/questions/sections
-    const existingQuestions = existingQuestionsResult.data;
+    // Parallelize: insert new syllabus + delete old options
     const deleteContentPromises = [];
 
     if (existingQuestions?.length) {
       const questionIds = existingQuestions.map(q => q.id);
       deleteContentPromises.push(
-        supabase.from('question_options').delete().in('question_id', questionIds)
+        prisma.question_options.deleteMany({ where: { question_id: { in: questionIds } } })
       );
     }
 
     if (parsedSyllabus.length) {
       deleteContentPromises.push(
-        supabase.from('exam_syllabus').insert(parsedSyllabus.map(topic => ({ exam_id: id, topic })))
+        prisma.exam_syllabus.createMany({ data: parsedSyllabus.map(topic => ({ exam_id: id, topic })) })
       );
     }
 
     await Promise.all(deleteContentPromises);
 
-    // Now delete questions and sections (must be after options are deleted)
-    await Promise.all([
-      supabase.from('questions').delete().eq('exam_id', id),
-      supabase.from('exam_sections').delete().eq('exam_id', id)
-    ]);
+    // Now delete questions and sections (must be after options are deleted).
+    // Sequential for the same reason as above: deleting a question takes a FK lock on its
+    // parent exam_sections row, which exam_sections.deleteMany wants exclusively.
+    await prisma.questions.deleteMany({ where: { exam_id: id } });
+    await prisma.exam_sections.deleteMany({ where: { exam_id: id } });
 
     // Batch insert all sections at once
     let createdSections = [];
@@ -2360,18 +2215,13 @@ const updateExamWithContent = async (req, res) => {
         section_order: numberOrNull(section.section_order, idx + 1)
       }));
 
-      const { data: batchSections, error: sectionError } = await supabase
-        .from('exam_sections')
-        .insert(sectionInserts)
-        .select();
-
-      if (sectionError) {
+      try {
+        createdSections = await prisma.exam_sections.createManyAndReturn({ data: sectionInserts });
+      } catch (sectionError) {
         logger.error('Update exam sections batch insert error:', sectionError);
-      } else {
-        createdSections = batchSections || [];
       }
 
-      // Chunked insert: questions then options (prevents Supabase row truncation)
+      // Chunked insert: questions then options (prevents row-count-per-request truncation)
       if (createdSections.length > 0) {
         const allQuestionInserts = [];
         const questionSectionMap = [];
@@ -2391,6 +2241,7 @@ const updateExamWithContent = async (req, res) => {
             allQuestionInserts.push({
               exam_id: id,
               section_id: createdSection.id,
+              passage_id: question.passage_id || null,
               type: question.type,
               text: question.text,
               text_hi: question.text_hi || null,
@@ -2409,7 +2260,7 @@ const updateExamWithContent = async (req, res) => {
 
         logger.info(`Update exam: inserting ${allQuestionInserts.length} questions in chunks of ${QUESTION_BATCH_SIZE}`);
 
-        const createdQuestions = await batchInsert('questions', allQuestionInserts, 'id', QUESTION_BATCH_SIZE);
+        const createdQuestions = await batchInsert(prisma.questions, allQuestionInserts, { id: true }, QUESTION_BATCH_SIZE);
 
         logger.info(`Update exam: ${createdQuestions.length}/${allQuestionInserts.length} questions inserted`);
 
@@ -2442,7 +2293,7 @@ const updateExamWithContent = async (req, res) => {
 
           logger.info(`Update exam: inserting ${allOptionInserts.length} options in chunks of ${OPTION_BATCH_SIZE}`);
 
-          const createdOptions = await batchInsert('question_options', allOptionInserts, 'id', OPTION_BATCH_SIZE);
+          const createdOptions = await batchInsert(prisma.question_options, allOptionInserts, { id: true }, OPTION_BATCH_SIZE);
 
           // Build question and option ID mappings
           for (let qi = 0; qi < createdQuestions.length; qi++) {
@@ -2469,7 +2320,7 @@ const updateExamWithContent = async (req, res) => {
             questionIdMap.push(questionMapping);
           }
         }
-        
+
         // Store questionIdMap at exam level for easy access
         if (questionIdMap.length > 0) {
           updatedExam.questionIdMap = questionIdMap;
@@ -2478,10 +2329,7 @@ const updateExamWithContent = async (req, res) => {
     }
 
     // Verify actual inserted counts from DB
-    const { count: dbQuestionCount } = await supabase
-      .from('questions')
-      .select('id', { count: 'exact', head: true })
-      .eq('exam_id', id);
+    const dbQuestionCount = await prisma.questions.count({ where: { exam_id: id } });
 
     const expectedQuestions = sectionsPayload.reduce((sum, s) => sum + (s.questions?.length || 0), 0);
 
@@ -2494,16 +2342,21 @@ const updateExamWithContent = async (req, res) => {
     // Auto-sync current_affairs_quizzes when is_current_affair changes on a short_quiz
     if (updatePayload.exam_type === 'short_quiz') {
       if (updatePayload.is_current_affair) {
-        const { error: caError } = await supabase
-          .from('current_affairs_quizzes')
-          .upsert({ exam_id: id, is_published: true }, { onConflict: 'exam_id' });
-        if (caError) logger.error('Auto-link current affairs quiz error (updateExamWithContent):', caError);
+        try {
+          await prisma.current_affairs_quizzes.upsert({
+            where: { exam_id: id },
+            create: { exam_id: id, is_published: true },
+            update: { is_published: true }
+          });
+        } catch (caError) {
+          logger.error('Auto-link current affairs quiz error (updateExamWithContent):', caError);
+        }
       } else {
-        const { error: caError } = await supabase
-          .from('current_affairs_quizzes')
-          .delete()
-          .eq('exam_id', id);
-        if (caError) logger.error('Auto-unlink current affairs quiz error (updateExamWithContent):', caError);
+        try {
+          await prisma.current_affairs_quizzes.deleteMany({ where: { exam_id: id } });
+        } catch (caError) {
+          logger.error('Auto-unlink current affairs quiz error (updateExamWithContent):', caError);
+        }
       }
     }
 
@@ -2534,7 +2387,7 @@ const updateExamWithContent = async (req, res) => {
 const uploadQuestionImageController = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -2551,14 +2404,12 @@ const uploadQuestionImageController = async (req, res) => {
     }
 
     // Check if question exists
-    const { data: question, error: questionError } = await supabase
-      .from('questions')
-      .select('id, image_url')
-      .eq('id', id)
-      .single();
+    const question = await prisma.questions.findUnique({ where: { id }, select: { id: true, image_url: true } }).catch((error) => {
+      logger.error('Question not found for image upload:', { id, error });
+      return null;
+    });
 
-    if (questionError || !question) {
-      logger.error('Question not found for image upload:', { id, error: questionError });
+    if (!question) {
       return res.status(404).json({
         success: false,
         message: 'Question not found. Please save the question first before uploading images.'
@@ -2579,14 +2430,11 @@ const uploadQuestionImageController = async (req, res) => {
 
     // Upload new image
     const imageResult = await uploadQuestionImage(req.file);
-    
-    // Update question with new image URL
-    const { error: updateError } = await supabase
-      .from('questions')
-      .update({ image_url: imageResult.url })
-      .eq('id', id);
 
-    if (updateError) {
+    // Update question with new image URL
+    try {
+      await prisma.questions.update({ where: { id }, data: { image_url: imageResult.url } });
+    } catch (updateError) {
       logger.error('Failed to update question image URL:', updateError);
       return res.status(500).json({
         success: false,
@@ -2624,14 +2472,12 @@ const removeQuestionImage = async (req, res) => {
     }
 
     // Get current question
-    const { data: question, error: questionError } = await supabase
-      .from('questions')
-      .select('id, image_url')
-      .eq('id', id)
-      .single();
+    const question = await prisma.questions.findUnique({ where: { id }, select: { id: true, image_url: true } }).catch((error) => {
+      logger.error('Question not found for image removal:', { id, error });
+      return null;
+    });
 
-    if (questionError || !question) {
-      logger.error('Question not found for image removal:', { id, error: questionError });
+    if (!question) {
       return res.status(404).json({
         success: false,
         message: 'Question not found. The question may have been deleted or not saved yet.'
@@ -2651,12 +2497,9 @@ const removeQuestionImage = async (req, res) => {
     }
 
     // Update question to remove image URL
-    const { error: updateError } = await supabase
-      .from('questions')
-      .update({ image_url: null })
-      .eq('id', id);
-
-    if (updateError) {
+    try {
+      await prisma.questions.update({ where: { id }, data: { image_url: null } });
+    } catch (updateError) {
       logger.error('Failed to remove question image URL:', updateError);
       return res.status(500).json({
         success: false,
@@ -2681,7 +2524,7 @@ const removeQuestionImage = async (req, res) => {
 const uploadOptionImageController = async (req, res) => {
   try {
     const { id } = req.params;
-    
+
     if (!req.file) {
       return res.status(400).json({
         success: false,
@@ -2698,14 +2541,12 @@ const uploadOptionImageController = async (req, res) => {
     }
 
     // Check if option exists
-    const { data: option, error: optionError } = await supabase
-      .from('question_options')
-      .select('id, image_url')
-      .eq('id', id)
-      .single();
+    const option = await prisma.question_options.findUnique({ where: { id }, select: { id: true, image_url: true } }).catch((error) => {
+      logger.error('Option not found for image upload:', { id, error });
+      return null;
+    });
 
-    if (optionError || !option) {
-      logger.error('Option not found for image upload:', { id, error: optionError });
+    if (!option) {
       return res.status(404).json({
         success: false,
         message: 'Option not found. Please save the option first before uploading images.'
@@ -2726,14 +2567,11 @@ const uploadOptionImageController = async (req, res) => {
 
     // Upload new image
     const imageResult = await uploadOptionImage(req.file);
-    
-    // Update option with new image URL
-    const { error: updateError } = await supabase
-      .from('question_options')
-      .update({ image_url: imageResult.url })
-      .eq('id', id);
 
-    if (updateError) {
+    // Update option with new image URL
+    try {
+      await prisma.question_options.update({ where: { id }, data: { image_url: imageResult.url } });
+    } catch (updateError) {
       logger.error('Failed to update option image URL:', updateError);
       return res.status(500).json({
         success: false,
@@ -2771,14 +2609,12 @@ const removeOptionImage = async (req, res) => {
     }
 
     // Get current option
-    const { data: option, error: optionError } = await supabase
-      .from('question_options')
-      .select('id, image_url')
-      .eq('id', id)
-      .single();
+    const option = await prisma.question_options.findUnique({ where: { id }, select: { id: true, image_url: true } }).catch((error) => {
+      logger.error('Option not found for image removal:', { id, error });
+      return null;
+    });
 
-    if (optionError || !option) {
-      logger.error('Option not found for image removal:', { id, error: optionError });
+    if (!option) {
       return res.status(404).json({
         success: false,
         message: 'Option not found. The option may have been deleted or not saved yet.'
@@ -2798,12 +2634,9 @@ const removeOptionImage = async (req, res) => {
     }
 
     // Update option to remove image URL
-    const { error: updateError } = await supabase
-      .from('question_options')
-      .update({ image_url: null })
-      .eq('id', id);
-
-    if (updateError) {
+    try {
+      await prisma.question_options.update({ where: { id }, data: { image_url: null } });
+    } catch (updateError) {
       logger.error('Failed to remove option image URL:', updateError);
       return res.status(500).json({
         success: false,
@@ -2866,14 +2699,12 @@ const uploadExamPdfEnController = async (req, res) => {
     }
 
     // Check if exam exists and get title
-    const { data: exam, error: examError } = await supabase
-      .from('exams')
-      .select('id, title, pdf_url_en')
-      .eq('id', id)
-      .single();
+    const exam = await prisma.exams.findUnique({ where: { id }, select: { id: true, title: true, pdf_url_en: true } }).catch((error) => {
+      logger.error('Exam not found for PDF upload:', { id, error });
+      return null;
+    });
 
-    if (examError || !exam) {
-      logger.error('Exam not found for PDF upload:', { id, error: examError });
+    if (!exam) {
       return res.status(404).json({
         success: false,
         message: 'Exam not found'
@@ -2894,14 +2725,11 @@ const uploadExamPdfEnController = async (req, res) => {
 
     // Upload new PDF with exam title as filename
     const pdfResult = await uploadExamPdfEn(req.file, exam.title);
-    
-    // Update exam with new PDF URL
-    const { error: updateError } = await supabase
-      .from('exams')
-      .update({ pdf_url_en: pdfResult.url })
-      .eq('id', id);
 
-    if (updateError) {
+    // Update exam with new PDF URL
+    try {
+      await prisma.exams.update({ where: { id }, data: { pdf_url_en: pdfResult.url } });
+    } catch (updateError) {
       logger.error('Failed to update exam English PDF URL:', updateError);
       return res.status(500).json({
         success: false,
@@ -2938,14 +2766,12 @@ const uploadExamPdfHiController = async (req, res) => {
     }
 
     // Check if exam exists and get title
-    const { data: exam, error: examError } = await supabase
-      .from('exams')
-      .select('id, title, pdf_url_hi')
-      .eq('id', id)
-      .single();
+    const exam = await prisma.exams.findUnique({ where: { id }, select: { id: true, title: true, pdf_url_hi: true } }).catch((error) => {
+      logger.error('Exam not found for PDF upload:', { id, error });
+      return null;
+    });
 
-    if (examError || !exam) {
-      logger.error('Exam not found for PDF upload:', { id, error: examError });
+    if (!exam) {
       return res.status(404).json({
         success: false,
         message: 'Exam not found'
@@ -2966,14 +2792,11 @@ const uploadExamPdfHiController = async (req, res) => {
 
     // Upload new PDF with exam title as filename
     const pdfResult = await uploadExamPdfHi(req.file, exam.title);
-    
-    // Update exam with new PDF URL
-    const { error: updateError } = await supabase
-      .from('exams')
-      .update({ pdf_url_hi: pdfResult.url })
-      .eq('id', id);
 
-    if (updateError) {
+    // Update exam with new PDF URL
+    try {
+      await prisma.exams.update({ where: { id }, data: { pdf_url_hi: pdfResult.url } });
+    } catch (updateError) {
       logger.error('Failed to update exam Hindi PDF URL:', updateError);
       return res.status(500).json({
         success: false,
@@ -3003,14 +2826,12 @@ const removeExamPdfEn = async (req, res) => {
     const { id } = req.params;
 
     // Get current exam
-    const { data: exam, error: examError } = await supabase
-      .from('exams')
-      .select('id, pdf_url_en')
-      .eq('id', id)
-      .single();
+    const exam = await prisma.exams.findUnique({ where: { id }, select: { id: true, pdf_url_en: true } }).catch((error) => {
+      logger.error('Exam not found for PDF removal:', { id, error });
+      return null;
+    });
 
-    if (examError || !exam) {
-      logger.error('Exam not found for PDF removal:', { id, error: examError });
+    if (!exam) {
       return res.status(404).json({
         success: false,
         message: 'Exam not found'
@@ -3030,12 +2851,9 @@ const removeExamPdfEn = async (req, res) => {
     }
 
     // Update exam to remove PDF URL
-    const { error: updateError } = await supabase
-      .from('exams')
-      .update({ pdf_url_en: null })
-      .eq('id', id);
-
-    if (updateError) {
+    try {
+      await prisma.exams.update({ where: { id }, data: { pdf_url_en: null } });
+    } catch (updateError) {
       logger.error('Failed to remove exam English PDF URL:', updateError);
       return res.status(500).json({
         success: false,
@@ -3062,14 +2880,12 @@ const removeExamPdfHi = async (req, res) => {
     const { id } = req.params;
 
     // Get current exam
-    const { data: exam, error: examError } = await supabase
-      .from('exams')
-      .select('id, pdf_url_hi')
-      .eq('id', id)
-      .single();
+    const exam = await prisma.exams.findUnique({ where: { id }, select: { id: true, pdf_url_hi: true } }).catch((error) => {
+      logger.error('Exam not found for PDF removal:', { id, error });
+      return null;
+    });
 
-    if (examError || !exam) {
-      logger.error('Exam not found for PDF removal:', { id, error: examError });
+    if (!exam) {
       return res.status(404).json({
         success: false,
         message: 'Exam not found'
@@ -3089,12 +2905,9 @@ const removeExamPdfHi = async (req, res) => {
     }
 
     // Update exam to remove PDF URL
-    const { error: updateError } = await supabase
-      .from('exams')
-      .update({ pdf_url_hi: null })
-      .eq('id', id);
-
-    if (updateError) {
+    try {
+      await prisma.exams.update({ where: { id }, data: { pdf_url_hi: null } });
+    } catch (updateError) {
       logger.error('Failed to remove exam Hindi PDF URL:', updateError);
       return res.status(500).json({
         success: false,
@@ -3133,6 +2946,7 @@ module.exports = {
   updateOption,
   bulkCreateExamWithContent,
   updateExamWithContent,
+  generateExamPdf,
   saveDraftExam,
   uploadQuestionImage: uploadQuestionImageController,
   removeQuestionImage,

@@ -1,6 +1,6 @@
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const supabase = require('./database');
+const prisma = require('./prisma');
 
 const {
   GOOGLE_CLIENT_ID,
@@ -23,13 +23,9 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_CALLBACK_URL) {
           const name = profile.displayName;
           const avatar_url = profile.photos[0]?.value;
 
-          const { data: existingUser, error: fetchError } = await supabase
-            .from('users')
-            .select('*')
-            .eq('email', email)
-            .single();
+          const existingUser = await prisma.users.findUnique({ where: { email } });
 
-          if (existingUser && !fetchError) {
+          if (existingUser) {
             const updatePayload = {
               auth_provider: 'google',
               google_id: profile.id,
@@ -40,18 +36,15 @@ if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET && GOOGLE_CALLBACK_URL) {
               updatePayload.avatar_url = avatar_url;
             }
 
-            const { data: refreshedUser, error: updateError } = await supabase
-              .from('users')
-              .update(updatePayload)
-              .eq('id', existingUser.id)
-              .select()
-              .single();
-
-            if (updateError || !refreshedUser) {
+            try {
+              const refreshedUser = await prisma.users.update({
+                where: { id: existingUser.id },
+                data: updatePayload,
+              });
+              return done(null, refreshedUser);
+            } catch (updateError) {
               return done(null, existingUser);
             }
-
-            return done(null, refreshedUser);
           }
 
           // Brand-new Google user: do NOT create a profile yet. Account creation is
@@ -85,16 +78,7 @@ passport.serializeUser((user, done) => {
 
 passport.deserializeUser(async (id, done) => {
   try {
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (error) {
-      return done(error, null);
-    }
-
+    const user = await prisma.users.findUnique({ where: { id } });
     done(null, user);
   } catch (error) {
     done(error, null);

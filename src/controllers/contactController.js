@@ -1,10 +1,12 @@
 const { randomUUID } = require('crypto');
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
-const contactSelect = `id, headline, subheading, description, support_email, support_phone, whatsapp_number,
-  address_line1, address_line2, city, state, postal_code, country, support_hours, map_embed_url,
-  contact_social_links(id, platform, label, url, icon, display_order, is_active)`;
+const contactInclude = {
+  contact_social_links: {
+    select: { id: true, platform: true, label: true, url: true, icon: true, display_order: true, is_active: true },
+  },
+};
 
 const handleSupabaseError = (res, message, error) => {
   logger.error(message, error);
@@ -12,16 +14,10 @@ const handleSupabaseError = (res, message, error) => {
 };
 
 const getContactInfo = async () => {
-  const { data, error } = await supabase
-    .from('contact_info')
-    .select(contactSelect)
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .single();
-
-  if (error && error.code !== 'PGRST116') {
-    throw error;
-  }
+  const data = await prisma.contact_info.findFirst({
+    orderBy: { created_at: 'asc' },
+    include: contactInclude,
+  });
 
   return data || null;
 };
@@ -101,50 +97,49 @@ const adminUpsertContact = async (req, res) => {
     const existing = await getContactInfo();
     let contact;
 
-    if (existing?.id) {
-      const { data, error } = await supabase
-        .from('contact_info')
-        .update(payload)
-        .eq('id', existing.id)
-        .select(contactSelect)
-        .single();
-
-      if (error) return handleSupabaseError(res, 'Failed to update contact info', error);
-      contact = data;
-    } else {
-      const { data, error } = await supabase
-        .from('contact_info')
-        .insert(payload)
-        .select(contactSelect)
-        .single();
-
-      if (error) return handleSupabaseError(res, 'Failed to create contact info', error);
-      contact = data;
+    try {
+      if (existing?.id) {
+        contact = await prisma.contact_info.update({
+          where: { id: existing.id },
+          data: payload,
+          include: contactInclude,
+        });
+      } else {
+        contact = await prisma.contact_info.create({
+          data: payload,
+          include: contactInclude,
+        });
+      }
+    } catch (error) {
+      return handleSupabaseError(res, existing?.id ? 'Failed to update contact info' : 'Failed to create contact info', error);
     }
 
     const sanitizedSocials = sanitizeSocialLinks(req.body.contact_social_links || req.body.social_links || []);
 
     if (sanitizedSocials.length) {
-      const upsertPayload = sanitizedSocials.map((link) => ({
-        ...link,
-        contact_id: contact.id,
-        updated_at: new Date().toISOString()
-      }));
-
-      const { error: socialError } = await supabase
-        .from('contact_social_links')
-        .upsert(upsertPayload, { onConflict: 'id' });
-
-      if (socialError) return handleSupabaseError(res, 'Failed to upsert social links', socialError);
+      try {
+        await Promise.all(sanitizedSocials.map((link) => {
+          const { id, ...rest } = link;
+          const data = { ...rest, contact_id: contact.id, updated_at: new Date() };
+          return prisma.contact_social_links.upsert({
+            where: { id },
+            create: { id, ...data },
+            update: data,
+          });
+        }));
+      } catch (socialError) {
+        return handleSupabaseError(res, 'Failed to upsert social links', socialError);
+      }
     }
 
     if (Array.isArray(req.body.deleted_social_ids) && req.body.deleted_social_ids.length) {
-      const { error: deleteError } = await supabase
-        .from('contact_social_links')
-        .delete()
-        .in('id', req.body.deleted_social_ids);
-
-      if (deleteError) return handleSupabaseError(res, 'Failed to delete social links', deleteError);
+      try {
+        await prisma.contact_social_links.deleteMany({
+          where: { id: { in: req.body.deleted_social_ids } },
+        });
+      } catch (deleteError) {
+        return handleSupabaseError(res, 'Failed to delete social links', deleteError);
+      }
     }
 
     const refreshed = await getContactInfo();

@@ -1,8 +1,6 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { uploadToR2 } = require('../utils/fileUpload');
-
-const TABLE_NAME = 'page_banners';
 
 const formatError = (message) => ({ success: false, message });
 
@@ -11,24 +9,18 @@ const fetchBanners = async (pageIdentifier, onlyActive = true) => {
     return [];
   }
 
-  let query = supabase
-    .from(TABLE_NAME)
-    .select('*')
-    .eq('page_identifier', pageIdentifier)
-    .order('display_order', { ascending: true })
-    .order('created_at', { ascending: true });
-
-  if (onlyActive) {
-    query = query.eq('is_active', true);
-  }
-
-  const { data, error } = await query;
-  if (error) {
+  try {
+    return await prisma.page_banners.findMany({
+      where: {
+        page_identifier: pageIdentifier,
+        ...(onlyActive ? { is_active: true } : {}),
+      },
+      orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+    });
+  } catch (error) {
     logger.error('[pageBanners] fetch error', { pageIdentifier, error });
     return [];
   }
-
-  return data || [];
 };
 
 const getPublicBanners = async (req, res) => {
@@ -70,11 +62,9 @@ const createBanner = async (req, res) => {
 
     let orderValue = Number(displayOrder);
     if (!Number.isFinite(orderValue)) {
-      const { count } = await supabase
-        .from(TABLE_NAME)
-        .select('*', { count: 'exact', head: true })
-        .eq('page_identifier', pageIdentifier);
-      orderValue = count || 0;
+      orderValue = await prisma.page_banners.count({
+        where: { page_identifier: pageIdentifier },
+      });
     }
 
     const payload = {
@@ -86,13 +76,10 @@ const createBanner = async (req, res) => {
       is_active: Boolean(isActive)
     };
 
-    const { data, error } = await supabase
-      .from(TABLE_NAME)
-      .insert(payload)
-      .select('*')
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.page_banners.create({ data: payload });
+    } catch (error) {
       logger.error('[pageBanners] create error', error);
       return res.status(500).json(formatError('Failed to create banner'));
     }
@@ -133,14 +120,10 @@ const updateBanner = async (req, res) => {
       return res.status(400).json(formatError('No fields to update'));
     }
 
-    const { data, error } = await supabase
-      .from(TABLE_NAME)
-      .update(updates)
-      .eq('id', id)
-      .select('*')
-      .maybeSingle();
-
-    if (error || !data) {
+    let data;
+    try {
+      data = await prisma.page_banners.update({ where: { id }, data: updates });
+    } catch (error) {
       logger.error('[pageBanners] update error', error);
       return res.status(404).json(formatError('Banner not found or failed to update'));
     }
@@ -159,12 +142,9 @@ const deleteBanner = async (req, res) => {
       return res.status(400).json(formatError('Banner ID is required'));
     }
 
-    const { error } = await supabase
-      .from(TABLE_NAME)
-      .delete()
-      .eq('id', id);
-
-    if (error) {
+    try {
+      await prisma.page_banners.delete({ where: { id } });
+    } catch (error) {
       logger.error('[pageBanners] delete error', error);
       return res.status(500).json(formatError('Failed to delete banner'));
     }
@@ -183,14 +163,9 @@ const reorderBanners = async (req, res) => {
       return res.status(400).json(formatError('Order array is required'));
     }
 
-    const updates = order.map((id, index) =>
-      supabase
-        .from(TABLE_NAME)
-        .update({ display_order: index })
-        .eq('id', id)
+    await prisma.$transaction(
+      order.map((id, index) => prisma.page_banners.update({ where: { id }, data: { display_order: index } }))
     );
-
-    await Promise.all(updates);
     return res.json({ success: true });
   } catch (error) {
     logger.error('[pageBanners] reorder error', error);

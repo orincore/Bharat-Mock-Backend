@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 const disclaimerFields = ['title', 'last_updated', 'intro_body', 'contact_email', 'contact_url'];
@@ -9,56 +9,35 @@ const handleError = (res, message, error) => {
 };
 
 const getDisclaimerContent = async () => {
-  const { data, error } = await supabase
-    .from('disclaimer_content')
-    .select('*')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .single();
-
-  if (error && error.code !== 'PGRST116') {
-    throw error;
-  }
+  const data = await prisma.disclaimer_content.findFirst({
+    orderBy: { created_at: 'asc' },
+  });
 
   return data || null;
 };
 
 const getSectionsWithPoints = async (includeInactive = false) => {
-  let sectionsQuery = supabase
-    .from('disclaimer_sections')
-    .select('*')
-    .order('display_order', { ascending: true })
-    .order('created_at', { ascending: true });
+  const sections = await prisma.disclaimer_sections.findMany({
+    where: includeInactive ? {} : { is_active: true },
+    orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+  });
 
-  if (!includeInactive) {
-    sectionsQuery = sectionsQuery.eq('is_active', true);
-  }
-
-  const { data: sections, error: sectionsError } = await sectionsQuery;
-  if (sectionsError) throw sectionsError;
-
-  const sectionIds = (sections || []).map((section) => section.id);
+  const sectionIds = sections.map((section) => section.id);
   if (!sectionIds.length) {
     return [];
   }
 
-  let pointsQuery = supabase
-    .from('disclaimer_points')
-    .select('*')
-    .in('section_id', sectionIds)
-    .order('display_order', { ascending: true })
-    .order('created_at', { ascending: true });
-
-  if (!includeInactive) {
-    pointsQuery = pointsQuery.eq('is_active', true);
-  }
-
-  const { data: points, error: pointsError } = await pointsQuery;
-  if (pointsError) throw pointsError;
+  const points = await prisma.disclaimer_points.findMany({
+    where: {
+      section_id: { in: sectionIds },
+      ...(includeInactive ? {} : { is_active: true }),
+    },
+    orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+  });
 
   return sections.map((section) => ({
     ...section,
-    points: (points || []).filter((point) => point.section_id === section.id)
+    points: points.filter((point) => point.section_id === section.id)
   }));
 };
 
@@ -82,6 +61,10 @@ const sanitizeContentPayload = (payload = {}) => {
   if (!sanitized.title || !sanitized.last_updated) {
     return null;
   }
+
+  // Prisma needs a real Date (or full ISO-8601 datetime string) for @db.Date columns —
+  // a bare "YYYY-MM-DD" string throws "premature end of input. Expected ISO-8601 DateTime."
+  sanitized.last_updated = new Date(sanitized.last_updated);
 
   sanitized.updated_at = new Date().toISOString();
   return sanitized;
@@ -120,22 +103,20 @@ const sanitizePoints = (points = []) => {
 
 const upsertRecords = async (table, items = []) => {
   if (!items.length) return [];
-  const { data, error } = await supabase.from(table).upsert(items, { onConflict: 'id' }).select('*');
-  if (error) throw error;
-  return data || [];
+  return prisma.$transaction(items.map((item) => {
+    const { id, ...data } = item;
+    return prisma[table].upsert({ where: { id }, create: item, update: data });
+  }));
 };
 
 const insertRecords = async (table, items = []) => {
   if (!items.length) return [];
-  const { data, error } = await supabase.from(table).insert(items).select('*');
-  if (error) throw error;
-  return data || [];
+  return prisma.$transaction(items.map((item) => prisma[table].create({ data: item })));
 };
 
 const deleteRecords = async (table, ids = []) => {
   if (!Array.isArray(ids) || !ids.length) return;
-  const { error } = await supabase.from(table).delete().in('id', ids);
-  if (error) throw error;
+  await prisma[table].deleteMany({ where: { id: { in: ids } } });
 };
 
 const publicDisclaimer = async (req, res) => {
@@ -164,17 +145,14 @@ const adminUpsertDisclaimer = async (req, res) => {
     }
 
     const existing = await getDisclaimerContent();
-    if (existing?.id) {
-      const { error } = await supabase
-        .from('disclaimer_content')
-        .update(payload)
-        .eq('id', existing.id);
-      if (error) return handleError(res, 'Failed to update Disclaimer content', error);
-    } else {
-      const { error } = await supabase
-        .from('disclaimer_content')
-        .insert(payload);
-      if (error) return handleError(res, 'Failed to create Disclaimer content', error);
+    try {
+      if (existing?.id) {
+        await prisma.disclaimer_content.update({ where: { id: existing.id }, data: payload });
+      } else {
+        await prisma.disclaimer_content.create({ data: payload });
+      }
+    } catch (error) {
+      return handleError(res, existing?.id ? 'Failed to update Disclaimer content' : 'Failed to create Disclaimer content', error);
     }
 
     const sectionsPayload = sanitizeSections(req.body.sections || []);
@@ -189,12 +167,19 @@ const adminUpsertDisclaimer = async (req, res) => {
 
     const pointsWithSections = pointsPayload
       .map((point) => {
-        if (point.section_id) {
-          return point;
+        // BUGFIX (2026-07-20): disclaimer_points has no `section_title` column — this
+        // field exists only to resolve a new point's section_id by matching against a
+        // newly-created section's title, and must never reach the DB write itself.
+        // The sibling privacy/refund policy controllers already strip it; this file was
+        // missing that step, which meant saving a disclaimer point (create OR update)
+        // always failed with a "column does not exist" error in production.
+        const { section_title, ...dbPoint } = point;
+        if (dbPoint.section_id) {
+          return dbPoint;
         }
-        const matching = sectionsMap.find((section) => section.title === point.section_title);
+        const matching = sectionsMap.find((section) => section.title === section_title);
         return {
-          ...point,
+          ...dbPoint,
           section_id: matching?.id || null
         };
       })

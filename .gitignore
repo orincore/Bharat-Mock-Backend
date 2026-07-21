@@ -46,3 +46,5 @@ temp/
 
 # Test
 test-results/
+
+/src/generated/prisma

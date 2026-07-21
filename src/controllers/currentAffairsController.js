@@ -1,12 +1,11 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { uploadToR2 } = require('../utils/fileUpload');
 
-const SETTINGS_TABLE = 'current_affairs_settings';
-const VIDEOS_TABLE = 'current_affairs_videos';
-const QUIZZES_TABLE = 'current_affairs_quizzes';
-const BLOGS_TABLE = 'blogs';
-const EXAMS_TABLE = 'exams';
+const examBriefSelect = {
+  id: true, title: true, slug: true, url_path: true, status: true, start_date: true, end_date: true,
+  exam_type: true, duration: true, total_marks: true, total_questions: true, thumbnail_url: true, category: true,
+};
 
 const mapVideo = (record) => ({
   id: record.id,
@@ -64,31 +63,23 @@ const mapSettings = (record) => ({
 });
 
 const getSingletonSettings = async () => {
-  const { data, error } = await supabase
-    .from(SETTINGS_TABLE)
-    .select('*')
-    .order('updated_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
+  let data;
+  try {
+    data = await prisma.current_affairs_settings.findFirst({
+      orderBy: { updated_at: 'desc' },
+    });
+  } catch (error) {
     logger.error('[current-affairs] failed to fetch settings', error);
     throw new Error('Failed to fetch settings');
   }
 
   if (!data) {
-    const { data: created, error: insertError } = await supabase
-      .from(SETTINGS_TABLE)
-      .insert({})
-      .select('*')
-      .single();
-
-    if (insertError) {
+    try {
+      return await prisma.current_affairs_settings.create({ data: {} });
+    } catch (insertError) {
       logger.error('[current-affairs] failed to create default settings', insertError);
       throw new Error('Failed to initialize settings');
     }
-
-    return created;
   }
 
   return data;
@@ -105,70 +96,49 @@ const currentAffairsController = {
       const settingsRecord = await getSingletonSettings();
       const settings = mapSettings(settingsRecord);
 
-      const [videosResponse, quizLinksResponse, notesResponse] = await Promise.all([
-        supabase
-          .from(VIDEOS_TABLE)
-          .select('*')
-          .eq('is_published', true)
-          .order('is_featured', { ascending: false })
-          .order('display_order', { ascending: true })
-          .order('published_at', { ascending: false })
-          .limit(18),
-        supabase
-          .from(QUIZZES_TABLE)
-          .select('*')
-          .eq('is_published', true)
-          .order('display_order', { ascending: true })
-          .order('updated_at', { ascending: false })
-          .limit(12),
-        supabase
-          .from(BLOGS_TABLE)
-          .select('id, title, slug, excerpt, featured_image_url, published_at, current_affairs_tag, category')
-          .eq('is_current_affairs_note', true)
-          .eq('is_published', true)
-          .order('published_at', { ascending: false })
-          .limit(9)
-      ]);
+      let videosData, quizLinks, notesData;
+      try {
+        [videosData, quizLinks, notesData] = await Promise.all([
+          prisma.current_affairs_videos.findMany({
+            where: { is_published: true },
+            orderBy: [{ is_featured: 'desc' }, { display_order: 'asc' }, { published_at: 'desc' }],
+            take: 18,
+          }),
+          prisma.current_affairs_quizzes.findMany({
+            where: { is_published: true },
+            orderBy: [{ display_order: 'asc' }, { updated_at: 'desc' }],
+            take: 12,
+          }),
+          prisma.blogs.findMany({
+            where: { is_current_affairs_note: true, is_published: true },
+            select: { id: true, title: true, slug: true, excerpt: true, featured_image_url: true, published_at: true, current_affairs_tag: true, category: true },
+            orderBy: { published_at: 'desc' },
+            take: 9,
+          }),
+        ]);
+      } catch (error) {
+        return buildError(res, 'Failed to load current affairs data', error);
+      }
 
-      if (videosResponse.error) return buildError(res, 'Failed to load videos', videosResponse.error);
-      if (quizLinksResponse.error) return buildError(res, 'Failed to load quizzes', quizLinksResponse.error);
-      if (notesResponse.error) return buildError(res, 'Failed to load notes', notesResponse.error);
-
-      const videos = (videosResponse.data || []).map(mapVideo);
-      const quizLinks = quizLinksResponse.data || [];
+      const videos = (videosData || []).map(mapVideo);
 
       let examMap = {};
       const examIds = quizLinks.map((item) => item.exam_id).filter(Boolean);
       if (examIds.length) {
-        const { data: examsData, error: examsError } = await supabase
-          .from(EXAMS_TABLE)
-          .select(`
-            id,
-            title,
-            slug,
-            url_path,
-            status,
-            start_date,
-            end_date,
-            exam_type,
-            duration,
-            total_marks,
-            total_questions,
-            pass_percentage,
-            is_free,
-            supports_hindi,
-            negative_marking,
-            negative_mark_value,
-            allow_anytime,
-            thumbnail_url,
-            category,
-            difficulty,
-            created_at,
-            updated_at
-          `)
-          .in('id', examIds);
-
-        if (examsError) return buildError(res, 'Failed to load quiz details', examsError);
+        let examsData;
+        try {
+          examsData = await prisma.exams.findMany({
+            where: { id: { in: examIds } },
+            select: {
+              id: true, title: true, slug: true, url_path: true, status: true, start_date: true, end_date: true,
+              exam_type: true, duration: true, total_marks: true, total_questions: true, pass_percentage: true,
+              is_free: true, supports_hindi: true, negative_marking: true, negative_mark_value: true,
+              allow_anytime: true, thumbnail_url: true, category: true, difficulty: true, created_at: true, updated_at: true,
+            },
+          });
+        } catch (examsError) {
+          return buildError(res, 'Failed to load quiz details', examsError);
+        }
         examMap = (examsData || []).reduce((acc, exam) => {
           acc[exam.id] = exam;
           return acc;
@@ -176,7 +146,7 @@ const currentAffairsController = {
       }
 
       const quizzes = quizLinks.map((record) => mapQuiz(record, examMap[record.exam_id] || null));
-      const notes = (notesResponse.data || []).map(mapNote);
+      const notes = (notesData || []).map(mapNote);
 
       return res.json({
         success: true,
@@ -217,14 +187,12 @@ const currentAffairsController = {
         updated_at: new Date().toISOString()
       };
 
-      const { data, error } = await supabase
-        .from(SETTINGS_TABLE)
-        .update(payload)
-        .eq('id', existing.id)
-        .select('*')
-        .single();
-
-      if (error) return buildError(res, 'Failed to update settings', error);
+      let data;
+      try {
+        data = await prisma.current_affairs_settings.update({ where: { id: existing.id }, data: payload });
+      } catch (error) {
+        return buildError(res, 'Failed to update settings', error);
+      }
 
       return res.json({ success: true, data: mapSettings(data) });
     } catch (error) {
@@ -237,19 +205,16 @@ const currentAffairsController = {
       const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
       const tag = req.query.tag;
 
-      let query = supabase
-        .from(VIDEOS_TABLE)
-        .select('*')
-        .order('display_order', { ascending: true })
-        .order('updated_at', { ascending: false })
-        .limit(limit);
-
-      if (tag) {
-        query = query.eq('tag', tag);
+      let data;
+      try {
+        data = await prisma.current_affairs_videos.findMany({
+          where: tag ? { tag } : {},
+          orderBy: [{ display_order: 'asc' }, { updated_at: 'desc' }],
+          take: limit,
+        });
+      } catch (error) {
+        return buildError(res, 'Failed to load videos', error);
       }
-
-      const { data, error } = await query;
-      if (error) return buildError(res, 'Failed to load videos', error);
 
       return res.json({ success: true, data: (data || []).map(mapVideo) });
     } catch (error) {
@@ -291,13 +256,12 @@ const currentAffairsController = {
         published_at: publishedAt || new Date().toISOString()
       };
 
-      const { data, error } = await supabase
-        .from(VIDEOS_TABLE)
-        .insert(payload)
-        .select('*')
-        .single();
-
-      if (error) return buildError(res, 'Failed to create video', error);
+      let data;
+      try {
+        data = await prisma.current_affairs_videos.create({ data: payload });
+      } catch (error) {
+        return buildError(res, 'Failed to create video', error);
+      }
 
       return res.status(201).json({ success: true, data: mapVideo(data) });
     } catch (error) {
@@ -338,15 +302,11 @@ const currentAffairsController = {
         return res.status(400).json({ success: false, message: 'No updates provided' });
       }
 
-      const { data, error } = await supabase
-        .from(VIDEOS_TABLE)
-        .update(updates)
-        .eq('id', id)
-        .select('*')
-        .maybeSingle();
-
-      if (error || !data) {
-        return buildError(res, 'Failed to update video', error || new Error('Video not found'));
+      let data;
+      try {
+        data = await prisma.current_affairs_videos.update({ where: { id }, data: updates });
+      } catch (error) {
+        return buildError(res, 'Failed to update video', error);
       }
 
       return res.json({ success: true, data: mapVideo(data) });
@@ -358,12 +318,11 @@ const currentAffairsController = {
   async deleteVideo(req, res) {
     try {
       const { id } = req.params;
-      const { error } = await supabase
-        .from(VIDEOS_TABLE)
-        .delete()
-        .eq('id', id);
-
-      if (error) return buildError(res, 'Failed to delete video', error);
+      try {
+        await prisma.current_affairs_videos.delete({ where: { id } });
+      } catch (error) {
+        return buildError(res, 'Failed to delete video', error);
+      }
 
       return res.json({ success: true });
     } catch (error) {
@@ -410,24 +369,28 @@ const currentAffairsController = {
   async listQuizzes(req, res) {
     try {
       const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
-      const { data, error } = await supabase
-        .from(QUIZZES_TABLE)
-        .select('*')
-        .order('display_order', { ascending: true })
-        .order('updated_at', { ascending: false })
-        .limit(limit);
-
-      if (error) return buildError(res, 'Failed to load quizzes', error);
+      let data;
+      try {
+        data = await prisma.current_affairs_quizzes.findMany({
+          orderBy: [{ display_order: 'asc' }, { updated_at: 'desc' }],
+          take: limit,
+        });
+      } catch (error) {
+        return buildError(res, 'Failed to load quizzes', error);
+      }
 
       const examIds = (data || []).map((record) => record.exam_id);
       let examMap = {};
       if (examIds.length) {
-        const { data: exams, error: examsError } = await supabase
-          .from(EXAMS_TABLE)
-          .select('id, title, slug, url_path, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
-          .in('id', examIds);
-
-        if (examsError) return buildError(res, 'Failed to load quiz exams', examsError);
+        let exams;
+        try {
+          exams = await prisma.exams.findMany({
+            where: { id: { in: examIds } },
+            select: examBriefSelect,
+          });
+        } catch (examsError) {
+          return buildError(res, 'Failed to load quiz exams', examsError);
+        }
         examMap = (exams || []).reduce((acc, exam) => {
           acc[exam.id] = exam;
           return acc;
@@ -448,13 +411,9 @@ const currentAffairsController = {
         return res.status(400).json({ success: false, message: 'examId is required' });
       }
 
-      const { data: exam, error: examError } = await supabase
-        .from(EXAMS_TABLE)
-        .select('id, title, slug, url_path, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
-        .eq('id', examId)
-        .maybeSingle();
+      const exam = await prisma.exams.findUnique({ where: { id: examId }, select: examBriefSelect });
 
-      if (examError || !exam) {
+      if (!exam) {
         return res.status(404).json({ success: false, message: 'Exam not found' });
       }
 
@@ -468,14 +427,11 @@ const currentAffairsController = {
         display_order: displayOrder ? parseInt(displayOrder, 10) : 0
       };
 
-      const { data, error } = await supabase
-        .from(QUIZZES_TABLE)
-        .insert(payload)
-        .select('*')
-        .single();
-
-      if (error) {
-        if (error.code === '23505') {
+      let data;
+      try {
+        data = await prisma.current_affairs_quizzes.create({ data: payload });
+      } catch (error) {
+        if (error.code === 'P2002') {
           return res.status(409).json({ success: false, message: 'Exam already linked to current affairs' });
         }
         return buildError(res, 'Failed to create quiz entry', error);
@@ -503,13 +459,9 @@ const currentAffairsController = {
 
       let linkedExam = null;
       if (examId) {
-        const { data: exam, error: examError } = await supabase
-          .from(EXAMS_TABLE)
-          .select('id, title, slug, url_path, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
-          .eq('id', examId)
-          .maybeSingle();
+        const exam = await prisma.exams.findUnique({ where: { id: examId }, select: examBriefSelect });
 
-        if (examError || !exam) {
+        if (!exam) {
           return res.status(404).json({ success: false, message: 'Exam not found' });
         }
         linkedExam = exam;
@@ -527,25 +479,16 @@ const currentAffairsController = {
         return res.status(400).json({ success: false, message: 'No updates provided' });
       }
 
-      const { data, error } = await supabase
-        .from(QUIZZES_TABLE)
-        .update(updates)
-        .eq('id', id)
-        .select('*')
-        .maybeSingle();
-
-      if (error || !data) {
-        return buildError(res, 'Failed to update quiz entry', error || new Error('Quiz entry not found'));
+      let data;
+      try {
+        data = await prisma.current_affairs_quizzes.update({ where: { id }, data: updates });
+      } catch (error) {
+        return buildError(res, 'Failed to update quiz entry', error);
       }
 
       if (!linkedExam && data.exam_id) {
-        const { data: exam, error: examError } = await supabase
-          .from(EXAMS_TABLE)
-          .select('id, title, slug, url_path, status, start_date, end_date, exam_type, duration, total_marks, total_questions, thumbnail_url, category')
-          .eq('id', data.exam_id)
-          .maybeSingle();
-
-        if (!examError && exam) {
+        const exam = await prisma.exams.findUnique({ where: { id: data.exam_id }, select: examBriefSelect });
+        if (exam) {
           linkedExam = exam;
         }
       }
@@ -559,12 +502,11 @@ const currentAffairsController = {
   async deleteQuiz(req, res) {
     try {
       const { id } = req.params;
-      const { error } = await supabase
-        .from(QUIZZES_TABLE)
-        .delete()
-        .eq('id', id);
-
-      if (error) return buildError(res, 'Failed to delete quiz entry', error);
+      try {
+        await prisma.current_affairs_quizzes.delete({ where: { id } });
+      } catch (error) {
+        return buildError(res, 'Failed to delete quiz entry', error);
+      }
       return res.json({ success: true });
     } catch (error) {
       return buildError(res, 'Failed to delete quiz entry', error);

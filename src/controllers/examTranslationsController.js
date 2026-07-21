@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
 const logger = require('../config/logger');
 
@@ -12,45 +12,49 @@ const cacheKey = (examId, lang) => buildCacheKey('exam_translations', examId, la
 
 async function fetchFromDb(examId, lang) {
   // 1. Get all question IDs + section IDs for this exam
-  const { data: questions, error: qErr } = await supabase
-    .from('questions')
-    .select('id, section_id')
-    .eq('exam_id', examId)
-    .is('deleted_at', null);
+  const questions = await prisma.questions.findMany({
+    where: { exam_id: examId, deleted_at: null },
+    select: { id: true, section_id: true, passage_id: true },
+  });
 
-  if (qErr || !questions?.length) return null;
+  if (!questions.length) return null;
 
   const questionIds = questions.map(q => q.id);
   const sectionIds = [...new Set(questions.map(q => q.section_id).filter(Boolean))];
+  const passageIds = [...new Set(questions.map(q => q.passage_id).filter(Boolean))];
 
-  // 2. Fetch all three translation tables in parallel
-  const [qtRes, otRes, stRes] = await Promise.all([
-    supabase
-      .from('question_translations')
-      .select('question_id, text_translated')
-      .eq('lang', lang)
-      .in('question_id', questionIds),
+  // 2. Fetch all four translation tables in parallel
+  const [translatedQuestionRows, translatedOptionRows, translatedSectionRows, translatedPassageRows] = await Promise.all([
+    prisma.question_translations.findMany({
+      where: { lang, question_id: { in: questionIds } },
+      select: { question_id: true, text_translated: true },
+    }),
 
-    supabase
-      .from('option_translations')
-      .select('option_id, text_translated, question_options!inner(question_id)')
-      .eq('lang', lang)
-      .in('question_options.question_id', questionIds),
+    prisma.option_translations.findMany({
+      where: { lang, question_options: { question_id: { in: questionIds } } },
+      select: { option_id: true, text_translated: true, question_options: { select: { question_id: true } } },
+    }),
 
     sectionIds.length
-      ? supabase
-          .from('section_translations')
-          .select('section_id, name_translated')
-          .eq('lang', lang)
-          .in('section_id', sectionIds)
-      : Promise.resolve({ data: [] }),
+      ? prisma.section_translations.findMany({
+          where: { lang, section_id: { in: sectionIds } },
+          select: { section_id: true, name_translated: true },
+        })
+      : Promise.resolve([]),
+
+    passageIds.length
+      ? prisma.passage_translations.findMany({
+          where: { lang, passage_id: { in: passageIds } },
+          select: { passage_id: true, title_translated: true, content_translated: true },
+        })
+      : Promise.resolve([]),
   ]);
 
-  if (!qtRes.data?.length) return null; // No translations saved yet
+  if (!translatedQuestionRows.length) return null; // No translations saved yet
 
   // 3. Build question → options map
   const optionsByQuestion = {};
-  for (const row of otRes.data || []) {
+  for (const row of translatedOptionRows) {
     const qId = row.question_options?.question_id;
     if (!qId) continue;
     if (!optionsByQuestion[qId]) optionsByQuestion[qId] = [];
@@ -58,18 +62,24 @@ async function fetchFromDb(examId, lang) {
   }
 
   // 4. Assemble response shape
-  const translatedQuestions = qtRes.data.map(row => ({
+  const translatedQuestions = translatedQuestionRows.map(row => ({
     id: row.question_id,
     text_translated: row.text_translated,
     options: optionsByQuestion[row.question_id] || [],
   }));
 
-  const translatedSections = (stRes.data || []).map(row => ({
+  const translatedSections = translatedSectionRows.map(row => ({
     id: row.section_id,
     name_translated: row.name_translated,
   }));
 
-  return { questions: translatedQuestions, sections: translatedSections };
+  const translatedPassages = translatedPassageRows.map(row => ({
+    id: row.passage_id,
+    title_translated: row.title_translated || null,
+    content_translated: row.content_translated,
+  }));
+
+  return { questions: translatedQuestions, sections: translatedSections, passages: translatedPassages };
 }
 
 // ---------------------------------------------------------------------------
@@ -115,17 +125,17 @@ const getExamTranslations = async (req, res) => {
 // ---------------------------------------------------------------------------
 const saveExamTranslations = async (req, res) => {
   const { examId } = req.params;
-  const { lang, questions = [], sections = [] } = req.body;
+  const { lang, questions = [], sections = [], passages = [] } = req.body;
 
   if (!examId || !lang || lang === 'en') {
     return res.status(400).json({ success: false, error: 'examId and lang (non-english) are required' });
   }
-  if (!questions.length && !sections.length) {
+  if (!questions.length && !sections.length && !passages.length) {
     return res.status(400).json({ success: false, error: 'Nothing to save' });
   }
 
   try {
-    const now = new Date().toISOString();
+    const now = new Date();
 
     // Build upsert payloads
     const questionRows = questions
@@ -142,30 +152,48 @@ const saveExamTranslations = async (req, res) => {
       .filter(s => s.id && s.name_translated)
       .map(s => ({ section_id: s.id, lang, name_translated: s.name_translated, translated_at: now }));
 
-    // Upsert all three in parallel
-    const ops = [];
-    if (questionRows.length) {
-      ops.push(
-        supabase.from('question_translations')
-          .upsert(questionRows, { onConflict: 'question_id,lang' })
-      );
-    }
-    if (optionRows.length) {
-      ops.push(
-        supabase.from('option_translations')
-          .upsert(optionRows, { onConflict: 'option_id,lang' })
-      );
-    }
-    if (sectionRows.length) {
-      ops.push(
-        supabase.from('section_translations')
-          .upsert(sectionRows, { onConflict: 'section_id,lang' })
-      );
-    }
+    const passageRows = passages
+      .filter(p => p.id && p.content_translated)
+      .map(p => ({
+        passage_id: p.id,
+        lang,
+        title_translated: p.title_translated || null,
+        content_translated: p.content_translated,
+        translated_at: now,
+      }));
 
-    const results = await Promise.all(ops);
-    for (const { error } of results) {
-      if (error) throw new Error(error.message);
+    // Upsert all rows across all three tables in a single transaction so a partial
+    // failure doesn't leave translations half-saved (matches the old bulk-upsert's
+    // all-or-nothing behavior).
+    const ops = [
+      ...questionRows.map(row => prisma.question_translations.upsert({
+        where: { question_id_lang: { question_id: row.question_id, lang: row.lang } },
+        create: row,
+        update: { text_translated: row.text_translated, translated_at: row.translated_at },
+      })),
+      ...optionRows.map(row => prisma.option_translations.upsert({
+        where: { option_id_lang: { option_id: row.option_id, lang: row.lang } },
+        create: row,
+        update: { text_translated: row.text_translated, translated_at: row.translated_at },
+      })),
+      ...sectionRows.map(row => prisma.section_translations.upsert({
+        where: { section_id_lang: { section_id: row.section_id, lang: row.lang } },
+        create: row,
+        update: { name_translated: row.name_translated, translated_at: row.translated_at },
+      })),
+      ...passageRows.map(row => prisma.passage_translations.upsert({
+        where: { passage_id_lang: { passage_id: row.passage_id, lang: row.lang } },
+        create: row,
+        update: {
+          title_translated: row.title_translated,
+          content_translated: row.content_translated,
+          translated_at: row.translated_at,
+        },
+      })),
+    ];
+
+    if (ops.length) {
+      await prisma.$transaction(ops);
     }
 
     // Invalidate + rewrite Redis so next GET is instant
@@ -179,7 +207,12 @@ const saveExamTranslations = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      saved: { questions: questionRows.length, options: optionRows.length, sections: sectionRows.length },
+      saved: {
+        questions: questionRows.length,
+        options: optionRows.length,
+        sections: sectionRows.length,
+        passages: passageRows.length,
+      },
     });
   } catch (err) {
     logger.error('[examTranslations] POST error:', err.message);

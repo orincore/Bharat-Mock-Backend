@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 /**
@@ -12,80 +12,78 @@ const getSitemapData = async (req, res) => {
 
     // Fetch all data in parallel using optimized queries
     const [
-      blogsResult,
-      testSeriesResult,
-      categoriesResult,
-      subcategoriesResult,
-      examsResult,
-      pageContentResult
+      blogsRows,
+      testSeriesRows,
+      categoriesRows,
+      subcategoriesRows,
+      examsRows,
+      customTabsRows
     ] = await Promise.all([
       // Blogs - only published
-      supabase
-        .from('blogs')
-        .select('slug, updated_at')
-        .eq('is_published', true)
-        .order('updated_at', { ascending: false })
-        .limit(1000),
+      prisma.blogs.findMany({
+        where: { is_published: true },
+        select: { slug: true, updated_at: true },
+        orderBy: { updated_at: 'desc' },
+        take: 1000,
+      }),
 
       // Test series - only published
-      supabase
-        .from('test_series')
-        .select('slug, updated_at')
-        .eq('is_published', true)
-        .order('updated_at', { ascending: false })
-        .limit(1000),
+      prisma.test_series.findMany({
+        where: { is_published: true },
+        select: { slug: true, updated_at: true },
+        orderBy: { updated_at: 'desc' },
+        take: 1000,
+      }),
 
       // Categories
-      supabase
-        .from('exam_categories')
-        .select('slug, updated_at')
-        .or('is_active.eq.true,is_active.is.null')
-        .order('updated_at', { ascending: false })
-        .limit(500),
+      prisma.exam_categories.findMany({
+        where: { OR: [{ is_active: true }, { is_active: null }] },
+        select: { slug: true, updated_at: true },
+        orderBy: { updated_at: 'desc' },
+        take: 500,
+      }),
 
-      // Subcategories with category slug for URL construction
-      supabase
-        .from('exam_subcategories')
-        .select('id, slug, updated_at, show_mock_tests_tab, show_previous_papers_tab, exam_categories!inner(slug)')
-        .or('is_active.eq.true,is_active.is.null')
-        .order('updated_at', { ascending: false })
-        .limit(1000),
+      // Subcategories with category slug for URL construction (category_id not-null
+      // reproduces supabase's `exam_categories!inner(slug)` required-join semantics)
+      prisma.exam_subcategories.findMany({
+        where: {
+          OR: [{ is_active: true }, { is_active: null }],
+          category_id: { not: null },
+        },
+        select: {
+          id: true, slug: true, updated_at: true, show_mock_tests_tab: true, show_previous_papers_tab: true,
+          exam_categories: { select: { slug: true } },
+        },
+        orderBy: { updated_at: 'desc' },
+        take: 1000,
+      }),
 
       // Exams with PDF URLs - only fetch necessary fields
-      supabase
-        .from('exams')
-        .select('url_path, updated_at, pdf_url_en, pdf_url_hi, title')
-        .eq('is_published', true)
-        .is('deleted_at', null)
-        .not('url_path', 'is', null)
-        .order('updated_at', { ascending: false })
-        .limit(5000),
+      prisma.exams.findMany({
+        where: {
+          is_published: true,
+          deleted_at: null,
+          url_path: { not: null },
+        },
+        select: { url_path: true, updated_at: true, pdf_url_en: true, pdf_url_hi: true, title: true },
+        orderBy: { updated_at: 'desc' },
+        take: 5000,
+      }),
 
       // Custom tabs for subcategories
-      supabase
-        .from('subcategory_custom_tabs')
-        .select('subcategory_id, title, tab_key, updated_at')
-        .order('display_order', { ascending: true })
+      prisma.subcategory_custom_tabs.findMany({
+        select: { subcategory_id: true, title: true, tab_key: true, updated_at: true },
+        orderBy: { display_order: 'asc' },
+      }),
     ]);
 
-    // Check for errors
-    const results = [
-      { name: 'blogs', result: blogsResult },
-      { name: 'testSeries', result: testSeriesResult },
-      { name: 'categories', result: categoriesResult },
-      { name: 'subcategories', result: subcategoriesResult },
-      { name: 'exams', result: examsResult },
-      { name: 'customTabs', result: pageContentResult }
-    ];
-
-    for (const { name, result } of results) {
-      if (result.error) {
-        logger.error(`Sitemap ${name} query error:`, result.error);
-      }
-    }
+    const blogsResult = { data: blogsRows };
+    const testSeriesResult = { data: testSeriesRows };
+    const categoriesResult = { data: categoriesRows };
+    const examsResult = { data: examsRows };
 
     // Process subcategories - map to include category slug
-    const subcategories = (subcategoriesResult.data || []).map(sub => ({
+    const subcategories = subcategoriesRows.map(sub => ({
       id: sub.id,
       slug: sub.slug,
       category_slug: sub.exam_categories?.slug,
@@ -96,7 +94,7 @@ const getSitemapData = async (req, res) => {
 
     // Build custom tabs map by subcategory_id
     const customTabsMap = new Map();
-    for (const tab of (pageContentResult.data || [])) {
+    for (const tab of customTabsRows) {
       if (!customTabsMap.has(tab.subcategory_id)) {
         customTabsMap.set(tab.subcategory_id, []);
       }

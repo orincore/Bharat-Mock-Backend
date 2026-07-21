@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 const refundFields = ['title', 'last_updated', 'intro_body', 'contact_email', 'contact_url'];
@@ -9,56 +9,35 @@ const handleError = (res, message, error) => {
 };
 
 const getPolicyContent = async () => {
-  const { data, error } = await supabase
-    .from('refund_policy_content')
-    .select('*')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .single();
-
-  if (error && error.code !== 'PGRST116') {
-    throw error;
-  }
+  const data = await prisma.refund_policy_content.findFirst({
+    orderBy: { created_at: 'asc' },
+  });
 
   return data || null;
 };
 
 const getSectionsWithPoints = async (includeInactive = false) => {
-  let sectionsQuery = supabase
-    .from('refund_policy_sections')
-    .select('*')
-    .order('display_order', { ascending: true })
-    .order('created_at', { ascending: true });
+  const sections = await prisma.refund_policy_sections.findMany({
+    where: includeInactive ? {} : { is_active: true },
+    orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+  });
 
-  if (!includeInactive) {
-    sectionsQuery = sectionsQuery.eq('is_active', true);
-  }
-
-  const { data: sections, error: sectionsError } = await sectionsQuery;
-  if (sectionsError) throw sectionsError;
-
-  const sectionIds = (sections || []).map((section) => section.id);
+  const sectionIds = sections.map((section) => section.id);
   if (!sectionIds.length) {
     return [];
   }
 
-  let pointsQuery = supabase
-    .from('refund_policy_points')
-    .select('*')
-    .in('section_id', sectionIds)
-    .order('display_order', { ascending: true })
-    .order('created_at', { ascending: true });
-
-  if (!includeInactive) {
-    pointsQuery = pointsQuery.eq('is_active', true);
-  }
-
-  const { data: points, error: pointsError } = await pointsQuery;
-  if (pointsError) throw pointsError;
+  const points = await prisma.refund_policy_points.findMany({
+    where: {
+      section_id: { in: sectionIds },
+      ...(includeInactive ? {} : { is_active: true }),
+    },
+    orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+  });
 
   return sections.map((section) => ({
     ...section,
-    points: (points || []).filter((point) => point.section_id === section.id)
+    points: points.filter((point) => point.section_id === section.id)
   }));
 };
 
@@ -83,10 +62,10 @@ const sanitizeContentPayload = (payload = {}) => {
     return null;
   }
 
-  // last_updated is NOT NULL in DB — default to today if not provided
-  if (!sanitized.last_updated) {
-    sanitized.last_updated = new Date().toISOString().split('T')[0];
-  }
+  // last_updated is NOT NULL in DB — default to today if not provided.
+  // Prisma needs a real Date (or full ISO-8601 datetime string) for @db.Date columns —
+  // a bare "YYYY-MM-DD" string throws "premature end of input. Expected ISO-8601 DateTime."
+  sanitized.last_updated = sanitized.last_updated ? new Date(sanitized.last_updated) : new Date();
 
   sanitized.updated_at = new Date().toISOString();
   return sanitized;
@@ -124,46 +103,25 @@ const sanitizePoints = (points = []) => {
 
 const upsertRecords = async (table, items = []) => {
   if (!items.length) return [];
-  const results = [];
-  for (const item of items) {
+  return prisma.$transaction(items.map((item) => {
     const { id, ...fields } = item;
-    if (id) {
-      // Existing record — use explicit UPDATE
-      const { data, error } = await supabase
-        .from(table)
-        .update(fields)
-        .eq('id', id)
-        .select('*')
-        .single();
-      if (error) throw error;
-      if (data) results.push(data);
-    } else {
-      // No id — insert as new
-      const { data, error } = await supabase
-        .from(table)
-        .insert(fields)
-        .select('*')
-        .single();
-      if (error) throw error;
-      if (data) results.push(data);
-    }
-  }
-  return results;
+    // Existing record (id present) -> UPDATE; no id -> INSERT as new.
+    return id
+      ? prisma[table].update({ where: { id }, data: fields })
+      : prisma[table].create({ data: fields });
+  }));
 };
 
 const insertRecords = async (table, items = []) => {
   if (!items.length) return [];
   // Strip id field entirely for new records
   const cleaned = items.map(({ id, ...rest }) => rest);
-  const { data, error } = await supabase.from(table).insert(cleaned).select('*');
-  if (error) throw error;
-  return data || [];
+  return prisma.$transaction(cleaned.map((data) => prisma[table].create({ data })));
 };
 
 const deleteRecords = async (table, ids = []) => {
   if (!Array.isArray(ids) || !ids.length) return;
-  const { error } = await supabase.from(table).delete().in('id', ids);
-  if (error) throw error;
+  await prisma[table].deleteMany({ where: { id: { in: ids } } });
 };
 
 const publicRefundPolicy = async (req, res) => {
@@ -192,17 +150,14 @@ const adminUpsertRefundPolicy = async (req, res) => {
     }
 
     const existing = await getPolicyContent();
-    if (existing?.id) {
-      const { error } = await supabase
-        .from('refund_policy_content')
-        .update(payload)
-        .eq('id', existing.id);
-      if (error) return handleError(res, 'Failed to update Refund Policy content', error);
-    } else {
-      const { error } = await supabase
-        .from('refund_policy_content')
-        .insert(payload);
-      if (error) return handleError(res, 'Failed to create Refund Policy content', error);
+    try {
+      if (existing?.id) {
+        await prisma.refund_policy_content.update({ where: { id: existing.id }, data: payload });
+      } else {
+        await prisma.refund_policy_content.create({ data: payload });
+      }
+    } catch (error) {
+      return handleError(res, existing?.id ? 'Failed to update Refund Policy content' : 'Failed to create Refund Policy content', error);
     }
 
     const sectionsPayload = sanitizeSections(req.body.sections || []);

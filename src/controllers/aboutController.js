@@ -1,4 +1,5 @@
-const supabase = require('../config/database');
+const { randomUUID } = require('crypto');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 const aboutFields = [
@@ -24,34 +25,19 @@ const handleSupabaseError = (res, message, error) => {
 };
 
 const getAboutContent = async () => {
-  const { data, error } = await supabase
-    .from('about_page_content')
-    .select('*')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .single();
-
-  if (error && error.code !== 'PGRST116') {
-    throw error;
-  }
+  const data = await prisma.about_page_content.findFirst({
+    orderBy: { created_at: 'asc' },
+  });
 
   return data || null;
 };
 
 const fetchCollection = async (table, includeInactive = false) => {
-  let query = supabase
-    .from(table)
-    .select('*')
-    .order('display_order', { ascending: true })
-    .order('created_at', { ascending: true });
-
-  if (!includeInactive) {
-    query = query.eq('is_active', true);
-  }
-
-  const { data, error } = await query;
-  if (error) throw error;
-  return data || [];
+  const where = includeInactive ? {} : { is_active: true };
+  return prisma[table].findMany({
+    where,
+    orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+  });
 };
 
 const getAboutData = async (options = { includeInactive: false }) => {
@@ -128,14 +114,20 @@ const sanitizeCollection = (items = [], type = 'values') => {
 
 const privateUpsertCollection = async (table, items = []) => {
   if (!items.length) return;
-  const { error } = await supabase.from(table).upsert(items, { onConflict: 'id' });
-  if (error) throw error;
+  await prisma.$transaction(items.map((item) => {
+    const id = item.id || randomUUID();
+    const { id: _omit, ...data } = item;
+    return prisma[table].upsert({
+      where: { id },
+      create: { id, ...data },
+      update: data,
+    });
+  }));
 };
 
 const deleteCollectionItems = async (table, ids = []) => {
   if (!Array.isArray(ids) || !ids.length) return;
-  const { error } = await supabase.from(table).delete().in('id', ids);
-  if (error) throw error;
+  await prisma[table].deleteMany({ where: { id: { in: ids } } });
 };
 
 const publicAbout = async (req, res) => {
@@ -166,25 +158,19 @@ const adminUpsertAbout = async (req, res) => {
     const existing = await getAboutContent();
     let contentRecord;
 
-    if (existing?.id) {
-      const { data, error } = await supabase
-        .from('about_page_content')
-        .update(contentPayload)
-        .eq('id', existing.id)
-        .select('*')
-        .single();
-
-      if (error) return handleSupabaseError(res, 'Failed to update About content', error);
-      contentRecord = data;
-    } else {
-      const { data, error } = await supabase
-        .from('about_page_content')
-        .insert(contentPayload)
-        .select('*')
-        .single();
-
-      if (error) return handleSupabaseError(res, 'Failed to create About content', error);
-      contentRecord = data;
+    try {
+      if (existing?.id) {
+        contentRecord = await prisma.about_page_content.update({
+          where: { id: existing.id },
+          data: contentPayload,
+        });
+      } else {
+        contentRecord = await prisma.about_page_content.create({
+          data: contentPayload,
+        });
+      }
+    } catch (error) {
+      return handleSupabaseError(res, existing?.id ? 'Failed to update About content' : 'Failed to create About content', error);
     }
 
     const sanitizedValues = sanitizeCollection(req.body.values || [], 'values');

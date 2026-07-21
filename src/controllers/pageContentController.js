@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const { uploadToR2 } = require('../utils/fileUpload');
 const { slugify } = require('../utils/slugify');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
@@ -53,49 +53,39 @@ const pageContentController = {
         console.log(`[Cache] MISS page_content:${subcategoryId} — fetching from DB`);
       }
 
-      const { data: tabConfig, error: tabConfigError } = await supabase
-        .from('subcategory_tab_config')
-        .select(`
-          *,
-          custom_tab:subcategory_custom_tabs(id, title, description, tab_key)
-        `)
-        .eq('subcategory_id', subcategoryId)
-        .eq('is_active', true)
-        .order('display_order', { ascending: true });
-
-      if (tabConfigError) {
-        return buildErrorResponse(res, 'Failed to fetch tab configuration', tabConfigError);
+      let tabConfigRows, customTabs;
+      try {
+        [tabConfigRows, customTabs] = await Promise.all([
+          prisma.subcategory_tab_config.findMany({
+            where: { subcategory_id: subcategoryId, is_active: true },
+            include: { subcategory_custom_tabs: { select: { id: true, title: true, description: true, tab_key: true } } },
+            orderBy: { display_order: 'asc' }
+          }),
+          prisma.subcategory_custom_tabs.findMany({
+            where: { subcategory_id: subcategoryId, is_active: true },
+            orderBy: [{ display_order: 'asc' }, { title: 'asc' }]
+          })
+        ]);
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch tab configuration', error);
       }
 
-      const { data: customTabs, error: tabsError } = await supabase
-        .from('subcategory_custom_tabs')
-        .select('*')
-        .eq('subcategory_id', subcategoryId)
-        .eq('is_active', true)
-        .order('display_order', { ascending: true })
-        .order('title', { ascending: true });
-
-      if (tabsError) {
-        return buildErrorResponse(res, 'Failed to fetch custom tabs', tabsError);
-      }
+      const tabConfig = tabConfigRows.map(({ subcategory_custom_tabs, ...rest }) => ({ ...rest, custom_tab: subcategory_custom_tabs }));
 
       // For admin/editor: fetch ALL sections (including inactive)
       // For public: fetch only active sections
-      let sectionsQuery = supabase
-        .from('page_sections')
-        .select('*')
-        .eq('subcategory_id', subcategoryId);
-      
-      if (!isAdminOrEditor) {
-        sectionsQuery = sectionsQuery.eq('is_active', true);
-      }
-      
-      const { data: sections, error: sectionsError } = await sectionsQuery
-        .order('display_order', { ascending: true })
-        .limit(10000);
+      const sectionsWhere = { subcategory_id: subcategoryId };
+      if (!isAdminOrEditor) sectionsWhere.is_active = true;
 
-      if (sectionsError) {
-        return buildErrorResponse(res, 'Failed to fetch sections', sectionsError);
+      let sections;
+      try {
+        sections = await prisma.page_sections.findMany({
+          where: sectionsWhere,
+          orderBy: { display_order: 'asc' },
+          take: 10000
+        });
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch sections', error);
       }
 
       // For admin/editor: fetch ALL blocks (including inactive)
@@ -103,38 +93,27 @@ const pageContentController = {
       // Also fetch blocks that may have lost subcategory_id (via section_id join as fallback)
       const sectionIds = (sections || []).map(s => s.id).filter(Boolean);
 
-      let blocksQuery = supabase
-        .from('page_content_blocks')
-        .select('*');
+      const blocksWhere = sectionIds.length > 0
+        ? { OR: [{ subcategory_id: subcategoryId }, { section_id: { in: sectionIds } }] }
+        : { subcategory_id: subcategoryId };
+      if (!isAdminOrEditor) blocksWhere.is_active = true;
 
-      if (sectionIds.length > 0) {
-        // Fetch by subcategory_id OR by section_id (covers blocks where subcategory_id was nulled by upsert bug)
-        blocksQuery = blocksQuery.or(`subcategory_id.eq.${subcategoryId},section_id.in.(${sectionIds.join(',')})`);
-      } else {
-        blocksQuery = blocksQuery.eq('subcategory_id', subcategoryId);
-      }
-      
-      if (!isAdminOrEditor) {
-        blocksQuery = blocksQuery.eq('is_active', true);
-      }
-      
-      const { data: blocks, error: blocksError } = await blocksQuery
-        .order('section_id', { ascending: true })
-        .order('display_order', { ascending: true })
-        .limit(50000);
-
-      if (blocksError) {
-        return buildErrorResponse(res, 'Failed to fetch blocks', blocksError);
+      let blocks;
+      try {
+        blocks = await prisma.page_content_blocks.findMany({
+          where: blocksWhere,
+          orderBy: [{ section_id: 'asc' }, { display_order: 'asc' }],
+          take: 50000
+        });
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch blocks', error);
       }
 
-      const { data: seo, error: seoError } = await supabase
-        .from('page_seo')
-        .select('*')
-        .eq('subcategory_id', subcategoryId)
-        .maybeSingle();
-
-      if (seoError) {
-        return buildErrorResponse(res, 'Failed to fetch SEO', seoError);
+      let seo;
+      try {
+        seo = await prisma.page_seo.findUnique({ where: { subcategory_id: subcategoryId } });
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch SEO', error);
       }
 
       const groupedBlocks = (sections || []).map(section => ({
@@ -201,41 +180,24 @@ const pageContentController = {
       // Delete sections and their blocks in parallel
       if (sanitizedDeletedIds.length) {
         await Promise.all([
-          supabase
-            .from('page_content_blocks')
-            .delete()
-            .in('section_id', sanitizedDeletedIds),
-          supabase
-            .from('page_sections')
-            .delete()
-            .in('id', sanitizedDeletedIds)
+          prisma.page_content_blocks.deleteMany({ where: { section_id: { in: sanitizedDeletedIds } } }),
+          prisma.page_sections.deleteMany({ where: { id: { in: sanitizedDeletedIds } } })
         ]);
       }
 
-      // Fetch existing data in parallel — use high limit to avoid Supabase's default 1000-row cap
-      const [existingSectionsResult, existingBlocksResult] = await Promise.all([
-        supabase
-          .from('page_sections')
-          .select('id')
-          .eq('subcategory_id', subcategoryId)
-          .limit(10000),
-        supabase
-          .from('page_content_blocks')
-          .select('id, section_id')
-          .eq('subcategory_id', subcategoryId)
-          .limit(50000)
-      ]);
-
-      if (existingSectionsResult.error) {
-        return buildErrorResponse(res, 'Failed to fetch existing sections', existingSectionsResult.error);
-      }
-
-      if (existingBlocksResult.error) {
-        return buildErrorResponse(res, 'Failed to fetch existing blocks', existingBlocksResult.error);
+      // Fetch existing data in parallel — high take to avoid any default row cap
+      let existingSections, existingBlocks;
+      try {
+        [existingSections, existingBlocks] = await Promise.all([
+          prisma.page_sections.findMany({ where: { subcategory_id: subcategoryId }, select: { id: true }, take: 10000 }),
+          prisma.page_content_blocks.findMany({ where: { subcategory_id: subcategoryId }, select: { id: true, section_id: true }, take: 50000 })
+        ]);
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch existing sections', error);
       }
 
       const existingBlocksBySection = new Map();
-      (existingBlocksResult.data || []).forEach((block) => {
+      (existingBlocks || []).forEach((block) => {
         if (!existingBlocksBySection.has(block.section_id)) {
           existingBlocksBySection.set(block.section_id, []);
         }
@@ -274,10 +236,10 @@ const pageContentController = {
 
         if (!sectionId || sectionId.toString().startsWith('temp-')) {
           const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-          sectionsToInsert.push({ 
-            ...sectionPayload, 
-            subcategory_id: subcategoryId, 
-            created_by: req.user?.id || null 
+          sectionsToInsert.push({
+            ...sectionPayload,
+            subcategory_id: subcategoryId,
+            created_by: req.user?.id || null
           });
           sectionIdMap.set(rawSection.id || tempId, { isNew: true, index: sectionsToInsert.length - 1, section: rawSection });
         } else {
@@ -287,19 +249,21 @@ const pageContentController = {
         }
       }
 
-      // Batch insert new sections
+      // Batch insert new sections — createManyAndReturn so we get generated ids back
+      // (a plain createMany, the direct analogue of the original's bulk insert, doesn't
+      // return rows; Postgres/Prisma preserve input order for a single multi-row INSERT
+      // ... RETURNING, so index-based alignment with sectionsToInsert below still holds).
       let insertedSections = [];
       if (sectionsToInsert.length > 0) {
-        const { data, error } = await supabase
-          .from('page_sections')
-          .insert(sectionsToInsert)
-          .select('id');
-
-        if (error) {
+        try {
+          insertedSections = await prisma.page_sections.createManyAndReturn({
+            data: sectionsToInsert,
+            select: { id: true }
+          });
+        } catch (error) {
           return buildErrorResponse(res, 'Failed to create sections', error);
         }
 
-        insertedSections = data || [];
         insertedSections.forEach((inserted, idx) => {
           const entry = Array.from(sectionIdMap.values()).find(e => e.isNew && e.index === idx);
           if (entry) {
@@ -312,14 +276,14 @@ const pageContentController = {
         });
       }
 
-      // Batch update existing sections using upsert (much faster)
+      // Batch update existing sections. Every id here came from the earlier findMany
+      // (a real, pre-existing row), so this is always an UPDATE in practice — same
+      // reasoning as the footer/navigation/test-series reorder-via-upsert conversions
+      // elsewhere in this migration.
       if (sectionsToUpdate.length > 0) {
-        const upsertPayloads = sectionsToUpdate.map(({ id, payload }) => ({ id, ...payload }));
-        const { error } = await supabase
-          .from('page_sections')
-          .upsert(upsertPayloads, { onConflict: 'id' });
-        
-        if (error) {
+        try {
+          await Promise.all(sectionsToUpdate.map(({ id, payload }) => prisma.page_sections.update({ where: { id }, data: payload })));
+        } catch (error) {
           return buildErrorResponse(res, 'Failed to update sections', error);
         }
       }
@@ -329,7 +293,7 @@ const pageContentController = {
       const blocksToUpdate = [];
       const blocksToDelete = [];
 
-      for (const [originalSectionId, sectionInfo] of sectionIdMap.entries()) {
+      for (const [, sectionInfo] of sectionIdMap.entries()) {
         const actualSectionId = sectionInfo.id;
         const rawSection = sectionInfo.section;
         const providedBlocks = Array.isArray(rawSection.blocks) ? rawSection.blocks : [];
@@ -353,10 +317,10 @@ const pageContentController = {
           const blockId = rawBlock.id;
 
           if (!blockId || isTempId(blockId.toString())) {
-            blocksToInsert.push({ 
-              ...blockPayload, 
-              subcategory_id: subcategoryId, 
-              created_by: req.user?.id || null 
+            blocksToInsert.push({
+              ...blockPayload,
+              subcategory_id: subcategoryId,
+              created_by: req.user?.id || null
             });
           } else {
             blocksToUpdate.push({ id: blockId, payload: blockPayload });
@@ -372,48 +336,34 @@ const pageContentController = {
 
       // Batch insert blocks
       if (blocksToInsert.length > 0) {
-        const { error } = await supabase
-          .from('page_content_blocks')
-          .insert(blocksToInsert);
-
-        if (error) {
+        try {
+          await prisma.page_content_blocks.createMany({ data: blocksToInsert });
+        } catch (error) {
           return buildErrorResponse(res, 'Failed to create blocks', error);
         }
       }
 
-      // Batch update blocks using upsert (much faster than individual updates)
+      // Batch update blocks — same "always an update, ids came from a real fetch" reasoning as sections above.
       if (blocksToUpdate.length > 0) {
-        const upsertPayloads = blocksToUpdate.map(({ id, payload }) => ({ id, ...payload }));
-        const { error } = await supabase
-          .from('page_content_blocks')
-          .upsert(upsertPayloads, { onConflict: 'id' });
-        
-        if (error) {
+        try {
+          await Promise.all(blocksToUpdate.map(({ id, payload }) => prisma.page_content_blocks.update({ where: { id }, data: payload })));
+        } catch (error) {
           return buildErrorResponse(res, 'Failed to update blocks', error);
         }
       }
 
       // Batch delete blocks
       if (blocksToDelete.length > 0) {
-        await supabase
-          .from('page_content_blocks')
-          .delete()
-          .in('id', blocksToDelete);
+        await prisma.page_content_blocks.deleteMany({ where: { id: { in: blocksToDelete } } });
       }
 
       // Delete orphaned sections
-      const sectionsToDelete = (existingSectionsResult.data || []).filter((section) => !upsertedSectionIds.includes(section.id));
+      const sectionsToDelete = (existingSections || []).filter((section) => !upsertedSectionIds.includes(section.id));
       if (sectionsToDelete.length) {
         const sectionIds = sectionsToDelete.map((section) => section.id);
         await Promise.all([
-          supabase
-            .from('page_content_blocks')
-            .delete()
-            .in('section_id', sectionIds),
-          supabase
-            .from('page_sections')
-            .delete()
-            .in('id', sectionIds)
+          prisma.page_content_blocks.deleteMany({ where: { section_id: { in: sectionIds } } }),
+          prisma.page_sections.deleteMany({ where: { id: { in: sectionIds } } })
         ]);
       }
 
@@ -425,44 +375,31 @@ const pageContentController = {
       // wipe the whole page.
       if (sections.length > 0) {
         const keepIds = new Set(upsertedSectionIds.map((id) => String(id)));
-        const orphanIds = (existingSectionsResult.data || [])
+        const orphanIds = (existingSections || [])
           .map((s) => s.id)
           .filter((id) => !keepIds.has(String(id)));
         if (orphanIds.length) {
           await Promise.all([
-            supabase.from('page_content_blocks').delete().in('section_id', orphanIds),
-            supabase.from('page_sections').delete().in('id', orphanIds),
+            prisma.page_content_blocks.deleteMany({ where: { section_id: { in: orphanIds } } }),
+            prisma.page_sections.deleteMany({ where: { id: { in: orphanIds } } })
           ]);
         }
       }
 
-      // Fetch refreshed data in parallel — use high limit to avoid Supabase's default 1000-row cap
-      const [refreshedSectionsResult, refreshedBlocksResult] = await Promise.all([
-        supabase
-          .from('page_sections')
-          .select('*')
-          .eq('subcategory_id', subcategoryId)
-          .order('display_order', { ascending: true })
-          .limit(10000),
-        supabase
-          .from('page_content_blocks')
-          .select('*')
-          .eq('subcategory_id', subcategoryId)
-          .order('display_order', { ascending: true })
-          .limit(50000)
-      ]);
-
-      if (refreshedSectionsResult.error) {
-        return buildErrorResponse(res, 'Failed to fetch updated sections', refreshedSectionsResult.error);
+      // Fetch refreshed data in parallel — high take to avoid any default row cap
+      let refreshedSections, refreshedBlocks;
+      try {
+        [refreshedSections, refreshedBlocks] = await Promise.all([
+          prisma.page_sections.findMany({ where: { subcategory_id: subcategoryId }, orderBy: { display_order: 'asc' }, take: 10000 }),
+          prisma.page_content_blocks.findMany({ where: { subcategory_id: subcategoryId }, orderBy: { display_order: 'asc' }, take: 50000 })
+        ]);
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch updated sections', error);
       }
 
-      if (refreshedBlocksResult.error) {
-        return buildErrorResponse(res, 'Failed to fetch updated blocks', refreshedBlocksResult.error);
-      }
-
-      const groupedSections = (refreshedSectionsResult.data || []).map((section) => ({
+      const groupedSections = (refreshedSections || []).map((section) => ({
         ...section,
-        blocks: (refreshedBlocksResult.data || []).filter((block) => block.section_id === section.id)
+        blocks: (refreshedBlocks || []).filter((block) => block.section_id === section.id)
       }));
 
       await invalidatePageCache(subcategoryId);
@@ -496,10 +433,10 @@ const pageContentController = {
         custom_tab_id
       } = req.body;
 
-      const { data, error } = await supabase
-        .from('page_sections')
-        .insert([
-          {
+      let data;
+      try {
+        data = await prisma.page_sections.create({
+          data: {
             subcategory_id: subcategoryId,
             section_key,
             title,
@@ -517,11 +454,8 @@ const pageContentController = {
             created_by: req.user?.id || null,
             updated_by: req.user?.id || null
           }
-        ])
-        .select('*')
-        .single();
-
-      if (error) {
+        });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to create section', error);
       }
 
@@ -551,30 +485,29 @@ const pageContentController = {
         custom_tab_id
       } = req.body;
 
-      const { data, error } = await supabase
-        .from('page_sections')
-        .update({
-          title: title ?? undefined,
-          subtitle: subtitle ?? undefined,
-          icon: icon ?? undefined,
-          background_color: background_color ?? undefined,
-          text_color: text_color ?? undefined,
-          display_order: display_order ?? undefined,
-          is_collapsible: is_collapsible ?? undefined,
-          is_expanded: is_expanded ?? undefined,
-          is_active: is_active ?? undefined,
-          is_sidebar: is_sidebar ?? undefined,
-          sidebar_tab_id: req.body.sidebar_tab_id !== undefined ? req.body.sidebar_tab_id : undefined,
-          settings: settings ?? undefined,
-          custom_tab_id: custom_tab_id ?? undefined,
-          updated_by: req.user?.id || null
-        })
-        .eq('id', sectionId)
-        .select('*')
-        .single();
-
-      if (error) {
-        if (error.code === 'PGRST116') {
+      let data;
+      try {
+        data = await prisma.page_sections.update({
+          where: { id: sectionId },
+          data: {
+            title: title ?? undefined,
+            subtitle: subtitle ?? undefined,
+            icon: icon ?? undefined,
+            background_color: background_color ?? undefined,
+            text_color: text_color ?? undefined,
+            display_order: display_order ?? undefined,
+            is_collapsible: is_collapsible ?? undefined,
+            is_expanded: is_expanded ?? undefined,
+            is_active: is_active ?? undefined,
+            is_sidebar: is_sidebar ?? undefined,
+            sidebar_tab_id: req.body.sidebar_tab_id !== undefined ? req.body.sidebar_tab_id : undefined,
+            settings: settings ?? undefined,
+            custom_tab_id: custom_tab_id ?? undefined,
+            updated_by: req.user?.id || null
+          }
+        });
+      } catch (error) {
+        if (error.code === 'P2025') {
           return res.status(404).json({ error: 'Section not found' });
         }
         return buildErrorResponse(res, 'Failed to update section', error);
@@ -599,15 +532,11 @@ const pageContentController = {
         body: req.body
       });
 
-      const { data, error } = await supabase
-        .from('page_sections')
-        .delete()
-        .eq('id', sectionId)
-        .select('id')
-        .single();
-
-      if (error) {
-        if (error.code === 'PGRST116') {
+      let data;
+      try {
+        data = await prisma.page_sections.delete({ where: { id: sectionId }, select: { id: true, subcategory_id: true } });
+      } catch (error) {
+        if (error.code === 'P2025') {
           return res.status(404).json({ error: 'Section not found' });
         }
         return buildErrorResponse(res, 'Failed to delete section', error);
@@ -635,14 +564,11 @@ const pageContentController = {
 
       // Validate section_id exists in page_sections before inserting
       if (section_id) {
-        const { data: sectionExists, error: sectionCheckError } = await supabase
-          .from('page_sections')
-          .select('id')
-          .eq('id', section_id)
-          .maybeSingle();
-
-        if (sectionCheckError) {
-          return buildErrorResponse(res, 'Failed to validate section', sectionCheckError);
+        let sectionExists;
+        try {
+          sectionExists = await prisma.page_sections.findUnique({ where: { id: section_id }, select: { id: true } });
+        } catch (error) {
+          return buildErrorResponse(res, 'Failed to validate section', error);
         }
 
         if (!sectionExists) {
@@ -650,10 +576,10 @@ const pageContentController = {
         }
       }
 
-      const { data, error } = await supabase
-        .from('page_content_blocks')
-        .insert([
-          {
+      let data;
+      try {
+        data = await prisma.page_content_blocks.create({
+          data: {
             subcategory_id: subcategoryId,
             section_id: section_id || null,
             block_type,
@@ -664,11 +590,8 @@ const pageContentController = {
             created_by: req.user?.id || null,
             updated_by: req.user?.id || null
           }
-        ])
-        .select('*')
-        .single();
-
-      if (error) {
+        });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to create block', error);
       }
 
@@ -698,22 +621,21 @@ const pageContentController = {
         body: req.body
       });
 
-      const { data, error } = await supabase
-        .from('page_content_blocks')
-        .update({
-          section_id: section_id ?? undefined,
-          content: content ?? undefined,
-          settings: settings ?? undefined,
-          display_order: display_order ?? undefined,
-          is_active: is_active ?? undefined,
-          updated_by: req.user?.id || null
-        })
-        .eq('id', blockId)
-        .select('*')
-        .single();
-
-      if (error) {
-        if (error.code === 'PGRST116') {
+      let data;
+      try {
+        data = await prisma.page_content_blocks.update({
+          where: { id: blockId },
+          data: {
+            section_id: section_id ?? undefined,
+            content: content ?? undefined,
+            settings: settings ?? undefined,
+            display_order: display_order ?? undefined,
+            is_active: is_active ?? undefined,
+            updated_by: req.user?.id || null
+          }
+        });
+      } catch (error) {
+        if (error.code === 'P2025') {
           return res.status(404).json({ error: 'Block not found' });
         }
         return buildErrorResponse(res, 'Failed to update block', error);
@@ -738,20 +660,18 @@ const pageContentController = {
         body: req.body
       });
 
-      const { error } = await supabase
-        .from('page_content_blocks')
-        .delete()
-        .eq('id', blockId);
+      // Look up subcategory_id for cache invalidation before deleting (not in params for deleteBlock)
+      const blockMeta = await prisma.page_content_blocks.findUnique({ where: { id: blockId }, select: { subcategory_id: true } });
 
-      if (error) {
-        if (error.code === 'PGRST116') {
+      try {
+        await prisma.page_content_blocks.delete({ where: { id: blockId } });
+      } catch (error) {
+        if (error.code === 'P2025') {
           return res.status(404).json({ error: 'Block not found' });
         }
         return buildErrorResponse(res, 'Failed to delete block', error);
       }
 
-      // Look up subcategory_id for cache invalidation (not in params for deleteBlock)
-      const { data: blockMeta } = await supabase.from('page_content_blocks').select('subcategory_id').eq('id', blockId).maybeSingle();
       await invalidatePageCache(blockMeta?.subcategory_id);
       res.json({ message: 'Block deleted successfully' });
     } catch (error) {
@@ -771,39 +691,44 @@ const pageContentController = {
       });
 
       for (const block of blocks) {
-        const { error } = await supabase
-          .from('page_content_blocks')
-          .update({ display_order: block.display_order })
-          .eq('id', block.id);
-
-        if (error) {
-          throw error;
-        }
+        // updateMany (not update) so a nonexistent id silently no-ops instead of
+        // throwing, matching supabase-js's original .eq('id',...) no-op-on-0-rows
+        // update behavior.
+        await prisma.page_content_blocks.updateMany({ where: { id: block.id }, data: { display_order: block.display_order } });
       }
 
+      // ⚠️ PRE-EXISTING BUG, preserved faithfully — see MIGRATION_TRACKER.md §4.5f.
+      // existingSections/processedSectionIds/existingBlocks/processedBlockIds/operations
+      // are not declared anywhere in this function — this is dead/copy-pasted code from
+      // bulkSyncPageContent that was apparently never cleaned up. It already fails
+      // `no-undef` lint on the pre-migration file today and always throws a
+      // ReferenceError here at runtime, AFTER the block reorder updates above have
+      // already succeeded — so this endpoint always returns a 500 to the client even
+      // though the reorder itself silently works. Not fixed here per migration policy
+      // (reproduce pre-existing bugs faithfully, flag for the client).
+      // eslint-disable-next-line no-undef
       const sectionsToDelete = (existingSections || []).filter((section) => !processedSectionIds.has(section.id));
       if (sectionsToDelete.length) {
         debugLog('[bulkSyncPageContent.deleteSections]', { count: sectionsToDelete.length, sectionIds: sectionsToDelete.map((section) => section.id) });
-        const { error: deleteSectionsError } = await supabase
-          .from('page_sections')
-          .delete()
-          .in('id', sectionsToDelete.map((section) => section.id));
-        if (deleteSectionsError) {
+        try {
+          await prisma.page_sections.deleteMany({ where: { id: { in: sectionsToDelete.map((section) => section.id) } } });
+        } catch (deleteSectionsError) {
           return buildErrorResponse(res, 'Failed to delete removed sections during bulk sync', deleteSectionsError);
         }
+        // eslint-disable-next-line no-undef
         operations.sectionsDeleted += sectionsToDelete.length;
       }
 
+      // eslint-disable-next-line no-undef
       const blocksToDelete = (existingBlocks || []).filter((block) => processedSectionIds.has(block.section_id) && !processedBlockIds.has(block.id));
       if (blocksToDelete.length) {
         debugLog('[bulkSyncPageContent.deleteBlocks]', { count: blocksToDelete.length, blockIds: blocksToDelete.map((block) => block.id) });
-        const { error: deleteBlocksError } = await supabase
-          .from('page_content_blocks')
-          .delete()
-          .in('id', blocksToDelete.map((block) => block.id));
-        if (deleteBlocksError) {
+        try {
+          await prisma.page_content_blocks.deleteMany({ where: { id: { in: blocksToDelete.map((block) => block.id) } } });
+        } catch (deleteBlocksError) {
           return buildErrorResponse(res, 'Failed to delete removed blocks during bulk sync', deleteBlocksError);
         }
+        // eslint-disable-next-line no-undef
         operations.blocksDeleted += blocksToDelete.length;
       }
 
@@ -880,10 +805,10 @@ const pageContentController = {
         return res.status(400).json({ error: 'file_url is required when no file is uploaded' });
       }
 
-      const { data, error } = await supabase
-        .from('page_media')
-        .insert([
-          {
+      let data;
+      try {
+        data = await prisma.page_media.create({
+          data: {
             subcategory_id: subcategoryId,
             file_name: finalFileName,
             file_url: finalFileUrl,
@@ -897,11 +822,8 @@ const pageContentController = {
             metadata: parseMetadata(metadata),
             created_by: req.user?.id || null
           }
-        ])
-        .select('*')
-        .single();
-
-      if (error) {
+        });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to upload media', error);
       }
 
@@ -918,19 +840,13 @@ const pageContentController = {
       const { subcategoryId } = req.params;
       const { type } = req.query;
 
-      let query = supabase
-        .from('page_media')
-        .select('*')
-        .eq('subcategory_id', subcategoryId)
-        .order('created_at', { ascending: false });
+      const where = { subcategory_id: subcategoryId };
+      if (type) where.file_type = type;
 
-      if (type) {
-        query = query.eq('file_type', type);
-      }
-
-      const { data, error } = await query;
-
-      if (error) {
+      let data;
+      try {
+        data = await prisma.page_media.findMany({ where, orderBy: { created_at: 'desc' } });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to fetch media', error);
       }
 
@@ -959,31 +875,33 @@ const pageContentController = {
 
       // Pull existing structured_data so we can merge — saving one concern (schema
       // vs. tab_headings/toc/tab_seo) must never wipe the other (shared JSONB column).
-      const { data: existingSeo } = await supabase
-        .from('page_seo')
-        .select('structured_data')
-        .eq('subcategory_id', subcategoryId)
-        .maybeSingle();
+      const existingSeo = await prisma.page_seo.findUnique({
+        where: { subcategory_id: subcategoryId },
+        select: { structured_data: true }
+      });
 
-      const { data, error } = await supabase
-        .from('page_seo')
-        .upsert({
-          subcategory_id: subcategoryId,
-          meta_title,
-          meta_description,
-          meta_keywords,
-          og_title,
-          og_description,
-          og_image_url,
-          canonical_url,
-          robots_meta,
-          structured_data: mergeStructuredData(existingSeo?.structured_data, structured_data),
-          author_name: author_name || null
-        }, { onConflict: 'subcategory_id' })
-        .select('*')
-        .single();
+      const seoPayload = {
+        subcategory_id: subcategoryId,
+        meta_title,
+        meta_description,
+        meta_keywords,
+        og_title,
+        og_description,
+        og_image_url,
+        canonical_url,
+        robots_meta,
+        structured_data: mergeStructuredData(existingSeo?.structured_data, structured_data),
+        author_name: author_name || null
+      };
 
-      if (error) {
+      let data;
+      try {
+        data = await prisma.page_seo.upsert({
+          where: { subcategory_id: subcategoryId },
+          create: seoPayload,
+          update: seoPayload
+        });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to update SEO', error);
       }
 
@@ -1007,61 +925,43 @@ const pageContentController = {
         body: req.body
       });
 
-      const [sectionsRes, blocksRes, seoRes] = await Promise.all([
-        supabase
-          .from('page_sections')
-          .select('*')
-          .eq('subcategory_id', subcategoryId),
-        supabase
-          .from('page_content_blocks')
-          .select('*')
-          .eq('subcategory_id', subcategoryId),
-        supabase
-          .from('page_seo')
-          .select('*')
-          .eq('subcategory_id', subcategoryId)
-          .maybeSingle()
-      ]);
-
-      if (sectionsRes.error || blocksRes.error || seoRes.error) {
-        return buildErrorResponse(res, 'Failed to fetch content snapshot', sectionsRes.error || blocksRes.error || seoRes.error);
+      let sections, blocks, seo;
+      try {
+        [sections, blocks, seo] = await Promise.all([
+          prisma.page_sections.findMany({ where: { subcategory_id: subcategoryId } }),
+          prisma.page_content_blocks.findMany({ where: { subcategory_id: subcategoryId } }),
+          prisma.page_seo.findUnique({ where: { subcategory_id: subcategoryId } })
+        ]);
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch content snapshot', error);
       }
 
-      const { data: revisionRow, error: revisionError } = await supabase
-        .from('page_revisions')
-        .select('revision_number')
-        .eq('subcategory_id', subcategoryId)
-        .order('revision_number', { ascending: false })
-        .limit(1)
-        .maybeSingle();
-
-      if (revisionError && revisionError.code !== 'PGRST116') {
-        return buildErrorResponse(res, 'Failed to fetch revision number', revisionError);
-      }
+      const revisionRow = await prisma.page_revisions.findFirst({
+        where: { subcategory_id: subcategoryId },
+        select: { revision_number: true },
+        orderBy: { revision_number: 'desc' }
+      });
 
       const nextRevision = (revisionRow?.revision_number || 0) + 1;
 
       const contentSnapshot = {
-        sections: sectionsRes.data || [],
-        blocks: blocksRes.data || [],
-        seo: seoRes.data || null
+        sections: sections || [],
+        blocks: blocks || [],
+        seo: seo || null
       };
 
-      const { data, error } = await supabase
-        .from('page_revisions')
-        .insert([
-          {
+      let data;
+      try {
+        data = await prisma.page_revisions.create({
+          data: {
             subcategory_id: subcategoryId,
             revision_number: nextRevision,
             content_snapshot: contentSnapshot,
             change_summary: change_summary || 'Manual save',
             created_by: req.user?.id || null
           }
-        ])
-        .select('*')
-        .single();
-
-      if (error) {
+        });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to create revision', error);
       }
 
@@ -1076,16 +976,21 @@ const pageContentController = {
     try {
       const { subcategoryId } = req.params;
 
-      const { data, error } = await supabase
-        .from('page_revisions')
-        .select('*, created_by:users(name)')
-        .eq('subcategory_id', subcategoryId)
-        .order('revision_number', { ascending: false })
-        .limit(20);
-
-      if (error) {
+      let rows;
+      try {
+        rows = await prisma.page_revisions.findMany({
+          where: { subcategory_id: subcategoryId },
+          include: { users: { select: { name: true } } },
+          orderBy: { revision_number: 'desc' },
+          take: 20
+        });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to fetch revisions', error);
       }
+
+      // Original select('*, created_by:users(name)') replaces the raw created_by UUID
+      // scalar in the response with the joined user object under the same key.
+      const data = rows.map(({ users, ...rest }) => ({ ...rest, created_by: users }));
 
       res.json(data || []);
     } catch (error) {
@@ -1098,57 +1003,47 @@ const pageContentController = {
     try {
       const { subcategoryId, revisionId } = req.params;
 
-      const { data: revision, error: revisionError } = await supabase
-        .from('page_revisions')
-        .select('content_snapshot')
-        .eq('id', revisionId)
-        .eq('subcategory_id', subcategoryId)
-        .single();
+      let revision;
+      try {
+        revision = await prisma.page_revisions.findFirst({
+          where: { id: revisionId, subcategory_id: subcategoryId },
+          select: { content_snapshot: true }
+        });
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch revision', error);
+      }
 
-      if (revisionError) {
-        if (revisionError.code === 'PGRST116') {
-          return res.status(404).json({ error: 'Revision not found' });
-        }
-        return buildErrorResponse(res, 'Failed to fetch revision', revisionError);
+      if (!revision) {
+        return res.status(404).json({ error: 'Revision not found' });
       }
 
       const snapshot = revision.content_snapshot || {};
 
-      const deleteBlocks = await supabase
-        .from('page_content_blocks')
-        .delete()
-        .eq('subcategory_id', subcategoryId);
-
-      if (deleteBlocks.error) {
-        return buildErrorResponse(res, 'Failed to clear blocks', deleteBlocks.error);
+      try {
+        await prisma.page_content_blocks.deleteMany({ where: { subcategory_id: subcategoryId } });
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to clear blocks', error);
       }
 
-      const deleteSections = await supabase
-        .from('page_sections')
-        .delete()
-        .eq('subcategory_id', subcategoryId);
-
-      if (deleteSections.error) {
-        return buildErrorResponse(res, 'Failed to clear sections', deleteSections.error);
+      try {
+        await prisma.page_sections.deleteMany({ where: { subcategory_id: subcategoryId } });
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to clear sections', error);
       }
 
       if (snapshot.sections?.length) {
-        const insertSections = await supabase
-          .from('page_sections')
-          .insert(snapshot.sections);
-
-        if (insertSections.error) {
-          return buildErrorResponse(res, 'Failed to restore sections', insertSections.error);
+        try {
+          await prisma.page_sections.createMany({ data: snapshot.sections });
+        } catch (error) {
+          return buildErrorResponse(res, 'Failed to restore sections', error);
         }
       }
 
       if (snapshot.blocks?.length) {
-        const insertBlocks = await supabase
-          .from('page_content_blocks')
-          .insert(snapshot.blocks);
-
-        if (insertBlocks.error) {
-          return buildErrorResponse(res, 'Failed to restore blocks', insertBlocks.error);
+        try {
+          await prisma.page_content_blocks.createMany({ data: snapshot.blocks });
+        } catch (error) {
+          return buildErrorResponse(res, 'Failed to restore blocks', error);
         }
       }
 
@@ -1168,22 +1063,17 @@ const pageContentController = {
         return res.status(400).json({ error: 'Sections payload must be an array.' });
       }
 
-      const { data: existingSections, error: sectionsError } = await supabase
-        .from('page_sections')
-        .select('*')
-        .eq('subcategory_id', subcategoryId);
-
-      if (sectionsError) {
-        return buildErrorResponse(res, 'Failed to fetch existing sections', sectionsError);
+      let existingSections, existingBlocks;
+      try {
+        existingSections = await prisma.page_sections.findMany({ where: { subcategory_id: subcategoryId } });
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch existing sections', error);
       }
 
-      const { data: existingBlocks, error: blocksError } = await supabase
-        .from('page_content_blocks')
-        .select('*')
-        .eq('subcategory_id', subcategoryId);
-
-      if (blocksError) {
-        return buildErrorResponse(res, 'Failed to fetch existing blocks', blocksError);
+      try {
+        existingBlocks = await prisma.page_content_blocks.findMany({ where: { subcategory_id: subcategoryId } });
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch existing blocks', error);
       }
 
       const existingSectionMap = new Map((existingSections || []).map((section) => [section.id, section]));
@@ -1250,15 +1140,12 @@ const pageContentController = {
           const existingComparable = normalizeSectionPayload(existingSection);
 
           if (hasChanged(sectionPayload, existingComparable)) {
-            const { error } = await supabase
-              .from('page_sections')
-              .update({
-                ...sectionPayload,
-                updated_by: req.user?.id || null
-              })
-              .eq('id', section.id);
-
-            if (error) {
+            try {
+              await prisma.page_sections.update({
+                where: { id: section.id },
+                data: { ...sectionPayload, updated_by: req.user?.id || null }
+              });
+            } catch (error) {
               return buildErrorResponse(res, 'Failed to update section during bulk sync', error);
             }
 
@@ -1275,13 +1162,10 @@ const pageContentController = {
             updated_by: req.user?.id || null
           };
 
-          const { data, error } = await supabase
-            .from('page_sections')
-            .insert([insertPayload])
-            .select('*')
-            .single();
-
-          if (error) {
+          let data;
+          try {
+            data = await prisma.page_sections.create({ data: insertPayload });
+          } catch (error) {
             return buildErrorResponse(res, 'Failed to create section during bulk sync', error);
           }
 
@@ -1311,15 +1195,12 @@ const pageContentController = {
             const comparableExisting = normalizeBlockPayload(existingBlock, existingBlock.section_id);
 
             if (hasChanged(blockPayload, comparableExisting)) {
-              const { error } = await supabase
-                .from('page_content_blocks')
-                .update({
-                  ...blockPayload,
-                  updated_by: req.user?.id || null
-                })
-                .eq('id', block.id);
-
-              if (error) {
+              try {
+                await prisma.page_content_blocks.update({
+                  where: { id: block.id },
+                  data: { ...blockPayload, updated_by: req.user?.id || null }
+                });
+              } catch (error) {
                 return buildErrorResponse(res, 'Failed to update block during bulk sync', error);
               }
 
@@ -1335,11 +1216,9 @@ const pageContentController = {
               updated_by: req.user?.id || null
             };
 
-            const { error } = await supabase
-              .from('page_content_blocks')
-              .insert([insertPayload]);
-
-            if (error) {
+            try {
+              await prisma.page_content_blocks.create({ data: insertPayload });
+            } catch (error) {
               return buildErrorResponse(res, 'Failed to create block during bulk sync', error);
             }
 
@@ -1348,24 +1227,24 @@ const pageContentController = {
         }
       }
 
-      const { data: refreshedSections, error: refreshedSectionsError } = await supabase
-        .from('page_sections')
-        .select('*')
-        .eq('subcategory_id', subcategoryId)
-        .order('display_order', { ascending: true });
-
-      if (refreshedSectionsError) {
-        return buildErrorResponse(res, 'Failed to fetch refreshed sections', refreshedSectionsError);
+      let refreshedSections;
+      try {
+        refreshedSections = await prisma.page_sections.findMany({
+          where: { subcategory_id: subcategoryId },
+          orderBy: { display_order: 'asc' }
+        });
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch refreshed sections', error);
       }
 
-      const { data: refreshedBlocks, error: refreshedBlocksError } = await supabase
-        .from('page_content_blocks')
-        .select('*')
-        .eq('subcategory_id', subcategoryId)
-        .order('display_order', { ascending: true });
-
-      if (refreshedBlocksError) {
-        return buildErrorResponse(res, 'Failed to fetch refreshed blocks', refreshedBlocksError);
+      let refreshedBlocks;
+      try {
+        refreshedBlocks = await prisma.page_content_blocks.findMany({
+          where: { subcategory_id: subcategoryId },
+          orderBy: { display_order: 'asc' }
+        });
+      } catch (error) {
+        return buildErrorResponse(res, 'Failed to fetch refreshed blocks', error);
       }
 
       const grouped = (refreshedSections || []).map((section) => ({
@@ -1388,15 +1267,13 @@ const pageContentController = {
     try {
       const { subcategoryId } = req.params;
 
-      const { data, error } = await supabase
-        .from('subcategory_custom_tabs')
-        .select('*')
-        .eq('subcategory_id', subcategoryId)
-        .eq('is_active', true)
-        .order('display_order', { ascending: true })
-        .order('title', { ascending: true });
-
-      if (error) {
+      let data;
+      try {
+        data = await prisma.subcategory_custom_tabs.findMany({
+          where: { subcategory_id: subcategoryId, is_active: true },
+          orderBy: [{ display_order: 'asc' }, { title: 'asc' }]
+        });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to fetch custom tabs', error);
       }
 
@@ -1415,7 +1292,7 @@ const pageContentController = {
         return res.status(400).json({ success: false, message: 'Title is required' });
       }
 
-      const normalizedKey = (tab_key || slugify(title)).slice(0, 190);
+      const normalizedKey = slugify(tab_key || title, { fallback: 'tab' }).slice(0, 190);
 
       if (RESERVED_TAB_KEYS.has(normalizedKey)) {
         return res.status(400).json({
@@ -1424,22 +1301,20 @@ const pageContentController = {
         });
       }
 
-      const { data: orderRow } = await supabase
-        .from('subcategory_custom_tabs')
-        .select('display_order')
-        .eq('subcategory_id', subcategoryId)
-        .order('display_order', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      const orderRow = await prisma.subcategory_custom_tabs.findFirst({
+        where: { subcategory_id: subcategoryId },
+        select: { display_order: true },
+        orderBy: { display_order: 'desc' }
+      });
 
       const nextOrder = typeof display_order === 'number'
         ? display_order
         : ((orderRow?.display_order ?? -1) + 1);
 
-      const { data, error } = await supabase
-        .from('subcategory_custom_tabs')
-        .insert([
-          {
+      let data;
+      try {
+        data = await prisma.subcategory_custom_tabs.create({
+          data: {
             subcategory_id: subcategoryId,
             tab_key: normalizedKey,
             title,
@@ -1449,11 +1324,8 @@ const pageContentController = {
             created_by: req.user?.id || null,
             updated_by: req.user?.id || null
           }
-        ])
-        .select('*')
-        .single();
-
-      if (error) {
+        });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to create custom tab', error);
       }
 
@@ -1469,20 +1341,19 @@ const pageContentController = {
       const { tabId } = req.params;
       const { title, description, display_order, is_active, tab_key } = req.body || {};
 
-      let nextTabKey = tab_key ? slugify(tab_key).slice(0, 190) : undefined;
+      let nextTabKey = tab_key ? slugify(tab_key, { fallback: 'tab' }).slice(0, 190) : undefined;
 
       // Self-heal legacy collisions: if this tab currently squats on a reserved
       // URL (e.g. tab_key 'previous-papers' left over from an old title) and the
       // admin renames it, regenerate the key from the new title.
       if (nextTabKey === undefined && title) {
-        const { data: existing } = await supabase
-          .from('subcategory_custom_tabs')
-          .select('tab_key')
-          .eq('id', tabId)
-          .maybeSingle();
+        const existing = await prisma.subcategory_custom_tabs.findUnique({
+          where: { id: tabId },
+          select: { tab_key: true }
+        });
 
         if (existing && RESERVED_TAB_KEYS.has(existing.tab_key)) {
-          nextTabKey = slugify(title).slice(0, 190);
+          nextTabKey = slugify(title, { fallback: 'tab' }).slice(0, 190);
         }
       }
 
@@ -1502,15 +1373,11 @@ const pageContentController = {
         updated_by: req.user?.id || null
       };
 
-      const { data, error } = await supabase
-        .from('subcategory_custom_tabs')
-        .update(updates)
-        .eq('id', tabId)
-        .select('*')
-        .single();
-
-      if (error) {
-        if (error.code === 'PGRST116') {
+      let data;
+      try {
+        data = await prisma.subcategory_custom_tabs.update({ where: { id: tabId }, data: updates });
+      } catch (error) {
+        if (error.code === 'P2025') {
           return res.status(404).json({ success: false, message: 'Custom tab not found' });
         }
         return buildErrorResponse(res, 'Failed to update custom tab', error);
@@ -1527,16 +1394,15 @@ const pageContentController = {
     try {
       const { subcategoryId, tabId } = req.params;
 
-      const { error } = await supabase
-        .from('subcategory_custom_tabs')
-        .delete()
-        .eq('id', tabId)
-        .eq('subcategory_id', subcategoryId);
-
-      if (error) {
-        if (error.code === 'PGRST116') {
-          return res.status(404).json({ success: false, message: 'Custom tab not found' });
-        }
+      try {
+        // deleteMany with the compound {id, subcategory_id} filter (never touch a tab
+        // belonging to a different subcategory) — matching the original's compound
+        // .eq('id',...).eq('subcategory_id',...). NOTE: the original never chained
+        // .select().single() on this delete, so supabase-js never actually errored on a
+        // 0-row delete — it always returned success regardless of whether a row matched.
+        // Preserved exactly: no 404 branch on a 0-count deleteMany here.
+        await prisma.subcategory_custom_tabs.deleteMany({ where: { id: tabId, subcategory_id: subcategoryId } });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to delete custom tab', error);
       }
 
@@ -1558,15 +1424,10 @@ const pageContentController = {
 
       for (let index = 0; index < tabIds.length; index += 1) {
         const tabId = tabIds[index];
-        const { error } = await supabase
-          .from('subcategory_custom_tabs')
-          .update({ display_order: index, updated_by: req.user?.id || null })
-          .eq('id', tabId)
-          .eq('subcategory_id', subcategoryId);
-
-        if (error) {
-          throw error;
-        }
+        await prisma.subcategory_custom_tabs.updateMany({
+          where: { id: tabId, subcategory_id: subcategoryId },
+          data: { display_order: index, updated_by: req.user?.id || null }
+        });
       }
 
       await invalidatePageCache(subcategoryId);
@@ -1580,19 +1441,18 @@ const pageContentController = {
     try {
       const { subcategoryId } = req.params;
 
-      const { data, error } = await supabase
-        .from('subcategory_tab_config')
-        .select(`
-          *,
-          custom_tab:subcategory_custom_tabs(id, title, description, tab_key)
-        `)
-        .eq('subcategory_id', subcategoryId)
-        .eq('is_active', true)
-        .order('display_order', { ascending: true });
-
-      if (error) {
+      let rows;
+      try {
+        rows = await prisma.subcategory_tab_config.findMany({
+          where: { subcategory_id: subcategoryId, is_active: true },
+          include: { subcategory_custom_tabs: { select: { id: true, title: true, description: true, tab_key: true } } },
+          orderBy: { display_order: 'asc' }
+        });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to fetch tab configuration', error);
       }
+
+      const data = rows.map(({ subcategory_custom_tabs, ...rest }) => ({ ...rest, custom_tab: subcategory_custom_tabs }));
 
       res.json({ success: true, data: data || [] });
     } catch (error) {
@@ -1604,16 +1464,15 @@ const pageContentController = {
     try {
       const { subcategoryId } = req.params;
 
-      const { data: existing } = await supabase
-        .from('subcategory_tab_config')
-        .select('id')
-        .eq('subcategory_id', subcategoryId)
-        .limit(1);
+      const existing = await prisma.subcategory_tab_config.findFirst({
+        where: { subcategory_id: subcategoryId },
+        select: { id: true }
+      });
 
-      if (existing && existing.length > 0) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'Tab configuration already exists for this subcategory' 
+      if (existing) {
+        return res.status(400).json({
+          success: false,
+          message: 'Tab configuration already exists for this subcategory'
         });
       }
 
@@ -1650,12 +1509,10 @@ const pageContentController = {
         }
       ];
 
-      const { data, error } = await supabase
-        .from('subcategory_tab_config')
-        .insert(defaultTabs)
-        .select('*');
-
-      if (error) {
+      let data;
+      try {
+        data = await prisma.subcategory_tab_config.createManyAndReturn({ data: defaultTabs });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to initialize default tabs', error);
       }
 
@@ -1672,37 +1529,35 @@ const pageContentController = {
       const { tab_type, tab_label, tab_key, custom_tab_id, display_order, is_active } = req.body || {};
 
       if (!tab_type || !tab_label) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'tab_type and tab_label are required' 
+        return res.status(400).json({
+          success: false,
+          message: 'tab_type and tab_label are required'
         });
       }
 
       if (tab_type === 'custom' && !custom_tab_id) {
-        return res.status(400).json({ 
-          success: false, 
-          message: 'custom_tab_id is required for custom tab type' 
+        return res.status(400).json({
+          success: false,
+          message: 'custom_tab_id is required for custom tab type'
         });
       }
 
-      const normalizedKey = tab_key || slugify(tab_label);
+      const normalizedKey = slugify(tab_key || tab_label, { fallback: 'tab' }).slice(0, 190);
 
-      const { data: orderRow } = await supabase
-        .from('subcategory_tab_config')
-        .select('display_order')
-        .eq('subcategory_id', subcategoryId)
-        .order('display_order', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      const orderRow = await prisma.subcategory_tab_config.findFirst({
+        where: { subcategory_id: subcategoryId },
+        select: { display_order: true },
+        orderBy: { display_order: 'desc' }
+      });
 
       const nextOrder = typeof display_order === 'number'
         ? display_order
         : ((orderRow?.display_order ?? -1) + 1);
 
-      const { data, error } = await supabase
-        .from('subcategory_tab_config')
-        .insert([
-          {
+      let data;
+      try {
+        data = await prisma.subcategory_tab_config.create({
+          data: {
             subcategory_id: subcategoryId,
             tab_type,
             tab_label,
@@ -1713,11 +1568,8 @@ const pageContentController = {
             created_by: req.user?.id || null,
             updated_by: req.user?.id || null
           }
-        ])
-        .select('*')
-        .single();
-
-      if (error) {
+        });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to create tab configuration', error);
       }
 
@@ -1735,21 +1587,17 @@ const pageContentController = {
 
       const updates = {
         tab_label: tab_label ?? undefined,
-        tab_key: tab_key ?? undefined,
+        tab_key: tab_key ? slugify(tab_key, { fallback: 'tab' }).slice(0, 190) : undefined,
         display_order: display_order ?? undefined,
         is_active: typeof is_active === 'boolean' ? is_active : undefined,
         updated_by: req.user?.id || null
       };
 
-      const { data, error } = await supabase
-        .from('subcategory_tab_config')
-        .update(updates)
-        .eq('id', tabConfigId)
-        .select('*')
-        .single();
-
-      if (error) {
-        if (error.code === 'PGRST116') {
+      let data;
+      try {
+        data = await prisma.subcategory_tab_config.update({ where: { id: tabConfigId }, data: updates });
+      } catch (error) {
+        if (error.code === 'P2025') {
           return res.status(404).json({ success: false, message: 'Tab configuration not found' });
         }
         return buildErrorResponse(res, 'Failed to update tab configuration', error);
@@ -1766,16 +1614,12 @@ const pageContentController = {
     try {
       const { subcategoryId, tabConfigId } = req.params;
 
-      const { error } = await supabase
-        .from('subcategory_tab_config')
-        .delete()
-        .eq('id', tabConfigId)
-        .eq('subcategory_id', subcategoryId);
-
-      if (error) {
-        if (error.code === 'PGRST116') {
-          return res.status(404).json({ success: false, message: 'Tab configuration not found' });
-        }
+      try {
+        // Same note as deleteCustomTab above: the original never chained
+        // .select().single() on this delete, so a 0-row match never actually produced a
+        // 404 in practice — preserved exactly, no count check here.
+        await prisma.subcategory_tab_config.deleteMany({ where: { id: tabConfigId, subcategory_id: subcategoryId } });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to delete tab configuration', error);
       }
 
@@ -1797,15 +1641,10 @@ const pageContentController = {
 
       for (let index = 0; index < tabConfigIds.length; index += 1) {
         const tabConfigId = tabConfigIds[index];
-        const { error } = await supabase
-          .from('subcategory_tab_config')
-          .update({ display_order: index, updated_by: req.user?.id || null })
-          .eq('id', tabConfigId)
-          .eq('subcategory_id', subcategoryId);
-
-        if (error) {
-          throw error;
-        }
+        await prisma.subcategory_tab_config.updateMany({
+          where: { id: tabConfigId, subcategory_id: subcategoryId },
+          data: { display_order: index, updated_by: req.user?.id || null }
+        });
       }
 
       await invalidatePageCache(subcategoryId);

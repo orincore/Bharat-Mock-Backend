@@ -1,5 +1,5 @@
 const jwt = require('jsonwebtoken');
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 // A Google OAuth signup that never finished the "Complete Your Profile" step is
@@ -34,13 +34,17 @@ const authenticate = async (req, res, next) => {
     const token = authHeader.substring(7);
     
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, email, name, avatar_url, phone, is_blocked, is_verified, is_onboarded, auth_provider, role, token_version')
-      .eq('id', decoded.userId)
-      .is('deleted_at', null)
-      .maybeSingle();
+
+    let user = null;
+    let dbError = null;
+    try {
+      user = await prisma.users.findFirst({
+        where: { id: decoded.userId, deleted_at: null },
+        select: { id: true, email: true, name: true, avatar_url: true, phone: true, is_blocked: true, is_verified: true, is_onboarded: true, auth_provider: true, role: true, token_version: true },
+      });
+    } catch (err) {
+      dbError = err;
+    }
 
     // Session-revocation check: a token whose tv lags the user's current token_version
     // was minted before a password reset/change and is no longer trusted. Only enforced
@@ -56,7 +60,7 @@ const authenticate = async (req, res, next) => {
 
     let resolvedUser = user;
 
-    if (!user || error) {
+    if (!user || dbError) {
       const fallbackRole = decoded.role || decoded.userRole || decoded.roleName || (decoded.isAdmin ? 'admin' : null);
       resolvedUser = {
         id: decoded.userId,
@@ -127,13 +131,11 @@ const optionalAuth = async (req, res, next) => {
 
     const token = authHeader.substring(7);
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    
-    const { data: user } = await supabase
-      .from('users')
-      .select('id, email, name, avatar_url, role, is_blocked')
-      .eq('id', decoded.userId)
-      .is('deleted_at', null)
-      .maybeSingle();
+
+    const user = await prisma.users.findFirst({
+      where: { id: decoded.userId, deleted_at: null },
+      select: { id: true, email: true, name: true, avatar_url: true, role: true, is_blocked: true },
+    });
 
     let resolvedUser = user || null;
 
@@ -171,30 +173,23 @@ const adminAuth = async (req, res, next) => {
       });
     }
 
-    const { data: adminUser, error } = await supabase
-      .from('admin_users')
-      .select(`
-        id,
-        is_active,
-        role_id,
-        admin_roles (
-          id,
-          name,
-          description
-        )
-      `)
-      .eq('user_id', req.user.id)
-      .eq('is_active', true)
-      .single();
+    const adminUser = await prisma.admin_users.findFirst({
+      where: { user_id: req.user.id, is_active: true },
+      select: {
+        id: true,
+        is_active: true,
+        role_id: true,
+        admin_roles: { select: { id: true, name: true, description: true } },
+      },
+    });
 
-    if (error || !adminUser) {
+    if (!adminUser) {
       console.warn('[adminAuth] adminUser lookup failed', {
         userId: req.user.id,
-        error
       });
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Admin access required' 
+      return res.status(403).json({
+        success: false,
+        message: 'Admin access required'
       });
     }
 
@@ -218,18 +213,17 @@ const checkPermission = (resource, action) => {
         return next();
       }
 
-      const { data: permission, error } = await supabase
-        .from('admin_permissions')
-        .select('can_create, can_read, can_update, can_delete')
-        .eq('role_id', req.roleId)
-        .eq('resource', resource)
-        .maybeSingle();
-
-      if (error) {
+      let permission;
+      try {
+        permission = await prisma.admin_permissions.findFirst({
+          where: { role_id: req.roleId, resource },
+          select: { can_create: true, can_read: true, can_update: true, can_delete: true },
+        });
+      } catch (error) {
         logger.error('Permission lookup error:', error);
-        return res.status(500).json({ 
-          success: false, 
-          message: 'Permission check failed' 
+        return res.status(500).json({
+          success: false,
+          message: 'Permission check failed'
         });
       }
 

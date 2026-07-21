@@ -1,0 +1,2518 @@
+generator client {
+  provider        = "prisma-client-js"
+  output          = "../src/generated/prisma"
+  previewFeatures = ["partialIndexes"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model about_offerings {
+  id            String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  title         String    @db.VarChar(120)
+  description   String?
+  icon          String?   @default("sparkles") @db.VarChar(60)
+  display_order Int?      @default(0)
+  is_active     Boolean?  @default(true)
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@index([display_order], map: "idx_about_offerings_display", where: raw("(is_active = true)"))
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model about_page_content {
+  id                String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  hero_heading      String    @db.VarChar(160)
+  hero_subheading   String?   @db.VarChar(220)
+  hero_description  String?
+  hero_badge        String?   @db.VarChar(120)
+  mission_heading   String?   @db.VarChar(160)
+  mission_body      String?
+  story_heading     String?   @db.VarChar(160)
+  story_body        String?
+  impact_heading    String?   @db.VarChar(160)
+  impact_body       String?
+  offerings_heading String?   @db.VarChar(160)
+  offerings_body    String?
+  cta_label         String?   @db.VarChar(120)
+  cta_href          String?   @db.VarChar(255)
+  created_at        DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model about_stats {
+  id            String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  label         String    @db.VarChar(120)
+  value         String    @db.VarChar(60)
+  helper_text   String?   @db.VarChar(160)
+  display_order Int?      @default(0)
+  is_active     Boolean?  @default(true)
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@index([display_order], map: "idx_about_stats_display", where: raw("(is_active = true)"))
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model about_values {
+  id            String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  title         String    @db.VarChar(120)
+  description   String?
+  icon          String?   @default("star") @db.VarChar(60)
+  display_order Int?      @default(0)
+  is_active     Boolean?  @default(true)
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@index([display_order], map: "idx_about_values_display", where: raw("(is_active = true)"))
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model activity_logs {
+  id              String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  user_id         String    @db.Uuid
+  user_email      String    @db.VarChar(255)
+  user_role       String    @db.VarChar(50)
+  action          String    @db.VarChar(100)
+  resource_type   String?   @db.VarChar(50)
+  resource_id     String?
+  details         Json?
+  ip_address      String?   @db.VarChar(45)
+  user_agent      String?
+  created_at      DateTime? @default(now()) @db.Timestamp(6)
+  user_avatar_url String?
+  users           users     @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([action], map: "idx_activity_logs_action")
+  @@index([created_at(sort: Desc)], map: "idx_activity_logs_created_at")
+  @@index([resource_type, resource_id], map: "idx_activity_logs_resource")
+  @@index([user_id], map: "idx_activity_logs_user_id")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model admin_audit_logs {
+  id            String       @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  admin_user_id String?      @db.Uuid
+  action        String       @db.VarChar(100)
+  resource      String       @db.VarChar(100)
+  resource_id   String?      @db.Uuid
+  details       Json?
+  ip_address    String?      @db.Inet
+  user_agent    String?
+  created_at    DateTime?    @default(now()) @db.Timestamptz(6)
+  admin_users   admin_users? @relation(fields: [admin_user_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model admin_permissions {
+  id          String       @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  role_id     String?      @db.Uuid
+  resource    String       @db.VarChar(100)
+  can_create  Boolean?     @default(false)
+  can_read    Boolean?     @default(false)
+  can_update  Boolean?     @default(false)
+  can_delete  Boolean?     @default(false)
+  created_at  DateTime?    @default(now()) @db.Timestamptz(6)
+  admin_roles admin_roles? @relation(fields: [role_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([role_id, resource], map: "idx_admin_permissions_role_resource")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model admin_roles {
+  id                String              @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  name              String              @unique @db.VarChar(50)
+  description       String?
+  created_at        DateTime?           @default(now()) @db.Timestamptz(6)
+  admin_permissions admin_permissions[]
+  admin_users       admin_users[]
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model admin_users {
+  id               String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  user_id          String?            @unique @db.Uuid
+  role_id          String?            @db.Uuid
+  is_active        Boolean?           @default(true)
+  created_at       DateTime?          @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime?          @default(now()) @db.Timestamptz(6)
+  admin_audit_logs admin_audit_logs[]
+  admin_roles      admin_roles?       @relation(fields: [role_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users            users?             @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([user_id], map: "idx_admin_users_user_id")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model article_tags {
+  id         String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  article_id String?   @db.Uuid
+  tag        String    @db.VarChar(100)
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  articles   articles? @relation(fields: [article_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model articles {
+  id                String              @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  slug              String              @unique @db.VarChar(255)
+  title             String              @db.VarChar(255)
+  excerpt           String?
+  content           String
+  author_id         String?             @db.Uuid
+  category          String              @db.VarChar(100)
+  image_url         String?
+  read_time         Int?
+  views             Int?                @default(0)
+  is_published      Boolean?            @default(false)
+  published_at      DateTime?           @db.Timestamptz(6)
+  meta_title        String?             @db.VarChar(255)
+  meta_description  String?
+  created_at        DateTime?           @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime?           @default(now()) @db.Timestamptz(6)
+  deleted_at        DateTime?           @db.Timestamptz(6)
+  article_tags      article_tags[]
+  authors           authors?            @relation(fields: [author_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  category_articles category_articles[]
+
+  @@index([category], map: "idx_articles_category")
+  @@index([deleted_at], map: "idx_articles_deleted_at")
+  @@index([published_at], map: "idx_articles_published_at")
+  @@index([slug], map: "idx_articles_slug")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model auth_users {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email         String    @unique
+  password_hash String
+  full_name     String?
+  role          String    @default("admin")
+  status        String    @default("active")
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@index([email], map: "idx_auth_users_email")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model authors {
+  id         String     @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  name       String     @db.VarChar(255)
+  avatar_url String?
+  bio        String?
+  created_at DateTime?  @default(now()) @db.Timestamptz(6)
+  updated_at DateTime?  @default(now()) @db.Timestamptz(6)
+  articles   articles[]
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model blog_blocks {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  section_id    String        @db.Uuid
+  block_type    String        @db.VarChar(50)
+  content       Json?         @default("{}")
+  settings      Json?         @default("{}")
+  display_order Int?          @default(0)
+  created_at    DateTime?     @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime?     @default(now()) @db.Timestamptz(6)
+  blog_sections blog_sections @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([section_id], map: "idx_blog_blocks_section_id")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model blog_sections {
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  blog_id          String        @db.Uuid
+  section_key      String?       @db.VarChar(100)
+  title            String?       @db.VarChar(255)
+  subtitle         String?
+  display_order    Int?          @default(0)
+  is_collapsible   Boolean?      @default(false)
+  is_expanded      Boolean?      @default(true)
+  background_color String?       @db.VarChar(50)
+  text_color       String?       @db.VarChar(50)
+  settings         Json?         @default("{}")
+  created_at       DateTime?     @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime?     @default(now()) @db.Timestamptz(6)
+  blog_blocks      blog_blocks[]
+  blogs            blogs         @relation(fields: [blog_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([blog_id], map: "idx_blog_sections_blog_id")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model blogs {
+  id                      String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title                   String          @db.VarChar(255)
+  slug                    String          @unique @db.VarChar(255)
+  excerpt                 String?
+  featured_image_url      String?
+  author_id               String?         @db.Uuid
+  category                String?         @db.VarChar(100)
+  tags                    String[]
+  is_published            Boolean?        @default(false)
+  is_featured             Boolean?        @default(false)
+  published_at            DateTime?       @db.Timestamptz(6)
+  view_count              Int?            @default(0)
+  read_time               Int?
+  meta_title              String?         @db.VarChar(255)
+  meta_description        String?
+  meta_keywords           String?
+  og_title                String?         @db.VarChar(255)
+  og_description          String?
+  og_image_url            String?
+  canonical_url           String?
+  created_at              DateTime?       @default(now()) @db.Timestamptz(6)
+  updated_at              DateTime?       @default(now()) @db.Timestamptz(6)
+  created_by              String?         @db.Uuid
+  updated_by              String?         @db.Uuid
+  status                  String          @default("draft") @db.VarChar(20)
+  is_current_affairs_note Boolean?        @default(false)
+  current_affairs_tag     String?
+  structured_data         String?
+  blog_sections           blog_sections[]
+
+  @@index([author_id], map: "idx_blogs_author")
+  @@index([category], map: "idx_blogs_category")
+  @@index([is_published, published_at(sort: Desc)], map: "idx_blogs_published")
+  @@index([slug], map: "idx_blogs_slug")
+  @@index([is_current_affairs_note, is_published, published_at(sort: Desc)], map: "idx_current_affairs_note")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model category_articles {
+  id              String          @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  category_id     String          @db.Uuid
+  article_id      String          @db.Uuid
+  display_order   Int?            @default(0)
+  is_featured     Boolean?        @default(false)
+  created_at      DateTime?       @default(now()) @db.Timestamp(6)
+  articles        articles        @relation(fields: [article_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  exam_categories exam_categories @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([category_id, article_id])
+  @@index([article_id], map: "idx_category_articles_article")
+  @@index([category_id], map: "idx_category_articles_category")
+  @@index([is_featured], map: "idx_category_articles_featured")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model category_custom_sections {
+  id                                               String          @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  category_id                                      String          @db.Uuid
+  title                                            String          @db.VarChar(200)
+  subtitle                                         String?         @db.VarChar(400)
+  content                                          String?
+  media_url                                        String?         @db.VarChar(1000)
+  layout_type                                      String?         @default("default") @db.VarChar(50)
+  icon                                             String?         @db.VarChar(100)
+  button_label                                     String?         @db.VarChar(100)
+  button_url                                       String?         @db.VarChar(1000)
+  display_order                                    Int?            @default(0)
+  is_active                                        Boolean?        @default(true)
+  created_at                                       DateTime?       @default(now()) @db.Timestamp(6)
+  updated_at                                       DateTime?       @default(now()) @db.Timestamp(6)
+  created_by                                       String?         @db.Uuid
+  updated_by                                       String?         @db.Uuid
+  exam_categories                                  exam_categories @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_category_custom_sections_created_byTousers users?          @relation("category_custom_sections_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_category_custom_sections_updated_byTousers users?          @relation("category_custom_sections_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([category_id], map: "idx_category_custom_sections_category")
+  @@index([display_order], map: "idx_category_custom_sections_order")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model category_custom_tabs {
+  id                                           String          @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  category_id                                  String          @db.Uuid
+  tab_key                                      String          @db.VarChar(200)
+  title                                        String          @db.VarChar(300)
+  description                                  String?
+  display_order                                Int?            @default(0)
+  is_active                                    Boolean?        @default(true)
+  created_at                                   DateTime?       @default(now()) @db.Timestamp(6)
+  updated_at                                   DateTime?       @default(now()) @db.Timestamp(6)
+  created_by                                   String?         @db.Uuid
+  updated_by                                   String?         @db.Uuid
+  exam_categories                              exam_categories @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_category_custom_tabs_created_byTousers users?          @relation("category_custom_tabs_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_category_custom_tabs_updated_byTousers users?          @relation("category_custom_tabs_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  page_sections                                page_sections[]
+
+  @@index([category_id], map: "idx_category_custom_tabs_category")
+  @@index([display_order], map: "idx_category_custom_tabs_order")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model category_cutoffs {
+  id                                       String          @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  category_id                              String          @db.Uuid
+  exam_name                                String?         @db.VarChar(200)
+  year                                     String          @db.VarChar(10)
+  cutoff_category                          String          @db.VarChar(100)
+  marks                                    Decimal         @db.Decimal(10, 2)
+  total_marks                              Decimal?        @db.Decimal(10, 2)
+  description                              String?
+  display_order                            Int?            @default(0)
+  is_active                                Boolean?        @default(true)
+  created_at                               DateTime?       @default(now()) @db.Timestamp(6)
+  updated_at                               DateTime?       @default(now()) @db.Timestamp(6)
+  created_by                               String?         @db.Uuid
+  updated_by                               String?         @db.Uuid
+  exam_categories                          exam_categories @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_category_cutoffs_created_byTousers users?          @relation("category_cutoffs_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_category_cutoffs_updated_byTousers users?          @relation("category_cutoffs_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([is_active], map: "idx_category_cutoffs_active")
+  @@index([category_id], map: "idx_category_cutoffs_category")
+  @@index([year(sort: Desc)], map: "idx_category_cutoffs_year")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model category_important_dates {
+  id                                               String          @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  category_id                                      String          @db.Uuid
+  event_name                                       String          @db.VarChar(300)
+  event_date                                       DateTime?       @db.Date
+  event_date_text                                  String?         @db.VarChar(100)
+  description                                      String?
+  link_url                                         String?         @db.VarChar(1000)
+  display_order                                    Int?            @default(0)
+  is_active                                        Boolean?        @default(true)
+  created_at                                       DateTime?       @default(now()) @db.Timestamp(6)
+  updated_at                                       DateTime?       @default(now()) @db.Timestamp(6)
+  created_by                                       String?         @db.Uuid
+  updated_by                                       String?         @db.Uuid
+  exam_categories                                  exam_categories @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_category_important_dates_created_byTousers users?          @relation("category_important_dates_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_category_important_dates_updated_byTousers users?          @relation("category_important_dates_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([is_active], map: "idx_category_dates_active")
+  @@index([category_id], map: "idx_category_dates_category")
+  @@index([event_date], map: "idx_category_dates_event")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model category_notifications {
+  id                                             String          @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  category_id                                    String          @db.Uuid
+  title                                          String          @db.VarChar(500)
+  description                                    String?
+  notification_type                              String          @db.VarChar(50)
+  notification_date                              DateTime        @db.Date
+  link_url                                       String?         @db.VarChar(1000)
+  is_active                                      Boolean?        @default(true)
+  display_order                                  Int?            @default(0)
+  created_at                                     DateTime?       @default(now()) @db.Timestamp(6)
+  updated_at                                     DateTime?       @default(now()) @db.Timestamp(6)
+  created_by                                     String?         @db.Uuid
+  updated_by                                     String?         @db.Uuid
+  exam_categories                                exam_categories @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_category_notifications_created_byTousers users?          @relation("category_notifications_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_category_notifications_updated_byTousers users?          @relation("category_notifications_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([is_active], map: "idx_category_notifications_active")
+  @@index([category_id], map: "idx_category_notifications_category")
+  @@index([notification_date(sort: Desc)], map: "idx_category_notifications_date")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model category_preparation_tips {
+  id                                                String          @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  category_id                                       String          @db.Uuid
+  title                                             String          @db.VarChar(300)
+  description                                       String
+  tip_type                                          String?         @default("general") @db.VarChar(50)
+  display_order                                     Int?            @default(0)
+  is_active                                         Boolean?        @default(true)
+  created_at                                        DateTime?       @default(now()) @db.Timestamp(6)
+  updated_at                                        DateTime?       @default(now()) @db.Timestamp(6)
+  created_by                                        String?         @db.Uuid
+  updated_by                                        String?         @db.Uuid
+  exam_categories                                   exam_categories @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_category_preparation_tips_created_byTousers users?          @relation("category_preparation_tips_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_category_preparation_tips_updated_byTousers users?          @relation("category_preparation_tips_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([is_active], map: "idx_category_tips_active")
+  @@index([category_id], map: "idx_category_tips_category")
+  @@index([display_order], map: "idx_category_tips_order")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model category_syllabus {
+  id                                        String                     @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  category_id                               String                     @db.Uuid
+  subject_name                              String                     @db.VarChar(200)
+  description                               String?
+  display_order                             Int?                       @default(0)
+  is_active                                 Boolean?                   @default(true)
+  created_at                                DateTime?                  @default(now()) @db.Timestamp(6)
+  updated_at                                DateTime?                  @default(now()) @db.Timestamp(6)
+  created_by                                String?                    @db.Uuid
+  updated_by                                String?                    @db.Uuid
+  exam_categories                           exam_categories            @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_category_syllabus_created_byTousers users?                     @relation("category_syllabus_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_category_syllabus_updated_byTousers users?                     @relation("category_syllabus_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  category_syllabus_topics                  category_syllabus_topics[]
+
+  @@index([category_id], map: "idx_category_syllabus_category")
+  @@index([display_order], map: "idx_category_syllabus_order")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model category_syllabus_topics {
+  id                String            @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  syllabus_id       String            @db.Uuid
+  topic_name        String            @db.VarChar(300)
+  display_order     Int?              @default(0)
+  created_at        DateTime?         @default(now()) @db.Timestamp(6)
+  updated_at        DateTime?         @default(now()) @db.Timestamp(6)
+  category_syllabus category_syllabus @relation(fields: [syllabus_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([display_order], map: "idx_syllabus_topics_order")
+  @@index([syllabus_id], map: "idx_syllabus_topics_syllabus")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model college_accreditations {
+  id            String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  college_id    String?   @db.Uuid
+  accreditation String    @db.VarChar(100)
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  colleges      colleges? @relation(fields: [college_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model college_cutoffs {
+  id         String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  college_id String?   @db.Uuid
+  exam       String    @db.VarChar(100)
+  year       Int
+  category   String    @db.VarChar(50)
+  rank       Int
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  colleges   colleges? @relation(fields: [college_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model college_facilities {
+  id         String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  college_id String?   @db.Uuid
+  facility   String    @db.VarChar(255)
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  colleges   colleges? @relation(fields: [college_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model college_fees {
+  id         String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  college_id String?   @db.Uuid
+  course     String    @db.VarChar(255)
+  fee        Decimal   @db.Decimal(10, 2)
+  currency   String?   @default("INR") @db.VarChar(10)
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at DateTime? @default(now()) @db.Timestamptz(6)
+  colleges   colleges? @relation(fields: [college_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model college_placements {
+  id                   String               @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  college_id           String?              @unique @db.Uuid
+  average_package      Decimal?             @db.Decimal(10, 2)
+  highest_package      Decimal?             @db.Decimal(10, 2)
+  placement_percentage Decimal?             @db.Decimal(5, 2)
+  created_at           DateTime?            @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime?            @default(now()) @db.Timestamptz(6)
+  colleges             colleges?            @relation(fields: [college_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  college_recruiters   college_recruiters[]
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model college_recruiters {
+  id                 String              @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  placement_id       String?             @db.Uuid
+  recruiter_name     String              @db.VarChar(255)
+  created_at         DateTime?           @default(now()) @db.Timestamptz(6)
+  college_placements college_placements? @relation(fields: [placement_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model colleges {
+  id                     String                   @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  name                   String                   @db.VarChar(255)
+  location               String                   @db.VarChar(255)
+  type                   String                   @db.VarChar(50)
+  ranking                Int?
+  rating                 Decimal?                 @db.Decimal(3, 2)
+  image_url              String?
+  logo_url               String?
+  established            Int?
+  overview               String?
+  website                String?                  @db.VarChar(255)
+  is_published           Boolean?                 @default(true)
+  created_at             DateTime?                @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime?                @default(now()) @db.Timestamptz(6)
+  deleted_at             DateTime?                @db.Timestamptz(6)
+  college_accreditations college_accreditations[]
+  college_cutoffs        college_cutoffs[]
+  college_facilities     college_facilities[]
+  college_fees           college_fees[]
+  college_placements     college_placements?
+  course_top_colleges    course_top_colleges[]
+
+  @@index([deleted_at], map: "idx_colleges_deleted_at")
+  @@index([location], map: "idx_colleges_location")
+  @@index([type], map: "idx_colleges_type")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model contact_info {
+  id                   String                 @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  headline             String                 @db.VarChar(120)
+  subheading           String?                @db.VarChar(180)
+  description          String?
+  support_email        String                 @db.VarChar(160)
+  support_phone        String                 @db.VarChar(40)
+  whatsapp_number      String?                @db.VarChar(40)
+  address_line1        String                 @db.VarChar(160)
+  address_line2        String?                @db.VarChar(160)
+  city                 String?                @db.VarChar(80)
+  state                String?                @db.VarChar(80)
+  postal_code          String?                @db.VarChar(20)
+  country              String?                @db.VarChar(80)
+  support_hours        String?                @db.VarChar(160)
+  map_embed_url        String?
+  created_at           DateTime?              @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime?              @default(now()) @db.Timestamptz(6)
+  contact_social_links contact_social_links[]
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model contact_social_links {
+  id            String        @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  platform      String        @db.VarChar(40)
+  label         String        @db.VarChar(80)
+  url           String
+  icon          String?       @db.VarChar(40)
+  display_order Int?          @default(0)
+  is_active     Boolean?      @default(true)
+  contact_id    String?       @db.Uuid
+  created_at    DateTime?     @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime?     @default(now()) @db.Timestamptz(6)
+  contact_info  contact_info? @relation(fields: [contact_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([contact_id, display_order], map: "idx_contact_social_links_contact", where: raw("(is_active = true)"))
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model course_career_prospects {
+  id         String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  course_id  String?   @db.Uuid
+  prospect   String
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  courses    courses?  @relation(fields: [course_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model course_eligibility {
+  id          String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  course_id   String?   @db.Uuid
+  eligibility String
+  created_at  DateTime? @default(now()) @db.Timestamptz(6)
+  courses     courses?  @relation(fields: [course_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model course_top_colleges {
+  id         String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  course_id  String?   @db.Uuid
+  college_id String?   @db.Uuid
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  colleges   colleges? @relation(fields: [college_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  courses    courses?  @relation(fields: [course_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model courses {
+  id                      String                    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  name                    String                    @db.VarChar(255)
+  duration                String                    @db.VarChar(50)
+  level                   String                    @db.VarChar(50)
+  description             String?
+  average_salary          Decimal?                  @db.Decimal(10, 2)
+  image_url               String?
+  is_published            Boolean?                  @default(true)
+  created_at              DateTime?                 @default(now()) @db.Timestamptz(6)
+  updated_at              DateTime?                 @default(now()) @db.Timestamptz(6)
+  deleted_at              DateTime?                 @db.Timestamptz(6)
+  course_career_prospects course_career_prospects[]
+  course_eligibility      course_eligibility[]
+  course_top_colleges     course_top_colleges[]
+
+  @@index([deleted_at], map: "idx_courses_deleted_at")
+  @@index([level], map: "idx_courses_level")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model current_affairs_quizzes {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  exam_id         String    @unique(map: "current_affairs_quizzes_exam_unique") @db.Uuid
+  highlight_label String?
+  summary         String?
+  tag             String?
+  badge           String?
+  is_published    Boolean?  @default(true)
+  display_order   Int?      @default(0)
+  created_at      DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime? @default(now()) @db.Timestamptz(6)
+  exams           exams     @relation(fields: [exam_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model current_affairs_settings {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  hero_badge       String?
+  hero_title       String?
+  hero_subtitle    String?
+  hero_description String?
+  hero_cta_label   String?
+  hero_cta_url     String?
+  seo_title        String?
+  seo_description  String?
+  seo_keywords     String[]
+  updated_at       DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model current_affairs_videos {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title            String
+  description      String?
+  thumbnail_url    String?
+  video_url        String
+  platform         String?
+  duration_seconds Int?
+  tag              String?   @default("daily")
+  is_featured      Boolean?  @default(false)
+  is_published     Boolean?  @default(true)
+  display_order    Int?      @default(0)
+  published_at     DateTime? @default(now()) @db.Timestamptz(6)
+  created_at       DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model disclaimer_content {
+  id            String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  title         String    @db.VarChar(200)
+  last_updated  DateTime  @db.Date
+  intro_body    String?
+  contact_email String?   @db.VarChar(160)
+  contact_url   String?
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model disclaimer_points {
+  id                  String               @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  section_id          String?              @db.Uuid
+  heading             String?              @db.VarChar(200)
+  body                String?
+  list_items          Json?
+  display_order       Int?                 @default(0)
+  is_active           Boolean?             @default(true)
+  created_at          DateTime?            @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime?            @default(now()) @db.Timestamptz(6)
+  disclaimer_sections disclaimer_sections? @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([section_id, display_order], map: "idx_disclaimer_points_section", where: raw("(is_active = true)"))
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model disclaimer_sections {
+  id                String              @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  title             String              @db.VarChar(200)
+  description       String?
+  display_order     Int?                @default(0)
+  is_active         Boolean?            @default(true)
+  created_at        DateTime?           @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime?           @default(now()) @db.Timestamptz(6)
+  disclaimer_points disclaimer_points[]
+
+  @@index([display_order], map: "idx_disclaimer_sections_display", where: raw("(is_active = true)"))
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model email_verification_otps {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email      String
+  otp        String
+  expires_at DateTime @db.Timestamptz(6)
+  is_used    Boolean  @default(false)
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+
+  @@index([email], map: "idx_email_verification_otps_email")
+  @@index([email, is_used], map: "idx_email_verification_otps_email_used")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model exam_attempts {
+  id             String         @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  exam_id        String?        @db.Uuid
+  user_id        String?        @db.Uuid
+  started_at     DateTime?      @default(now()) @db.Timestamptz(6)
+  submitted_at   DateTime?      @db.Timestamptz(6)
+  time_taken     Int?
+  is_submitted   Boolean?       @default(false)
+  ip_address     String?        @db.Inet
+  user_agent     String?
+  created_at     DateTime?      @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime?      @default(now()) @db.Timestamptz(6)
+  language       String         @default("en")
+  time_remaining Int?
+  exams          exams?         @relation(fields: [exam_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users          users?         @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  results        results?
+  user_answers   user_answers[]
+
+  @@index([exam_id], map: "idx_exam_attempts_exam_id")
+  @@index([exam_id, user_id], map: "idx_exam_attempts_exam_user")
+  @@index([user_id], map: "idx_exam_attempts_user_id")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model exam_categories {
+  id                        String                      @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  name                      String                      @db.VarChar(150)
+  slug                      String                      @unique @db.VarChar(160)
+  description               String?
+  created_at                DateTime?                   @default(now()) @db.Timestamptz(6)
+  updated_at                DateTime?                   @default(now()) @db.Timestamptz(6)
+  logo_url                  String?
+  icon                      String?                     @db.VarChar(100)
+  display_order             Int?                        @default(0)
+  is_active                 Boolean?                    @default(true)
+  category_articles         category_articles[]
+  category_custom_sections  category_custom_sections[]
+  category_custom_tabs      category_custom_tabs[]
+  category_cutoffs          category_cutoffs[]
+  category_important_dates  category_important_dates[]
+  category_notifications    category_notifications[]
+  category_preparation_tips category_preparation_tips[]
+  category_syllabus         category_syllabus[]
+  exam_subcategories        exam_subcategories[]
+  exams                     exams[]
+  page_content_blocks       page_content_blocks[]
+  page_media                page_media[]
+  page_revisions            page_revisions[]
+  page_sections             page_sections[]
+  page_seo                  page_seo?
+  paper_series              paper_series[]
+  test_series               test_series[]
+
+  @@index([display_order], map: "idx_exam_categories_display_order")
+  @@index([is_active], map: "idx_exam_categories_is_active")
+  @@index([slug], map: "idx_exam_categories_slug")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model exam_difficulties {
+  id          String        @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  name        String        @db.VarChar(100)
+  slug        String        @unique @db.VarChar(120)
+  description String?
+  level_order Int?          @default(0)
+  created_at  DateTime?     @default(now()) @db.Timestamptz(6)
+  updated_at  DateTime?     @default(now()) @db.Timestamptz(6)
+  exams       exams[]
+  test_series test_series[]
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model exam_draft_fields {
+  id         String   @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  draft_key  String
+  exam_id    String?  @db.Uuid
+  updated_by String?  @db.Uuid
+  field_path String
+  payload    Json
+  created_at DateTime @default(now()) @db.Timestamptz(6)
+  updated_at DateTime @default(now()) @db.Timestamptz(6)
+  exams      exams?   @relation(fields: [exam_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users      users?   @relation(fields: [updated_by], references: [id], onUpdate: NoAction)
+
+  @@unique([draft_key, field_path], map: "exam_draft_fields_draft_field_unique")
+  @@index([exam_id], map: "exam_draft_fields_exam_idx")
+  @@index([updated_by])
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model exam_sections {
+  id                   String                 @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  exam_id              String?                @db.Uuid
+  name                 String                 @db.VarChar(255)
+  total_questions      Int
+  marks_per_question   Decimal                @db.Decimal(5, 2)
+  duration             Int?
+  section_order        Int
+  created_at           DateTime?              @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime?              @default(now()) @db.Timestamptz(6)
+  name_hi              String?
+  exams                exams?                 @relation(fields: [exam_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  questions            questions[]
+  section_analysis     section_analysis[]
+  section_translations section_translations[]
+
+  @@index([exam_id], map: "idx_exam_sections_exam_id")
+  @@index([exam_id, section_order], map: "idx_exam_sections_order")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model exam_subcategories {
+  id                          String                        @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  category_id                 String?                       @db.Uuid
+  name                        String                        @db.VarChar(150)
+  slug                        String                        @db.VarChar(160)
+  description                 String?
+  created_at                  DateTime?                     @default(now()) @db.Timestamptz(6)
+  updated_at                  DateTime?                     @default(now()) @db.Timestamptz(6)
+  logo_url                    String?
+  display_order               Int?                          @default(0)
+  is_active                   Boolean?                      @default(true)
+  show_mock_tests_tab         Boolean                       @default(true)
+  show_previous_papers_tab    Boolean                       @default(true)
+  exam_categories             exam_categories?              @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  exams                       exams[]
+  page_analytics              page_analytics[]
+  page_content_blocks         page_content_blocks[]
+  page_media                  page_media[]
+  page_revisions              page_revisions[]
+  page_sections               page_sections[]
+  page_seo                    page_seo?
+  paper_series                paper_series[]
+  subcategory_custom_tabs     subcategory_custom_tabs[]
+  subcategory_exam_stats      subcategory_exam_stats[]
+  subcategory_faqs            subcategory_faqs[]
+  subcategory_highlights      subcategory_highlights[]
+  subcategory_overviews       subcategory_overviews?
+  subcategory_question_papers subcategory_question_papers[]
+  subcategory_resources       subcategory_resources[]
+  subcategory_sections        subcategory_sections[]
+  subcategory_tab_config      subcategory_tab_config[]
+  subcategory_tables          subcategory_tables[]
+  subcategory_updates         subcategory_updates[]
+  test_series                 test_series[]
+
+  @@unique([category_id, slug])
+  @@index([category_id], map: "idx_exam_subcategories_category")
+  @@index([category_id], map: "idx_exam_subcategories_category_id")
+  @@index([slug], map: "idx_exam_subcategories_slug")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model exam_syllabus {
+  id         String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  exam_id    String?   @db.Uuid
+  topic      String    @db.VarChar(255)
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  exams      exams?    @relation(fields: [exam_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([exam_id], map: "idx_exam_syllabus_exam_id")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+/// This model contains an index with non-default null sort order and requires additional setup for migrations. Visit https://pris.ly/d/default-index-null-ordering for more info.
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model exams {
+  id                          String                        @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  title                       String                        @db.VarChar(255)
+  duration                    Int
+  total_marks                 Int
+  total_questions             Int
+  /// Optional rich-text candidate instructions; null/empty = use the defaults.
+  instructions                String?
+  category                    String                        @db.VarChar(100)
+  difficulty                  String?                       @db.VarChar(50)
+  status                      String?                       @default("upcoming") @db.VarChar(20)
+  start_date                  DateTime?                     @db.Timestamptz(6)
+  end_date                    DateTime?                     @db.Timestamptz(6)
+  pass_percentage             Decimal?                      @default(40.00) @db.Decimal(5, 2)
+  is_free                     Boolean?                      @default(true)
+  image_url                   String?
+  negative_marking            Boolean?                      @default(false)
+  negative_mark_value         Decimal?                      @default(0.00) @db.Decimal(5, 2)
+  is_published                Boolean?                      @default(false)
+  created_by                  String?                       @db.Uuid
+  created_at                  DateTime?                     @default(now()) @db.Timestamptz(6)
+  updated_at                  DateTime?                     @default(now()) @db.Timestamptz(6)
+  deleted_at                  DateTime?                     @db.Timestamptz(6)
+  logo_url                    String?
+  thumbnail_url               String?
+  category_id                 String?                       @db.Uuid
+  subcategory_id              String?                       @db.Uuid
+  difficulty_id               String?                       @db.Uuid
+  slug                        String?                       @unique(map: "idx_exams_slug", where: raw("(slug IS NOT NULL)")) @db.VarChar(255)
+  url_path                    String?                       @unique(map: "idx_exams_url_path", where: raw("(url_path IS NOT NULL)"))
+  subcategory                 String?                       @db.VarChar(100)
+  syllabus                    Json?                         @default("[]")
+  allow_anytime               Boolean?                      @default(false)
+  exam_type                   String?                       @default("mock_test") @db.VarChar(50)
+  show_in_mock_tests          Boolean?                      @default(false)
+  supports_hindi              Boolean?                      @default(false)
+  is_premium                  Boolean?                      @default(false)
+  is_test_series              Boolean?                      @default(false)
+  test_series_id              String?                       @db.Uuid
+  test_series_section_id      String?                       @db.Uuid
+  test_series_topic_id        String?                       @db.Uuid
+  exam_date                   DateTime?                     @db.Timestamptz(6)
+  display_order               Int                           @default(0)
+  pdf_url_en                  String?
+  pdf_url_hi                  String?
+  paper_series_id             String?                       @db.Uuid
+  paper_series_section_id     String?                       @db.Uuid
+  paper_series_topic_id       String?                       @db.Uuid
+  paper_section_id            String?                       @db.Uuid
+  paper_topic_id              String?                       @db.Uuid
+  exam_uid                    String?                       @unique @db.VarChar(12)
+  is_current_affair           Boolean?                      @default(false)
+  attempts                    Int?                          @default(0)
+  current_affairs_quizzes     current_affairs_quizzes?
+  exam_attempts               exam_attempts[]
+  exam_draft_fields           exam_draft_fields[]
+  exam_sections               exam_sections[]
+  exam_syllabus               exam_syllabus[]
+  passages                    passages[]
+  exam_categories             exam_categories?              @relation(fields: [category_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users                       users?                        @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_difficulties           exam_difficulties?            @relation(fields: [difficulty_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  paper_sections              paper_sections?               @relation(fields: [paper_section_id], references: [id], onUpdate: NoAction)
+  paper_series                paper_series?                 @relation(fields: [paper_series_id], references: [id], onUpdate: NoAction)
+  paper_series_sections       paper_series_sections?        @relation(fields: [paper_series_section_id], references: [id], onUpdate: NoAction)
+  paper_series_topics         paper_series_topics?          @relation(fields: [paper_series_topic_id], references: [id], onUpdate: NoAction)
+  paper_topics                paper_topics?                 @relation(fields: [paper_topic_id], references: [id], onUpdate: NoAction)
+  exam_subcategories          exam_subcategories?           @relation(fields: [subcategory_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  test_series                 test_series?                  @relation(fields: [test_series_id], references: [id], onUpdate: NoAction)
+  test_series_sections        test_series_sections?         @relation(fields: [test_series_section_id], references: [id], onUpdate: NoAction)
+  test_series_topics          test_series_topics?           @relation(fields: [test_series_topic_id], references: [id], onUpdate: NoAction)
+  page_popular_tests          page_popular_tests[]
+  questions                   questions[]
+  results                     results[]
+  sections                    sections[]
+  subcategory_question_papers subcategory_question_papers[]
+  transactions                transactions[]
+
+  @@index([attempts(sort: Desc)], map: "idx_exams_attempts_desc")
+  @@index([category], map: "idx_exams_category")
+  @@index([category_id], map: "idx_exams_category_id")
+  @@index([category_id, is_published], map: "idx_exams_category_published", where: raw("(deleted_at IS NULL)"))
+  @@index([category_id, status], map: "idx_exams_category_status", where: raw("(deleted_at IS NULL)"))
+  @@index([deleted_at], map: "idx_exams_deleted_at")
+  @@index([difficulty_id], map: "idx_exams_difficulty_id")
+  @@index([test_series_id, display_order], map: "idx_exams_display_order", where: raw("(test_series_id IS NOT NULL)"))
+  @@index([end_date], map: "idx_exams_end_date", where: raw("(deleted_at IS NULL)"))
+  @@index([exam_date], map: "idx_exams_exam_date")
+  @@index([exam_type], map: "idx_exams_exam_type")
+  @@index([is_current_affair], map: "idx_exams_is_current_affair")
+  @@index([is_premium], map: "idx_exams_is_premium")
+  @@index([is_published], map: "idx_exams_is_published", where: raw("(deleted_at IS NULL)"))
+  @@index([is_test_series], map: "idx_exams_is_test_series")
+  @@index([paper_section_id], map: "idx_exams_paper_section")
+  @@index([paper_series_id], map: "idx_exams_paper_series")
+  @@index([paper_series_section_id], map: "idx_exams_paper_series_section")
+  @@index([paper_series_topic_id], map: "idx_exams_paper_series_topic")
+  @@index([paper_topic_id], map: "idx_exams_paper_topic")
+  @@index([pdf_url_en], map: "idx_exams_pdf_en", where: raw("(pdf_url_en IS NOT NULL)"))
+  @@index([pdf_url_hi], map: "idx_exams_pdf_hi", where: raw("(pdf_url_hi IS NOT NULL)"))
+  @@index([is_published, created_at(sort: Desc)], map: "idx_exams_published_created", where: raw("(deleted_at IS NULL)"))
+  @@index([start_date], map: "idx_exams_start_date")
+  @@index([status], map: "idx_exams_status")
+  @@index([subcategory_id], map: "idx_exams_subcategory_id")
+  @@index([supports_hindi], map: "idx_exams_supports_hindi", where: raw("(supports_hindi = true)"))
+  @@index([test_series_id], map: "idx_exams_test_series")
+  @@index([test_series_section_id], map: "idx_exams_test_series_section")
+  @@index([test_series_topic_id], map: "idx_exams_test_series_topic")
+  @@index([exam_type, show_in_mock_tests], map: "idx_exams_type_show_mock")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model footer_links {
+  id                                   String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  section                              String    @default("general") @db.VarChar(80)
+  section_order                        Int?      @default(0)
+  label                                String    @db.VarChar(80)
+  href                                 String
+  display_order                        Int?      @default(0)
+  is_active                            Boolean?  @default(true)
+  open_in_new_tab                      Boolean?  @default(false)
+  created_by                           String?   @db.Uuid
+  updated_by                           String?   @db.Uuid
+  created_at                           DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at                           DateTime? @default(now()) @db.Timestamptz(6)
+  deleted_at                           DateTime? @db.Timestamptz(6)
+  users_footer_links_created_byTousers users?    @relation("footer_links_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_footer_links_updated_byTousers users?    @relation("footer_links_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([is_active], map: "idx_footer_links_active", where: raw("(deleted_at IS NULL)"))
+  @@index([section, section_order, display_order], map: "idx_footer_links_section")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model homepage_banners {
+  id            String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  title         String    @db.VarChar(255)
+  subtitle      String?
+  image_url     String
+  link_url      String?
+  button_text   String?   @db.VarChar(100)
+  display_order Int
+  is_active     Boolean?  @default(true)
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime? @default(now()) @db.Timestamptz(6)
+  placement     String?   @default("top")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model homepage_hero {
+  id                   String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  slug                 String    @unique
+  title                String?   @db.VarChar(255)
+  subtitle             String?
+  description          String?
+  cta_primary_text     String?   @db.VarChar(120)
+  cta_primary_url      String?
+  cta_secondary_text   String?   @db.VarChar(120)
+  cta_secondary_url    String?
+  media_layout         String?   @default("single") @db.VarChar(50)
+  background_video_url String?
+  media_items          Json?     @default("[]")
+  meta_title           String?   @db.VarChar(300)
+  meta_description     String?
+  meta_keywords        String?
+  og_title             String?   @db.VarChar(300)
+  og_description       String?
+  og_image_url         String?
+  canonical_url        String?
+  robots_meta          String?   @default("index,follow") @db.VarChar(50)
+  is_published         Boolean?  @default(true)
+  created_by           String?   @db.Uuid
+  updated_by           String?   @db.Uuid
+  created_at           DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model invoices {
+  id             String        @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  transaction_id String?       @unique @db.Uuid
+  invoice_number String        @unique @db.VarChar(100)
+  invoice_url    String?
+  created_at     DateTime?     @default(now()) @db.Timestamptz(6)
+  transactions   transactions? @relation(fields: [transaction_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model navigation_links {
+  id                                       String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  label                                    String    @db.VarChar(80)
+  href                                     String
+  icon                                     String?   @db.VarChar(80)
+  display_order                            Int?      @default(0)
+  is_active                                Boolean?  @default(true)
+  open_in_new_tab                          Boolean?  @default(false)
+  created_by                               String?   @db.Uuid
+  updated_by                               String?   @db.Uuid
+  created_at                               DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at                               DateTime? @default(now()) @db.Timestamptz(6)
+  deleted_at                               DateTime? @db.Timestamptz(6)
+  users_navigation_links_created_byTousers users?    @relation("navigation_links_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  users_navigation_links_updated_byTousers users?    @relation("navigation_links_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([is_active], map: "idx_navigation_links_active", where: raw("(deleted_at IS NULL)"))
+  @@index([display_order, created_at(sort: Desc)], map: "idx_navigation_links_display_order")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model option_translations {
+  id               String           @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  option_id        String           @db.Uuid
+  lang             String           @db.VarChar(10)
+  text_translated  String
+  translated_at    DateTime         @default(now()) @db.Timestamptz(6)
+  question_options question_options @relation(fields: [option_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([option_id, lang])
+  @@index([option_id, lang], map: "idx_option_translations_lookup")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model otp_verifications {
+  id         String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  email      String?   @db.VarChar(255)
+  phone      String?   @db.VarChar(20)
+  otp        String    @db.VarChar(6)
+  purpose    String    @db.VarChar(50)
+  expires_at DateTime  @db.Timestamptz(6)
+  is_used    Boolean?  @default(false)
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model page_analytics {
+  id                 String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id     String             @db.Uuid
+  view_date          DateTime           @db.Date
+  page_views         Int?               @default(0)
+  unique_visitors    Int?               @default(0)
+  avg_time_on_page   Int?               @default(0)
+  bounce_rate        Decimal?           @default(0) @db.Decimal(5, 2)
+  created_at         DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at         DateTime?          @default(now()) @db.Timestamp(6)
+  exam_subcategories exam_subcategories @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([subcategory_id, view_date])
+  @@index([view_date(sort: Desc)], map: "idx_page_analytics_date")
+  @@index([subcategory_id], map: "idx_page_analytics_subcategory")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model page_banners {
+  id              String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  page_identifier String
+  image_url       String
+  link_url        String?
+  alt_text        String?
+  display_order   Int       @default(0)
+  is_active       Boolean?  @default(true)
+  created_at      DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@index([page_identifier], map: "idx_page_banners_page_identifier")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model page_content_blocks {
+  id                                          String                @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                              String?               @db.Uuid
+  block_type                                  String                @db.VarChar(50)
+  content                                     Json                  @default("{}")
+  settings                                    Json?                 @default("{}")
+  display_order                               Int?                  @default(0)
+  parent_block_id                             String?               @db.Uuid
+  is_active                                   Boolean?              @default(true)
+  created_at                                  DateTime?             @default(now()) @db.Timestamp(6)
+  updated_at                                  DateTime?             @default(now()) @db.Timestamp(6)
+  created_by                                  String?               @db.Uuid
+  updated_by                                  String?               @db.Uuid
+  section_id                                  String?               @db.Uuid
+  category_id                                 String?               @db.Uuid
+  test_series_id                              String?               @db.Uuid
+  exam_categories                             exam_categories?      @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_page_content_blocks_created_byTousers users?                @relation("page_content_blocks_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  page_content_blocks                         page_content_blocks?  @relation("page_content_blocksTopage_content_blocks", fields: [parent_block_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  other_page_content_blocks                   page_content_blocks[] @relation("page_content_blocksTopage_content_blocks")
+  page_sections                               page_sections?        @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  exam_subcategories                          exam_subcategories?   @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  test_series                                 test_series?          @relation(fields: [test_series_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_page_content_blocks_updated_byTousers users?                @relation("page_content_blocks_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([category_id], map: "idx_page_blocks_category")
+  @@index([display_order], map: "idx_page_blocks_order")
+  @@index([parent_block_id], map: "idx_page_blocks_parent")
+  @@index([section_id], map: "idx_page_blocks_section")
+  @@index([subcategory_id], map: "idx_page_blocks_subcategory")
+  @@index([block_type], map: "idx_page_blocks_type")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model page_media {
+  id                 String              @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id     String?             @db.Uuid
+  file_name          String              @db.VarChar(255)
+  file_url           String
+  file_type          String              @db.VarChar(50)
+  file_size          Int?
+  mime_type          String?             @db.VarChar(100)
+  alt_text           String?             @db.VarChar(500)
+  caption            String?
+  width              Int?
+  height             Int?
+  metadata           Json?               @default("{}")
+  created_at         DateTime?           @default(now()) @db.Timestamp(6)
+  created_by         String?             @db.Uuid
+  category_id        String?             @db.Uuid
+  test_series_id     String?             @db.Uuid
+  exam_categories    exam_categories?    @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users              users?              @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories exam_subcategories? @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  test_series        test_series?        @relation(fields: [test_series_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([category_id], map: "idx_page_media_category")
+  @@index([subcategory_id], map: "idx_page_media_subcategory")
+  @@index([file_type], map: "idx_page_media_type")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model page_popular_tests {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  page_identifier String    @db.VarChar(100)
+  exam_id         String    @db.Uuid
+  display_order   Int       @default(0)
+  is_active       Boolean?  @default(true)
+  created_at      DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime? @default(now()) @db.Timestamptz(6)
+  exams           exams     @relation(fields: [exam_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([page_identifier, exam_id])
+  @@index([page_identifier, is_active], map: "idx_page_popular_tests_active")
+  @@index([exam_id], map: "idx_page_popular_tests_exam_id")
+  @@index([page_identifier, display_order], map: "idx_page_popular_tests_order")
+  @@index([page_identifier], map: "idx_page_popular_tests_page")
+  @@index([page_identifier, is_active, display_order], map: "idx_page_popular_tests_page_active")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model page_revisions {
+  id                 String              @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id     String?             @db.Uuid
+  revision_number    Int
+  content_snapshot   Json
+  change_summary     String?
+  created_at         DateTime?           @default(now()) @db.Timestamp(6)
+  created_by         String?             @db.Uuid
+  category_id        String?             @db.Uuid
+  test_series_id     String?             @db.Uuid
+  exam_categories    exam_categories?    @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users              users?              @relation(fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories exam_subcategories? @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  test_series        test_series?        @relation(fields: [test_series_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([category_id], map: "idx_page_revisions_category")
+  @@index([revision_number(sort: Desc)], map: "idx_page_revisions_number")
+  @@index([subcategory_id], map: "idx_page_revisions_subcategory")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model page_sections {
+  id                                    String                   @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                        String?                  @db.Uuid
+  section_key                           String                   @db.VarChar(500)
+  title                                 String                   @db.VarChar(500)
+  subtitle                              String?                  @db.VarChar(500)
+  icon                                  String?                  @db.VarChar(500)
+  background_color                      String?                  @db.VarChar(50)
+  text_color                            String?                  @db.VarChar(50)
+  display_order                         Int?                     @default(0)
+  is_collapsible                        Boolean?                 @default(false)
+  is_expanded                           Boolean?                 @default(true)
+  is_active                             Boolean?                 @default(true)
+  settings                              Json?                    @default("{}")
+  created_at                            DateTime?                @default(now()) @db.Timestamp(6)
+  updated_at                            DateTime?                @default(now()) @db.Timestamp(6)
+  created_by                            String?                  @db.Uuid
+  updated_by                            String?                  @db.Uuid
+  is_sidebar                            Boolean?                 @default(false)
+  custom_tab_id                         String?                  @db.Uuid
+  category_id                           String?                  @db.Uuid
+  category_custom_tab_id                String?                  @db.Uuid
+  sidebar_tab_id                        String?                  @db.VarChar(100)
+  category_sidebar_tab_id               String?                  @db.VarChar(100)
+  test_series_id                        String?                  @db.Uuid
+  page_content_blocks                   page_content_blocks[]
+  category_custom_tabs                  category_custom_tabs?    @relation(fields: [category_custom_tab_id], references: [id], onUpdate: NoAction)
+  exam_categories                       exam_categories?         @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_page_sections_created_byTousers users?                   @relation("page_sections_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  subcategory_custom_tabs               subcategory_custom_tabs? @relation(fields: [custom_tab_id], references: [id], onUpdate: NoAction)
+  exam_subcategories                    exam_subcategories?      @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  test_series                           test_series?             @relation(fields: [test_series_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_page_sections_updated_byTousers users?                   @relation("page_sections_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([category_id], map: "idx_page_sections_category")
+  @@index([category_sidebar_tab_id], map: "idx_page_sections_category_sidebar_tab", where: raw("(is_sidebar = true)"))
+  @@index([custom_tab_id], map: "idx_page_sections_custom_tab")
+  @@index([display_order], map: "idx_page_sections_order")
+  @@index([sidebar_tab_id], map: "idx_page_sections_sidebar_tab", where: raw("(is_sidebar = true)"))
+  @@index([subcategory_id], map: "idx_page_sections_subcategory")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model page_seo {
+  id                 String              @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id     String?             @unique(map: "idx_page_seo_subcategory_unique", where: raw("(subcategory_id IS NOT NULL)")) @db.Uuid
+  meta_title         String?             @db.VarChar(300)
+  meta_description   String?
+  meta_keywords      String?
+  og_title           String?             @db.VarChar(300)
+  og_description     String?
+  og_image_url       String?
+  canonical_url      String?
+  robots_meta        String?             @db.VarChar(100)
+  structured_data    Json?               @default("{}")
+  created_at         DateTime?           @default(now()) @db.Timestamp(6)
+  updated_at         DateTime?           @default(now()) @db.Timestamp(6)
+  category_id        String?             @unique(map: "idx_page_seo_category_unique", where: raw("(category_id IS NOT NULL)")) @db.Uuid
+  author_name        String?             @db.VarChar(255)
+  test_series_id     String?             @db.Uuid
+  exam_categories    exam_categories?    @relation(fields: [category_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  exam_subcategories exam_subcategories? @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  test_series        test_series?        @relation(fields: [test_series_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model page_templates {
+  id                String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  name              String    @unique @db.VarChar(200)
+  description       String?
+  template_data     Json
+  preview_image_url String?
+  is_active         Boolean?  @default(true)
+  created_at        DateTime? @default(now()) @db.Timestamp(6)
+  updated_at        DateTime? @default(now()) @db.Timestamp(6)
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model paper_sections {
+  id            String         @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  name          String         @db.VarChar(255)
+  description   String?
+  display_order Int?           @default(0)
+  created_at    DateTime?      @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime?      @default(now()) @db.Timestamptz(6)
+  exams         exams[]
+  paper_topics  paper_topics[]
+
+  @@index([display_order], map: "idx_paper_sections_order")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model paper_series {
+  id                    String                  @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  title                 String                  @db.VarChar(255)
+  description           String?
+  slug                  String?                 @unique @db.VarChar(255)
+  category_id           String?                 @db.Uuid
+  subcategory_id        String?                 @db.Uuid
+  is_published          Boolean?                @default(false)
+  display_order         Int?                    @default(0)
+  created_at            DateTime?               @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime?               @default(now()) @db.Timestamptz(6)
+  deleted_at            DateTime?               @db.Timestamptz(6)
+  exams                 exams[]
+  exam_categories       exam_categories?        @relation(fields: [category_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories    exam_subcategories?     @relation(fields: [subcategory_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  paper_series_sections paper_series_sections[]
+
+  @@index([category_id], map: "idx_paper_series_category")
+  @@index([is_published], map: "idx_paper_series_published")
+  @@index([slug], map: "idx_paper_series_slug")
+  @@index([subcategory_id], map: "idx_paper_series_subcategory")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model paper_series_sections {
+  id                  String                @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  paper_series_id     String?               @db.Uuid
+  name                String                @db.VarChar(255)
+  description         String?
+  display_order       Int?                  @default(0)
+  created_at          DateTime?             @default(now()) @db.Timestamptz(6)
+  updated_at          DateTime?             @default(now()) @db.Timestamptz(6)
+  exams               exams[]
+  paper_series        paper_series?         @relation(fields: [paper_series_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  paper_series_topics paper_series_topics[]
+
+  @@index([paper_series_id], map: "idx_paper_series_sections_series")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model paper_series_topics {
+  id                    String                 @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  section_id            String?                @db.Uuid
+  name                  String                 @db.VarChar(255)
+  description           String?
+  display_order         Int?                   @default(0)
+  created_at            DateTime?              @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime?              @default(now()) @db.Timestamptz(6)
+  exams                 exams[]
+  paper_series_sections paper_series_sections? @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([section_id], map: "idx_paper_series_topics_section")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model paper_topics {
+  id             String          @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  section_id     String?         @db.Uuid
+  name           String          @db.VarChar(255)
+  description    String?
+  display_order  Int?            @default(0)
+  created_at     DateTime?       @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime?       @default(now()) @db.Timestamptz(6)
+  exams          exams[]
+  paper_sections paper_sections? @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([display_order], map: "idx_paper_topics_order")
+  @@index([section_id], map: "idx_paper_topics_section")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model password_reset_tokens {
+  id         String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  user_id    String?   @db.Uuid
+  token      String    @unique @db.VarChar(255)
+  expires_at DateTime  @db.Timestamptz(6)
+  is_used    Boolean?  @default(false)
+  created_at DateTime? @default(now()) @db.Timestamptz(6)
+  users      users?    @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model privacy_policy_content {
+  id            String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  title         String    @db.VarChar(200)
+  last_updated  DateTime  @db.Date
+  intro_body    String?
+  contact_email String?   @db.VarChar(160)
+  contact_url   String?
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model privacy_policy_points {
+  id                      String                   @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  section_id              String?                  @db.Uuid
+  heading                 String?                  @db.VarChar(200)
+  body                    String?
+  list_items              Json?
+  display_order           Int?                     @default(0)
+  is_active               Boolean?                 @default(true)
+  created_at              DateTime?                @default(now()) @db.Timestamptz(6)
+  updated_at              DateTime?                @default(now()) @db.Timestamptz(6)
+  privacy_policy_sections privacy_policy_sections? @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([section_id, display_order], map: "idx_privacy_policy_points_section", where: raw("(is_active = true)"))
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model privacy_policy_sections {
+  id                    String                  @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  title                 String                  @db.VarChar(200)
+  description           String?
+  display_order         Int?                    @default(0)
+  is_active             Boolean?                @default(true)
+  created_at            DateTime?               @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime?               @default(now()) @db.Timestamptz(6)
+  privacy_policy_points privacy_policy_points[]
+
+  @@index([display_order], map: "idx_privacy_policy_sections_display", where: raw("(is_active = true)"))
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model promocode_plan_links {
+  id                 String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  promocode_id       String             @db.Uuid
+  plan_id            String             @db.Uuid
+  created_at         DateTime           @default(now()) @db.Timestamptz(6)
+  subscription_plans subscription_plans @relation(fields: [plan_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  promocodes         promocodes         @relation(fields: [promocode_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([promocode_id, plan_id], map: "promocode_plan_unique")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model promocodes {
+  id                   String                 @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  code                 String                 @unique
+  description          String?
+  discount_type        String
+  discount_value       Int
+  max_redemptions      Int?
+  redemptions_count    Int                    @default(0)
+  min_amount_cents     Int?
+  start_at             DateTime?              @db.Timestamptz(6)
+  end_at               DateTime?              @db.Timestamptz(6)
+  auto_renew_only      Boolean                @default(false)
+  created_at           DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime               @default(now()) @db.Timestamptz(6)
+  promocode_plan_links promocode_plan_links[]
+  user_subscriptions   user_subscriptions[]
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model question_options {
+  id                  String                @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  question_id         String?               @db.Uuid
+  option_text         String
+  is_correct          Boolean?              @default(false)
+  option_order        Int
+  created_at          DateTime?             @default(now()) @db.Timestamptz(6)
+  image_url           String?
+  option_text_hi      String?
+  option_translations option_translations[]
+  questions           questions?            @relation(fields: [question_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([question_id, option_order], map: "idx_question_options_order")
+  @@index([question_id], map: "idx_question_options_question_id")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model question_translations {
+  id              String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  question_id     String    @db.Uuid
+  lang            String    @db.VarChar(10)
+  text_translated String
+  translated_at   DateTime  @default(now()) @db.Timestamptz(6)
+  questions       questions @relation(fields: [question_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([question_id, lang])
+  @@index([question_id], map: "idx_question_translations_exam")
+  @@index([question_id, lang], map: "idx_question_translations_lookup")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model questions {
+  id                    String                  @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  exam_id               String?                 @db.Uuid
+  section_id            String?                 @db.Uuid
+  passage_id            String?                 @db.Uuid
+  type                  String                  @db.VarChar(20)
+  text                  String
+  marks                 Decimal                 @db.Decimal(5, 2)
+  negative_marks        Decimal?                @default(0.00) @db.Decimal(5, 2)
+  explanation           String?
+  image_url             String?
+  difficulty            String?                 @db.VarChar(20)
+  question_order        Int?
+  created_at            DateTime?               @default(now()) @db.Timestamptz(6)
+  updated_at            DateTime?               @default(now()) @db.Timestamptz(6)
+  deleted_at            DateTime?               @db.Timestamptz(6)
+  text_hi               String?
+  explanation_hi        String?
+  question_number       Int                     @default(1)
+  explanation_image_url String?
+  question_options      question_options[]
+  question_translations question_translations[]
+  exams                 exams?                  @relation(fields: [exam_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  exam_sections         exam_sections?          @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  passages              passages?               @relation(fields: [passage_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  user_answers          user_answers[]
+
+  @@index([deleted_at], map: "idx_questions_deleted_at")
+  @@index([exam_id], map: "idx_questions_exam_id")
+  @@index([exam_id, section_id], map: "idx_questions_exam_section", where: raw("(deleted_at IS NULL)"))
+  @@index([exam_id, section_id, question_order, question_number], map: "idx_questions_order", where: raw("(deleted_at IS NULL)"))
+  @@index([section_id], map: "idx_questions_section_id")
+  @@index([passage_id], map: "idx_questions_passage_id", where: raw("(deleted_at IS NULL)"))
+}
+
+/// A shared reading passage (rich HTML, images embedded inline) that one or more
+/// questions reference — rendered as a dedicated reading pane alongside its linked
+/// questions in the exam attempt UI, review page and PDF export.
+model passages {
+  id                   String                 @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  exam_id              String?                @db.Uuid
+  title                String?                @db.VarChar(255)
+  content              String
+  content_hi           String?
+  created_at           DateTime?              @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime?              @default(now()) @db.Timestamptz(6)
+  deleted_at           DateTime?              @db.Timestamptz(6)
+  exams                exams?                 @relation(fields: [exam_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  questions            questions[]
+  passage_translations passage_translations[]
+
+  @@index([exam_id], map: "idx_passages_exam_id", where: raw("(deleted_at IS NULL)"))
+}
+
+model passage_translations {
+  id                 String   @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  passage_id         String   @db.Uuid
+  lang               String   @db.VarChar(10)
+  title_translated   String?  @db.VarChar(500)
+  content_translated String
+  translated_at      DateTime @default(now()) @db.Timestamptz(6)
+  passages           passages @relation(fields: [passage_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([passage_id, lang])
+  @@index([passage_id, lang], map: "idx_passage_translations_lookup")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model refund_policy_content {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title         String    @db.VarChar(255)
+  last_updated  DateTime  @db.Date
+  intro_body    String?
+  contact_email String?   @db.VarChar(255)
+  contact_url   String?   @db.VarChar(500)
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at    DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model refund_policy_points {
+  id                     String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  section_id             String                 @db.Uuid
+  heading                String?                @db.VarChar(500)
+  body                   String?
+  list_items             Json?
+  display_order          Int?                   @default(0)
+  is_active              Boolean?               @default(true)
+  created_at             DateTime?              @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime?              @default(now()) @db.Timestamptz(6)
+  refund_policy_sections refund_policy_sections @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([display_order], map: "idx_refund_policy_points_display_order")
+  @@index([is_active], map: "idx_refund_policy_points_is_active")
+  @@index([section_id], map: "idx_refund_policy_points_section_id")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model refund_policy_sections {
+  id                   String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  title                String                 @db.VarChar(255)
+  description          String?
+  display_order        Int?                   @default(0)
+  is_active            Boolean?               @default(true)
+  created_at           DateTime?              @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime?              @default(now()) @db.Timestamptz(6)
+  refund_policy_points refund_policy_points[]
+
+  @@index([display_order], map: "idx_refund_policy_sections_display_order")
+  @@index([is_active], map: "idx_refund_policy_sections_is_active")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model results {
+  id                 String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  attempt_id         String?            @unique @db.Uuid
+  exam_id            String?            @db.Uuid
+  user_id            String?            @db.Uuid
+  score              Decimal            @db.Decimal(10, 2)
+  total_marks        Decimal            @db.Decimal(10, 2)
+  percentage         Decimal            @db.Decimal(5, 2)
+  correct_answers    Int
+  wrong_answers      Int
+  unattempted        Int
+  time_taken         Int
+  rank               Int?
+  total_participants Int?
+  status             String             @db.VarChar(20)
+  is_published       Boolean?           @default(false)
+  created_at         DateTime?          @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime?          @default(now()) @db.Timestamptz(6)
+  exam_attempts      exam_attempts?     @relation(fields: [attempt_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  exams              exams?             @relation(fields: [exam_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users              users?             @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  section_analysis   section_analysis[]
+
+  @@index([exam_id], map: "idx_results_exam_id")
+  @@index([user_id], map: "idx_results_user_id")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model section_analysis {
+  id              String         @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  result_id       String?        @db.Uuid
+  section_id      String?        @db.Uuid
+  score           Decimal        @db.Decimal(10, 2)
+  total_marks     Decimal        @db.Decimal(10, 2)
+  correct_answers Int
+  wrong_answers   Int
+  unattempted     Int
+  accuracy        Decimal        @db.Decimal(5, 2)
+  time_taken      Int
+  created_at      DateTime?      @default(now()) @db.Timestamptz(6)
+  results         results?       @relation(fields: [result_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  exam_sections   exam_sections? @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model section_translations {
+  id              String        @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  section_id      String        @db.Uuid
+  lang            String        @db.VarChar(10)
+  name_translated String        @db.VarChar(500)
+  translated_at   DateTime      @default(now()) @db.Timestamptz(6)
+  exam_sections   exam_sections @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@unique([section_id, lang])
+  @@index([section_id, lang], map: "idx_section_translations_lookup")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model sections {
+  id                 String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  exam_id            String?   @db.Uuid
+  name               String    @db.VarChar(255)
+  total_questions    Int
+  marks_per_question Decimal   @db.Decimal(5, 2)
+  duration           Int?
+  section_order      Int
+  created_at         DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime? @default(now()) @db.Timestamptz(6)
+  exams              exams?    @relation(fields: [exam_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([exam_id], map: "idx_sections_exam_id")
+  @@index([exam_id, section_order], map: "idx_sections_order")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model shipping_settings {
+  id                      String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  cost_per_kg             Decimal   @default(50.00) @db.Decimal(10, 2)
+  free_shipping_threshold Decimal?  @default(500.00) @db.Decimal(10, 2)
+  updated_at              DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model static_pages {
+  id               String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  slug             String    @unique @db.VarChar(255)
+  title            String    @db.VarChar(255)
+  content          String
+  meta_title       String?   @db.VarChar(255)
+  meta_description String?
+  is_published     Boolean?  @default(true)
+  created_at       DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_custom_tabs {
+  id                     String                   @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id         String                   @db.Uuid
+  tab_key                String                   @db.VarChar(200)
+  title                  String                   @db.VarChar(255)
+  description            String?
+  display_order          Int?                     @default(0)
+  is_active              Boolean?                 @default(true)
+  created_at             DateTime?                @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime?                @default(now()) @db.Timestamptz(6)
+  created_by             String?                  @db.Uuid
+  updated_by             String?                  @db.Uuid
+  page_sections          page_sections[]
+  exam_subcategories     exam_subcategories       @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  subcategory_tab_config subcategory_tab_config[]
+
+  @@unique([subcategory_id, tab_key])
+  @@index([subcategory_id], map: "idx_custom_tabs_subcategory")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_exam_stats {
+  id                                             String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                                 String             @db.Uuid
+  metric                                         String             @db.VarChar(100)
+  metric_year                                    String             @db.VarChar(10)
+  metric_value                                   Decimal?           @db.Decimal
+  extra                                          Json?              @default("{}")
+  created_at                                     DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at                                     DateTime?          @default(now()) @db.Timestamp(6)
+  created_by                                     String?            @db.Uuid
+  updated_by                                     String?            @db.Uuid
+  stat_label                                     String?            @db.VarChar(150)
+  stat_value                                     String?            @db.VarChar(150)
+  stat_description                               String?
+  icon                                           String?            @db.VarChar(100)
+  display_order                                  Int?               @default(0)
+  is_active                                      Boolean?           @default(true)
+  users_subcategory_exam_stats_created_byTousers users?             @relation("subcategory_exam_stats_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories                             exam_subcategories @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_subcategory_exam_stats_updated_byTousers users?             @relation("subcategory_exam_stats_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([is_active], map: "idx_subcategory_exam_stats_active")
+  @@index([metric], map: "idx_subcategory_exam_stats_metric")
+  @@index([display_order], map: "idx_subcategory_exam_stats_order")
+  @@index([subcategory_id], map: "idx_subcategory_exam_stats_subcategory")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_faqs {
+  id                                       String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                           String             @db.Uuid
+  question                                 String
+  answer                                   String
+  display_order                            Int?               @default(0)
+  is_active                                Boolean?           @default(true)
+  created_at                               DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at                               DateTime?          @default(now()) @db.Timestamp(6)
+  created_by                               String?            @db.Uuid
+  updated_by                               String?            @db.Uuid
+  users_subcategory_faqs_created_byTousers users?             @relation("subcategory_faqs_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories                       exam_subcategories @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_subcategory_faqs_updated_byTousers users?             @relation("subcategory_faqs_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([subcategory_id], map: "idx_subcategory_faqs_subcategory")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_highlights {
+  id                                             String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                                 String             @db.Uuid
+  title                                          String             @db.VarChar(200)
+  value                                          String             @db.VarChar(400)
+  icon                                           String?            @db.VarChar(100)
+  accent_color                                   String?            @db.VarChar(50)
+  description                                    String?
+  display_order                                  Int?               @default(0)
+  is_active                                      Boolean?           @default(true)
+  created_at                                     DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at                                     DateTime?          @default(now()) @db.Timestamp(6)
+  created_by                                     String?            @db.Uuid
+  updated_by                                     String?            @db.Uuid
+  users_subcategory_highlights_created_byTousers users?             @relation("subcategory_highlights_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories                             exam_subcategories @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_subcategory_highlights_updated_byTousers users?             @relation("subcategory_highlights_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([display_order], map: "idx_subcategory_highlights_order")
+  @@index([subcategory_id], map: "idx_subcategory_highlights_subcategory")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_overviews {
+  id                                            String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                                String             @unique(map: "idx_subcategory_overview_unique") @db.Uuid
+  hero_title                                    String             @db.VarChar(300)
+  hero_subtitle                                 String?            @db.VarChar(600)
+  hero_description                              String?
+  primary_cta_label                             String?            @db.VarChar(120)
+  primary_cta_url                               String?            @db.VarChar(1000)
+  secondary_cta_label                           String?            @db.VarChar(120)
+  secondary_cta_url                             String?            @db.VarChar(1000)
+  stats                                         Json?              @default("[]")
+  metadata                                      Json?              @default("{}")
+  created_at                                    DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at                                    DateTime?          @default(now()) @db.Timestamp(6)
+  created_by                                    String?            @db.Uuid
+  updated_by                                    String?            @db.Uuid
+  hero_image_url                                String?
+  cta_primary_text                              String?            @db.VarChar(150)
+  cta_primary_url                               String?
+  cta_secondary_text                            String?            @db.VarChar(150)
+  cta_secondary_url                             String?
+  stats_json                                    Json?
+  meta_title                                    String?            @db.VarChar(300)
+  meta_description                              String?
+  meta_keywords                                 String?
+  users_subcategory_overviews_created_byTousers users?             @relation("subcategory_overviews_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories                            exam_subcategories @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_subcategory_overviews_updated_byTousers users?             @relation("subcategory_overviews_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_question_papers {
+  id                                                  String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                                      String             @db.Uuid
+  year                                                String?            @db.VarChar(10)
+  shift                                               String?            @db.VarChar(50)
+  language                                            String?            @db.VarChar(50)
+  download_url                                        String?            @db.VarChar(1000)
+  description                                         String?
+  display_order                                       Int?               @default(0)
+  created_at                                          DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at                                          DateTime?          @default(now()) @db.Timestamp(6)
+  created_by                                          String?            @db.Uuid
+  updated_by                                          String?            @db.Uuid
+  exam_id                                             String?            @db.Uuid
+  exam_slug                                           String?
+  exam_title                                          String?
+  attempt_url                                         String?
+  title                                               String?            @db.VarChar(400)
+  paper_type                                          String?            @db.VarChar(100)
+  file_url                                            String?            @db.VarChar(1000)
+  is_active                                           Boolean?           @default(true)
+  users_subcategory_question_papers_created_byTousers users?             @relation("subcategory_question_papers_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exams                                               exams?             @relation(fields: [exam_id], references: [id], onUpdate: NoAction)
+  exam_subcategories                                  exam_subcategories @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_subcategory_question_papers_updated_byTousers users?             @relation("subcategory_question_papers_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([exam_id], map: "idx_subcategory_question_papers_exam")
+  @@index([subcategory_id], map: "idx_subcategory_question_papers_subcategory")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_resources {
+  id                                            String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                                String             @db.Uuid
+  label                                         String             @db.VarChar(200)
+  description                                   String?
+  link_url                                      String             @db.VarChar(1000)
+  icon                                          String?            @db.VarChar(80)
+  display_order                                 Int?               @default(0)
+  created_at                                    DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at                                    DateTime?          @default(now()) @db.Timestamp(6)
+  created_by                                    String?            @db.Uuid
+  updated_by                                    String?            @db.Uuid
+  users_subcategory_resources_created_byTousers users?             @relation("subcategory_resources_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories                            exam_subcategories @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_subcategory_resources_updated_byTousers users?             @relation("subcategory_resources_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([subcategory_id], map: "idx_subcategory_resources_subcategory")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_sections {
+  id                                           String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                               String             @db.Uuid
+  slug                                         String             @db.VarChar(120)
+  title                                        String             @db.VarChar(300)
+  subtitle                                     String?            @db.VarChar(400)
+  content                                      String?
+  media_url                                    String?            @db.VarChar(1000)
+  layout_type                                  String?            @default("default") @db.VarChar(80)
+  button_label                                 String?            @db.VarChar(120)
+  button_url                                   String?            @db.VarChar(1000)
+  custom_data                                  Json?              @default("{}")
+  display_order                                Int?               @default(0)
+  is_active                                    Boolean?           @default(true)
+  created_at                                   DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at                                   DateTime?          @default(now()) @db.Timestamp(6)
+  created_by                                   String?            @db.Uuid
+  updated_by                                   String?            @db.Uuid
+  users_subcategory_sections_created_byTousers users?             @relation("subcategory_sections_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories                           exam_subcategories @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_subcategory_sections_updated_byTousers users?             @relation("subcategory_sections_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([subcategory_id, slug], map: "idx_subcategory_sections_slug")
+  @@index([subcategory_id], map: "idx_subcategory_sections_subcategory")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_tab_config {
+  id                                             String                   @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                                 String                   @db.Uuid
+  tab_type                                       String                   @db.VarChar(50)
+  tab_label                                      String                   @db.VarChar(255)
+  tab_key                                        String                   @db.VarChar(200)
+  custom_tab_id                                  String?                  @db.Uuid
+  display_order                                  Int                      @default(0)
+  is_active                                      Boolean?                 @default(true)
+  created_at                                     DateTime?                @default(now()) @db.Timestamptz(6)
+  updated_at                                     DateTime?                @default(now()) @db.Timestamptz(6)
+  created_by                                     String?                  @db.Uuid
+  updated_by                                     String?                  @db.Uuid
+  users_subcategory_tab_config_created_byTousers users?                   @relation("subcategory_tab_config_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  subcategory_custom_tabs                        subcategory_custom_tabs? @relation(fields: [custom_tab_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  exam_subcategories                             exam_subcategories       @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_subcategory_tab_config_updated_byTousers users?                   @relation("subcategory_tab_config_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([subcategory_id, tab_key])
+  @@index([display_order], map: "idx_subcategory_tab_config_order")
+  @@index([subcategory_id], map: "idx_subcategory_tab_config_subcategory")
+  @@index([tab_type], map: "idx_subcategory_tab_config_type")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_table_rows {
+  id                 String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  table_id           String             @db.Uuid
+  row_data           Json
+  display_order      Int?               @default(0)
+  created_at         DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at         DateTime?          @default(now()) @db.Timestamp(6)
+  subcategory_tables subcategory_tables @relation(fields: [table_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([table_id], map: "idx_subcategory_table_rows_table")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_tables {
+  id                                         String                   @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                             String                   @db.Uuid
+  slug                                       String                   @db.VarChar(120)
+  title                                      String                   @db.VarChar(300)
+  description                                String?
+  column_headers                             Json                     @default("[]")
+  display_order                              Int?                     @default(0)
+  is_active                                  Boolean?                 @default(true)
+  created_at                                 DateTime?                @default(now()) @db.Timestamp(6)
+  updated_at                                 DateTime?                @default(now()) @db.Timestamp(6)
+  created_by                                 String?                  @db.Uuid
+  updated_by                                 String?                  @db.Uuid
+  subcategory_table_rows                     subcategory_table_rows[]
+  users_subcategory_tables_created_byTousers users?                   @relation("subcategory_tables_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories                         exam_subcategories       @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_subcategory_tables_updated_byTousers users?                   @relation("subcategory_tables_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@unique([subcategory_id, slug], map: "idx_subcategory_tables_slug")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subcategory_updates {
+  id                                          String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  subcategory_id                              String             @db.Uuid
+  title                                       String             @db.VarChar(400)
+  tag                                         String?            @db.VarChar(50)
+  link_url                                    String?            @db.VarChar(1000)
+  published_at                                DateTime?          @db.Timestamp(6)
+  is_active                                   Boolean?           @default(true)
+  display_order                               Int?               @default(0)
+  created_at                                  DateTime?          @default(now()) @db.Timestamp(6)
+  updated_at                                  DateTime?          @default(now()) @db.Timestamp(6)
+  created_by                                  String?            @db.Uuid
+  updated_by                                  String?            @db.Uuid
+  description                                 String?
+  update_type                                 String?            @db.VarChar(50)
+  update_date                                 DateTime?          @db.Timestamp(6)
+  users_subcategory_updates_created_byTousers users?             @relation("subcategory_updates_created_byTousers", fields: [created_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories                          exam_subcategories @relation(fields: [subcategory_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  users_subcategory_updates_updated_byTousers users?             @relation("subcategory_updates_updated_byTousers", fields: [updated_by], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([display_order], map: "idx_subcategory_updates_order")
+  @@index([subcategory_id], map: "idx_subcategory_updates_subcategory")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subscription_page_blocks {
+  id                         String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  section_id                 String?                     @db.Uuid
+  block_type                 String                      @db.VarChar(50)
+  title                      String?
+  content                    String?
+  icon                       String?                     @db.VarChar(100)
+  image_url                  String?
+  link_url                   String?
+  link_text                  String?
+  display_order              Int?                        @default(0)
+  metadata                   Json?                       @default("{}")
+  created_at                 DateTime?                   @default(now()) @db.Timestamptz(6)
+  updated_at                 DateTime?                   @default(now()) @db.Timestamptz(6)
+  subscription_page_sections subscription_page_sections? @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([display_order], map: "idx_subscription_blocks_order")
+  @@index([section_id], map: "idx_subscription_blocks_section")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subscription_page_meta {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  meta_title       String?   @db.VarChar(255)
+  meta_description String?
+  meta_keywords    String?
+  og_title         String?   @db.VarChar(255)
+  og_description   String?
+  og_image         String?
+  canonical_url    String?
+  structured_data  Json?     @default("{}")
+  created_at       DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime? @default(now()) @db.Timestamptz(6)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model subscription_page_sections {
+  id                       String                     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  section_key              String                     @unique @db.VarChar(100)
+  section_type             String                     @db.VarChar(50)
+  title                    String?
+  subtitle                 String?
+  description              String?
+  background_color         String?                    @db.VarChar(50)
+  text_color               String?                    @db.VarChar(50)
+  display_order            Int?                       @default(0)
+  is_active                Boolean?                   @default(true)
+  settings                 Json?                      @default("{}")
+  created_at               DateTime?                  @default(now()) @db.Timestamptz(6)
+  updated_at               DateTime?                  @default(now()) @db.Timestamptz(6)
+  subscription_page_blocks subscription_page_blocks[]
+
+  @@index([is_active], map: "idx_subscription_sections_active")
+  @@index([display_order], map: "idx_subscription_sections_order")
+  @@index([section_type], map: "idx_subscription_sections_type")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model subscription_plans {
+  id                   String                 @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  name                 String
+  slug                 String                 @unique
+  description          String?
+  duration_days        Int
+  normal_price_cents   Int                    @default(0)
+  is_active            Boolean                @default(true)
+  features             String[]
+  created_at           DateTime               @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime               @default(now()) @db.Timestamptz(6)
+  currency_code        String                 @default("INR")
+  razorpay_plan_id     String?
+  sale_price_cents     Int?
+  promocode_plan_links promocode_plan_links[]
+  user_subscriptions   user_subscriptions[]
+  users                users[]
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+/// This model contains an expression index which requires additional setup for migrations. Visit https://pris.ly/d/expression-indexes for more info.
+model test_series {
+  id                      String                    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  title                   String                    @db.VarChar(255)
+  description             String?
+  slug                    String?                   @unique @db.VarChar(255)
+  category_id             String?                   @db.Uuid
+  subcategory_id          String?                   @db.Uuid
+  difficulty_id           String?                   @db.Uuid
+  total_tests             Int?                      @default(0)
+  total_attempts          Int?                      @default(0)
+  logo_url                String?
+  thumbnail_url           String?
+  is_published            Boolean?                  @default(false)
+  is_free                 Boolean?                  @default(true)
+  price                   Decimal?                  @default(0.00) @db.Decimal(10, 2)
+  display_order           Int?                      @default(0)
+  created_at              DateTime?                 @default(now()) @db.Timestamptz(6)
+  updated_at              DateTime?                 @default(now()) @db.Timestamptz(6)
+  deleted_at              DateTime?                 @db.Timestamptz(6)
+  hidden_from_listing     Boolean                   @default(false)
+  exams                   exams[]
+  page_content_blocks     page_content_blocks[]
+  page_media              page_media[]
+  page_revisions          page_revisions[]
+  page_sections           page_sections[]
+  page_seo                page_seo[]
+  exam_categories         exam_categories?          @relation(fields: [category_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_difficulties       exam_difficulties?        @relation(fields: [difficulty_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  exam_subcategories      exam_subcategories?       @relation(fields: [subcategory_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  test_series_custom_tabs test_series_custom_tabs[]
+  test_series_sections    test_series_sections[]
+  test_series_tab_config  test_series_tab_config[]
+
+  @@index([category_id], map: "idx_test_series_category")
+  @@index([category_id], map: "idx_test_series_category_id", where: raw("(deleted_at IS NULL)"))
+  @@index([difficulty_id], map: "idx_test_series_difficulty")
+  @@index([difficulty_id], map: "idx_test_series_difficulty_id", where: raw("(deleted_at IS NULL)"))
+  @@index([display_order], map: "idx_test_series_display_order", where: raw("(deleted_at IS NULL)"))
+  @@index([is_published], map: "idx_test_series_is_published", where: raw("(deleted_at IS NULL)"))
+  @@index([is_published], map: "idx_test_series_published")
+  @@index([slug], map: "idx_test_series_slug")
+  @@index([subcategory_id], map: "idx_test_series_subcategory")
+  @@index([subcategory_id], map: "idx_test_series_subcategory_id", where: raw("(deleted_at IS NULL)"))
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model test_series_custom_tabs {
+  id                     String                   @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  test_series_id         String?                  @db.Uuid
+  title                  String                   @db.VarChar(255)
+  description            String?
+  tab_key                String?                  @db.VarChar(255)
+  display_order          Int?                     @default(0)
+  is_active              Boolean?                 @default(true)
+  created_at             DateTime?                @default(now()) @db.Timestamptz(6)
+  updated_at             DateTime?                @default(now()) @db.Timestamptz(6)
+  test_series            test_series?             @relation(fields: [test_series_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  test_series_tab_config test_series_tab_config[]
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model test_series_sections {
+  id                 String               @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  test_series_id     String?              @db.Uuid
+  name               String               @db.VarChar(255)
+  description        String?
+  display_order      Int                  @default(0)
+  created_at         DateTime?            @default(now()) @db.Timestamptz(6)
+  updated_at         DateTime?            @default(now()) @db.Timestamptz(6)
+  exams              exams[]
+  test_series        test_series?         @relation(fields: [test_series_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  test_series_topics test_series_topics[]
+
+  @@index([test_series_id, display_order], map: "idx_test_series_sections_display_order")
+  @@index([display_order], map: "idx_test_series_sections_order")
+  @@index([test_series_id], map: "idx_test_series_sections_series")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model test_series_tab_config {
+  id                      String                   @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  test_series_id          String?                  @db.Uuid
+  tab_type                String                   @db.VarChar(50)
+  tab_label               String?                  @db.VarChar(100)
+  tab_key                 String?                  @db.VarChar(100)
+  custom_tab_id           String?                  @db.Uuid
+  display_order           Int?                     @default(0)
+  is_active               Boolean?                 @default(true)
+  settings                Json?                    @default("{}")
+  created_at              DateTime?                @default(now()) @db.Timestamptz(6)
+  updated_at              DateTime?                @default(now()) @db.Timestamptz(6)
+  test_series_custom_tabs test_series_custom_tabs? @relation(fields: [custom_tab_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  test_series             test_series?             @relation(fields: [test_series_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model test_series_topics {
+  id                   String                @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  section_id           String?               @db.Uuid
+  name                 String                @db.VarChar(255)
+  description          String?
+  display_order        Int                   @default(0)
+  created_at           DateTime?             @default(now()) @db.Timestamptz(6)
+  updated_at           DateTime?             @default(now()) @db.Timestamptz(6)
+  exams                exams[]
+  test_series_sections test_series_sections? @relation(fields: [section_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([section_id, display_order], map: "idx_test_series_topics_display_order")
+  @@index([display_order], map: "idx_test_series_topics_order")
+  @@index([section_id], map: "idx_test_series_topics_section")
+}
+
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model testimonials {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name              String    @db.VarChar(150)
+  profile_photo_url String?
+  review            String
+  exam              String?   @db.VarChar(255)
+  highlight         Boolean?  @default(false)
+  is_published      Boolean?  @default(true)
+  display_order     Int?      @default(0)
+  created_at        DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@index([display_order, created_at(sort: Desc)], map: "idx_testimonials_display_order")
+  @@index([is_published(sort: Desc), highlight(sort: Desc), display_order, created_at(sort: Desc)], map: "idx_testimonials_published_highlight")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model transactions {
+  id              String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  user_id         String?   @db.Uuid
+  exam_id         String?   @db.Uuid
+  amount          Decimal   @db.Decimal(10, 2)
+  currency        String?   @default("INR") @db.VarChar(10)
+  payment_gateway String    @db.VarChar(50)
+  payment_id      String    @unique @db.VarChar(255)
+  order_id        String?   @db.VarChar(255)
+  status          String    @db.VarChar(50)
+  payment_method  String?   @db.VarChar(50)
+  created_at      DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at      DateTime? @default(now()) @db.Timestamptz(6)
+  invoices        invoices?
+  exams           exams?    @relation(fields: [exam_id], references: [id], onUpdate: NoAction)
+  users           users?    @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([status], map: "idx_transactions_status")
+  @@index([user_id], map: "idx_transactions_user_id")
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model user_answers {
+  id                String         @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  attempt_id        String?        @db.Uuid
+  question_id       String?        @db.Uuid
+  answer            String?
+  is_correct        Boolean?
+  marks_obtained    Decimal?       @default(0.00) @db.Decimal(5, 2)
+  time_taken        Int?           @default(0)
+  marked_for_review Boolean?       @default(false)
+  created_at        DateTime?      @default(now()) @db.Timestamptz(6)
+  updated_at        DateTime?      @default(now()) @db.Timestamptz(6)
+  exam_attempts     exam_attempts? @relation(fields: [attempt_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  questions         questions?     @relation(fields: [question_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model user_education {
+  id          String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  user_id     String?   @db.Uuid
+  level       String?   @db.VarChar(100)
+  institution String?   @db.VarChar(255)
+  year        Int?
+  percentage  Decimal?  @db.Decimal(5, 2)
+  created_at  DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at  DateTime? @default(now()) @db.Timestamptz(6)
+  users       users?    @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model user_preferences {
+  id             String    @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  user_id        String?   @unique @db.Uuid
+  notifications  Boolean?  @default(true)
+  newsletter     Boolean?  @default(true)
+  exam_reminders Boolean?  @default(true)
+  created_at     DateTime? @default(now()) @db.Timestamptz(6)
+  updated_at     DateTime? @default(now()) @db.Timestamptz(6)
+  users          users?    @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model user_subscriptions {
+  id                       String             @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  user_id                  String             @db.Uuid
+  plan_id                  String             @db.Uuid
+  promocode_id             String?            @db.Uuid
+  razorpay_subscription_id String?
+  razorpay_order_id        String?
+  razorpay_payment_id      String?
+  auto_renew               Boolean            @default(true)
+  status                   String
+  started_at               DateTime?          @db.Timestamptz(6)
+  expires_at               DateTime?          @db.Timestamptz(6)
+  cancel_requested_at      DateTime?          @db.Timestamptz(6)
+  renewal_reminder_sent_at DateTime?          @db.Timestamptz(6)
+  expiry_reminder_sent_at  DateTime?          @db.Timestamptz(6)
+  created_at               DateTime           @default(now()) @db.Timestamptz(6)
+  updated_at               DateTime           @default(now()) @db.Timestamptz(6)
+  amount_cents             Int                @default(0)
+  currency_code            String             @default("INR")
+  subscription_plans       subscription_plans @relation(fields: [plan_id], references: [id], onUpdate: NoAction)
+  promocodes               promocodes?        @relation(fields: [promocode_id], references: [id], onUpdate: NoAction)
+  users                    users              @relation(fields: [user_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([expires_at], map: "user_subscriptions_expires_idx")
+  @@index([status])
+  @@index([user_id], map: "user_subscriptions_user_idx")
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+/// This model or at least one of its fields has comments in the database, and requires an additional setup for migrations: Read more: https://pris.ly/d/database-comments
+/// This model contains row level security and requires additional setup for migrations. Visit https://pris.ly/d/row-level-security for more info.
+model users {
+  id                                                                        String                        @id @default(dbgenerated("extensions.uuid_generate_v4()")) @db.Uuid
+  email                                                                     String                        @unique @db.VarChar(255)
+  password_hash                                                             String                        @db.VarChar(255)
+  name                                                                      String                        @db.VarChar(255)
+  phone                                                                     String?                       @db.VarChar(20)
+  avatar_url                                                                String?
+  is_verified                                                               Boolean?                      @default(false)
+  is_blocked                                                                Boolean?                      @default(false)
+  created_at                                                                DateTime?                     @default(now()) @db.Timestamptz(6)
+  updated_at                                                                DateTime?                     @default(now()) @db.Timestamptz(6)
+  deleted_at                                                                DateTime?                     @db.Timestamptz(6)
+  role                                                                      String?                       @default("user") @db.VarChar(20)
+  auth_provider                                                             String?                       @default("email") @db.VarChar(50)
+  google_id                                                                 String?                       @unique @db.VarChar(255)
+  is_onboarded                                                              Boolean?                      @default(false)
+  is_premium                                                                Boolean                       @default(false)
+  subscription_plan_id                                                      String?                       @db.Uuid
+  subscription_expires_at                                                   DateTime?                     @db.Timestamptz(6)
+  subscription_auto_renew                                                   Boolean                       @default(false)
+  block_reason                                                              String?
+  bio                                                                       String?
+  token_version                                                             Int                           @default(0)
+  activity_logs                                                             activity_logs[]
+  admin_users                                                               admin_users?
+  category_custom_sections_category_custom_sections_created_byTousers       category_custom_sections[]    @relation("category_custom_sections_created_byTousers")
+  category_custom_sections_category_custom_sections_updated_byTousers       category_custom_sections[]    @relation("category_custom_sections_updated_byTousers")
+  category_custom_tabs_category_custom_tabs_created_byTousers               category_custom_tabs[]        @relation("category_custom_tabs_created_byTousers")
+  category_custom_tabs_category_custom_tabs_updated_byTousers               category_custom_tabs[]        @relation("category_custom_tabs_updated_byTousers")
+  category_cutoffs_category_cutoffs_created_byTousers                       category_cutoffs[]            @relation("category_cutoffs_created_byTousers")
+  category_cutoffs_category_cutoffs_updated_byTousers                       category_cutoffs[]            @relation("category_cutoffs_updated_byTousers")
+  category_important_dates_category_important_dates_created_byTousers       category_important_dates[]    @relation("category_important_dates_created_byTousers")
+  category_important_dates_category_important_dates_updated_byTousers       category_important_dates[]    @relation("category_important_dates_updated_byTousers")
+  category_notifications_category_notifications_created_byTousers           category_notifications[]      @relation("category_notifications_created_byTousers")
+  category_notifications_category_notifications_updated_byTousers           category_notifications[]      @relation("category_notifications_updated_byTousers")
+  category_preparation_tips_category_preparation_tips_created_byTousers     category_preparation_tips[]   @relation("category_preparation_tips_created_byTousers")
+  category_preparation_tips_category_preparation_tips_updated_byTousers     category_preparation_tips[]   @relation("category_preparation_tips_updated_byTousers")
+  category_syllabus_category_syllabus_created_byTousers                     category_syllabus[]           @relation("category_syllabus_created_byTousers")
+  category_syllabus_category_syllabus_updated_byTousers                     category_syllabus[]           @relation("category_syllabus_updated_byTousers")
+  exam_attempts                                                             exam_attempts[]
+  exam_draft_fields                                                         exam_draft_fields[]
+  exams                                                                     exams[]
+  footer_links_footer_links_created_byTousers                               footer_links[]                @relation("footer_links_created_byTousers")
+  footer_links_footer_links_updated_byTousers                               footer_links[]                @relation("footer_links_updated_byTousers")
+  navigation_links_navigation_links_created_byTousers                       navigation_links[]            @relation("navigation_links_created_byTousers")
+  navigation_links_navigation_links_updated_byTousers                       navigation_links[]            @relation("navigation_links_updated_byTousers")
+  page_content_blocks_page_content_blocks_created_byTousers                 page_content_blocks[]         @relation("page_content_blocks_created_byTousers")
+  page_content_blocks_page_content_blocks_updated_byTousers                 page_content_blocks[]         @relation("page_content_blocks_updated_byTousers")
+  page_media                                                                page_media[]
+  page_revisions                                                            page_revisions[]
+  page_sections_page_sections_created_byTousers                             page_sections[]               @relation("page_sections_created_byTousers")
+  page_sections_page_sections_updated_byTousers                             page_sections[]               @relation("page_sections_updated_byTousers")
+  password_reset_tokens                                                     password_reset_tokens[]
+  results                                                                   results[]
+  subcategory_exam_stats_subcategory_exam_stats_created_byTousers           subcategory_exam_stats[]      @relation("subcategory_exam_stats_created_byTousers")
+  subcategory_exam_stats_subcategory_exam_stats_updated_byTousers           subcategory_exam_stats[]      @relation("subcategory_exam_stats_updated_byTousers")
+  subcategory_faqs_subcategory_faqs_created_byTousers                       subcategory_faqs[]            @relation("subcategory_faqs_created_byTousers")
+  subcategory_faqs_subcategory_faqs_updated_byTousers                       subcategory_faqs[]            @relation("subcategory_faqs_updated_byTousers")
+  subcategory_highlights_subcategory_highlights_created_byTousers           subcategory_highlights[]      @relation("subcategory_highlights_created_byTousers")
+  subcategory_highlights_subcategory_highlights_updated_byTousers           subcategory_highlights[]      @relation("subcategory_highlights_updated_byTousers")
+  subcategory_overviews_subcategory_overviews_created_byTousers             subcategory_overviews[]       @relation("subcategory_overviews_created_byTousers")
+  subcategory_overviews_subcategory_overviews_updated_byTousers             subcategory_overviews[]       @relation("subcategory_overviews_updated_byTousers")
+  subcategory_question_papers_subcategory_question_papers_created_byTousers subcategory_question_papers[] @relation("subcategory_question_papers_created_byTousers")
+  subcategory_question_papers_subcategory_question_papers_updated_byTousers subcategory_question_papers[] @relation("subcategory_question_papers_updated_byTousers")
+  subcategory_resources_subcategory_resources_created_byTousers             subcategory_resources[]       @relation("subcategory_resources_created_byTousers")
+  subcategory_resources_subcategory_resources_updated_byTousers             subcategory_resources[]       @relation("subcategory_resources_updated_byTousers")
+  subcategory_sections_subcategory_sections_created_byTousers               subcategory_sections[]        @relation("subcategory_sections_created_byTousers")
+  subcategory_sections_subcategory_sections_updated_byTousers               subcategory_sections[]        @relation("subcategory_sections_updated_byTousers")
+  subcategory_tab_config_subcategory_tab_config_created_byTousers           subcategory_tab_config[]      @relation("subcategory_tab_config_created_byTousers")
+  subcategory_tab_config_subcategory_tab_config_updated_byTousers           subcategory_tab_config[]      @relation("subcategory_tab_config_updated_byTousers")
+  subcategory_tables_subcategory_tables_created_byTousers                   subcategory_tables[]          @relation("subcategory_tables_created_byTousers")
+  subcategory_tables_subcategory_tables_updated_byTousers                   subcategory_tables[]          @relation("subcategory_tables_updated_byTousers")
+  subcategory_updates_subcategory_updates_created_byTousers                 subcategory_updates[]         @relation("subcategory_updates_created_byTousers")
+  subcategory_updates_subcategory_updates_updated_byTousers                 subcategory_updates[]         @relation("subcategory_updates_updated_byTousers")
+  transactions                                                              transactions[]
+  user_education                                                            user_education[]
+  user_preferences                                                          user_preferences?
+  user_subscriptions                                                        user_subscriptions[]
+  subscription_plans                                                        subscription_plans?           @relation(fields: [subscription_plan_id], references: [id], onUpdate: NoAction)
+
+  @@index([auth_provider], map: "idx_users_auth_provider")
+  @@index([deleted_at], map: "idx_users_deleted_at")
+  @@index([email], map: "idx_users_email")
+  @@index([google_id], map: "idx_users_google_id", where: raw("(google_id IS NOT NULL)"))
+  @@index([phone], map: "idx_users_phone")
+  @@index([role], map: "idx_users_role")
+}

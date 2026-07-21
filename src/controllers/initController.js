@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
 
@@ -34,62 +34,53 @@ const getAppInit = async (req, res) => {
     console.log(`[Cache] MISS ${cacheKey} — fetching from DB`);
 
     const promises = [
-      supabase
-        .from('navigation_links')
-        .select('id, label, href, display_order, is_active, open_in_new_tab, created_at, updated_at')
-        .is('deleted_at', null)
-        .eq('is_active', true)
-        .order('display_order', { ascending: true })
-        .order('created_at', { ascending: true }),
+      prisma.navigation_links.findMany({
+        where: { deleted_at: null, is_active: true },
+        select: { id: true, label: true, href: true, display_order: true, is_active: true, open_in_new_tab: true, created_at: true, updated_at: true },
+        orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+      }),
 
-      supabase
-        .from('footer_links')
-        .select('id, section, section_order, label, href, display_order, is_active, open_in_new_tab, created_at, updated_at')
-        .is('deleted_at', null)
-        .eq('is_active', true)
-        .order('section_order', { ascending: true })
-        .order('section', { ascending: true })
-        .order('display_order', { ascending: true })
-        .order('created_at', { ascending: true }),
+      prisma.footer_links.findMany({
+        where: { deleted_at: null, is_active: true },
+        select: { id: true, section: true, section_order: true, label: true, href: true, display_order: true, is_active: true, open_in_new_tab: true, created_at: true, updated_at: true },
+        orderBy: [{ section_order: 'asc' }, { section: 'asc' }, { display_order: 'asc' }, { created_at: 'asc' }],
+      }),
 
-      supabase
-        .from('contact_info')
-        .select(`id, headline, subheading, description, support_email, support_phone, whatsapp_number,
-          address_line1, address_line2, city, state, postal_code, country, support_hours, map_embed_url,
-          contact_social_links(id, platform, label, url, icon, display_order, is_active)`)
-        .order('created_at', { ascending: true })
-        .limit(1)
-        .single(),
+      prisma.contact_info.findFirst({
+        select: {
+          id: true, headline: true, subheading: true, description: true, support_email: true, support_phone: true, whatsapp_number: true,
+          address_line1: true, address_line2: true, city: true, state: true, postal_code: true, country: true, support_hours: true, map_embed_url: true,
+          contact_social_links: { select: { id: true, platform: true, label: true, url: true, icon: true, display_order: true, is_active: true } },
+        },
+        orderBy: { created_at: 'asc' },
+      }),
 
-      supabase
-        .from('exam_categories')
-        .select('id, name, slug, icon, logo_url, display_order')
-        .or('is_active.eq.true,is_active.is.null')
-        .order('display_order', { ascending: true })
-        .order('name', { ascending: true }),
+      prisma.exam_categories.findMany({
+        where: { OR: [{ is_active: true }, { is_active: null }] },
+        select: { id: true, name: true, slug: true, icon: true, logo_url: true, display_order: true },
+        orderBy: [{ display_order: 'asc' }, { name: 'asc' }],
+      }),
 
-      supabase
-        .from('exam_subcategories')
-        .select('id, name, slug, category_id, logo_url, display_order')
-        .or('is_active.eq.true,is_active.is.null')
-        .order('display_order', { ascending: true })
-        .order('name', { ascending: true }),
+      prisma.exam_subcategories.findMany({
+        where: { OR: [{ is_active: true }, { is_active: null }] },
+        select: { id: true, name: true, slug: true, category_id: true, logo_url: true, display_order: true },
+        orderBy: [{ display_order: 'asc' }, { name: 'asc' }],
+      }),
     ];
 
     if (isAuthenticated) {
       promises.push(
-        supabase
-          .from('users')
-          .select(`
-            id, email, name, phone, avatar_url, role, bio,
-            is_verified, is_premium, auth_provider, is_onboarded,
-            subscription_plan_id, subscription_expires_at, subscription_auto_renew,
-            created_at,
-            user_education (level, institution, year, percentage),
-            user_preferences (notifications, newsletter, exam_reminders)
-          `)
-          .eq('id', req.user.id)
-          .single()
+        prisma.users.findUnique({
+          where: { id: req.user.id },
+          select: {
+            id: true, email: true, name: true, phone: true, avatar_url: true, role: true, bio: true,
+            is_verified: true, is_premium: true, auth_provider: true, is_onboarded: true,
+            subscription_plan_id: true, subscription_expires_at: true, subscription_auto_renew: true,
+            created_at: true,
+            user_education: { select: { level: true, institution: true, year: true, percentage: true } },
+            user_preferences: { select: { notifications: true, newsletter: true, exam_reminders: true } },
+          },
+        })
       );
     }
 
@@ -102,35 +93,34 @@ const getAppInit = async (req, res) => {
     const subcategoriesResult = results[4];
     const profileResult = isAuthenticated ? results[5] : null;
 
-    const navigation = navResult.status === 'fulfilled' && !navResult.value.error
-      ? navResult.value.data || []
+    const navigation = navResult.status === 'fulfilled'
+      ? navResult.value || []
       : [];
 
-    const footer = footerResult.status === 'fulfilled' && !footerResult.value.error
-      ? footerResult.value.data || []
+    const footer = footerResult.status === 'fulfilled'
+      ? footerResult.value || []
       : [];
 
-    const contact = contactResult.status === 'fulfilled' && !contactResult.value.error
-      ? contactResult.value.data || null
+    const contact = contactResult.status === 'fulfilled'
+      ? contactResult.value || null
       : null;
 
-    const categories = categoriesResult.status === 'fulfilled' && !categoriesResult.value.error
-      ? categoriesResult.value.data || []
+    const categories = categoriesResult.status === 'fulfilled'
+      ? categoriesResult.value || []
       : [];
 
-    const subcategories = subcategoriesResult.status === 'fulfilled' && !subcategoriesResult.value.error
-      ? subcategoriesResult.value.data || []
+    const subcategories = subcategoriesResult.status === 'fulfilled'
+      ? subcategoriesResult.value || []
       : [];
 
     let profile = null;
-    if (isAuthenticated && profileResult?.status === 'fulfilled' && !profileResult.value.error) {
-      const user = profileResult.value.data;
+    if (isAuthenticated && profileResult?.status === 'fulfilled') {
+      const user = profileResult.value;
       if (user?.subscription_plan_id) {
-        const { data: planData } = await supabase
-          .from('subscription_plans')
-          .select('id, name, description, duration_days, normal_price_cents, sale_price_cents, currency_code')
-          .eq('id', user.subscription_plan_id)
-          .maybeSingle();
+        const planData = await prisma.subscription_plans.findUnique({
+          where: { id: user.subscription_plan_id },
+          select: { id: true, name: true, description: true, duration_days: true, normal_price_cents: true, sale_price_cents: true, currency_code: true },
+        });
 
         if (planData) {
           user.subscription_plan = normalizePlanRecord(planData);

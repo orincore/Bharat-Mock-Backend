@@ -350,10 +350,28 @@ const buildPromoDescription = (promo, amountBefore, amountAfter) => {
 
 const formatCurrency = (amountCents) => `₹${(amountCents / 100).toFixed(2)}`;
 
-const resolvePlanAndPromo = async ({ planId, promoCode, autoRenew }) => {
+const resolvePlanAndPromo = async ({ planId, promoCode, autoRenew, userId }) => {
   const plan = await getPlanById(planId);
   if (!plan || !plan.is_active) {
     return { errorStatus: 404, errorMessage: 'Plan not found' };
+  }
+
+  if (userId) {
+    const currentSubscription = await getLatestSubscriptionForUser(userId);
+    const isStillRunning = currentSubscription
+      && ['active', 'canceled'].includes(currentSubscription.status)
+      && currentSubscription.expires_at
+      && new Date(currentSubscription.expires_at) >= new Date();
+
+    if (isStillRunning && currentSubscription.plan_id !== plan.id) {
+      const currentPlan = await getPlanById(currentSubscription.plan_id);
+      if (currentPlan && currentPlan.price_cents > plan.price_cents) {
+        return {
+          errorStatus: 400,
+          errorMessage: `You already have an active ${currentPlan.name} plan. Downgrading to a lower-value plan isn't allowed until it expires.`
+        };
+      }
+    }
   }
 
   let promo = null;
@@ -390,7 +408,7 @@ const previewSubscriptionCheckout = async (req, res) => {
       return res.status(400).json({ success: false, message: 'plan_id is required' });
     }
 
-    const result = await resolvePlanAndPromo({ planId, promoCode, autoRenew });
+    const result = await resolvePlanAndPromo({ planId, promoCode, autoRenew, userId: req.user.id });
     if (result.errorStatus) {
       return res.status(result.errorStatus).json({ success: false, message: result.errorMessage });
     }
@@ -440,7 +458,7 @@ const startSubscriptionCheckout = async (req, res) => {
       return res.status(400).json({ success: false, message: 'plan_id is required' });
     }
 
-    const result = await resolvePlanAndPromo({ planId, promoCode, autoRenew });
+    const result = await resolvePlanAndPromo({ planId, promoCode, autoRenew, userId: req.user.id });
     if (result.errorStatus) {
       return res.status(result.errorStatus).json({ success: false, message: result.errorMessage });
     }

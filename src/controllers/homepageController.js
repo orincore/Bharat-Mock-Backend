@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { uploadToR2 } = require('../utils/fileUpload');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
@@ -43,35 +43,19 @@ const parseJsonField = (value, fallback) => {
 };
 
 const ensureHeroRecord = async (slug = DEFAULT_SLUG) => {
-  const { data, error } = await supabase
-    .from('homepage_hero')
-    .select('*')
-    .eq('slug', slug)
-    .maybeSingle();
-
-  if (error && error.code !== 'PGRST116') {
-    throw error;
-  }
+  const data = await prisma.homepage_hero.findUnique({ where: { slug } });
 
   if (data) return data;
 
-  const { data: inserted, error: insertError } = await supabase
-    .from('homepage_hero')
-    .insert({
+  return prisma.homepage_hero.create({
+    data: {
       slug,
       title: 'Your Personal Government Exam Guide',
       description:
         'Start your journey with us. Your tests, exams, quizzes, and the latest government exam updates in one place.',
       media_items: [],
-    })
-    .select('*')
-    .single();
-
-  if (insertError) {
-    throw insertError;
-  }
-
-  return inserted;
+    },
+  });
 };
 
 const getHero = async (req, res) => {
@@ -137,13 +121,15 @@ const upsertHero = async (req, res) => {
       updated_by: req.user?.id || null,
     });
 
-    const { data, error } = await supabase
-      .from('homepage_hero')
-      .upsert(payload, { onConflict: 'slug' })
-      .select('*')
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      const { slug: payloadSlug, ...rest } = payload;
+      data = await prisma.homepage_hero.upsert({
+        where: { slug: payloadSlug },
+        create: payload,
+        update: rest,
+      });
+    } catch (error) {
       logger.error('Upsert homepage hero error:', error);
       return res.status(500).json(formatError('Failed to save homepage hero content'));
     }
@@ -193,24 +179,15 @@ const uploadHeroMedia = async (req, res) => {
 };
 
 const fetchBanners = async (onlyActive = true) => {
-  let query = supabase
-    .from('homepage_banners')
-    .select('*')
-    .order('display_order', { ascending: true })
-    .order('created_at', { ascending: true });
-
-  if (onlyActive) {
-    query = query.eq('is_active', true);
-  }
-
-  const { data, error } = await query;
-
-  if (error) {
+  try {
+    return await prisma.homepage_banners.findMany({
+      where: onlyActive ? { is_active: true } : {},
+      orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+    });
+  } catch (error) {
     logger.error('Fetch homepage banners error:', error);
     return [];
   }
-
-  return data || [];
 };
 
 const getHomepageData = async (req, res) => {
@@ -223,86 +200,100 @@ const getHomepageData = async (req, res) => {
     }
     console.log('[Cache] MISS homepage:data — fetching from DB');
 
-    const [heroResult, categoriesResult, examsResult, blogsResult, banners] = await Promise.all([
-      supabase
-        .from('homepage_hero')
-        .select('*')
-        .eq('slug', DEFAULT_SLUG)
-        .maybeSingle(),
-      supabase
-        .from('exam_categories')
-        .select('id, name, slug, description, logo_url, display_order, is_active')
-        .or('is_active.eq.true,is_active.is.null')
-        .order('display_order', { ascending: true }),
-      supabase
-        .from('page_popular_tests')
-        .select(`
-          id, display_order,
-          exams (
-            id, title, duration, total_marks, total_questions, category, category_id,
-            subcategory, subcategory_id, difficulty, status, start_date, end_date,
-            pass_percentage, is_free, image_url, logo_url, thumbnail_url,
-            negative_marking, negative_mark_value, allow_anytime, slug, url_path,
-            exam_type, show_in_mock_tests, supports_hindi, is_premium,
-            exam_categories(logo_url, icon)
-          )
-        `)
-        .eq('page_identifier', 'homepage')
-        .eq('is_active', true)
-        .order('display_order', { ascending: true }),
-      supabase
-        .from('blogs')
-        .select('id, title, slug, excerpt, featured_image_url, category, tags, author_id, is_published, is_featured, published_at, created_at, view_count, read_time')
-        .eq('is_published', true)
-        .order('published_at', { ascending: false })
-        .limit(10),
+    const examWithCategorySelect = {
+      id: true, title: true, duration: true, total_marks: true, total_questions: true, category: true, category_id: true,
+      subcategory: true, subcategory_id: true, difficulty: true, status: true, start_date: true, end_date: true,
+      pass_percentage: true, is_free: true, image_url: true, logo_url: true, thumbnail_url: true,
+      negative_marking: true, negative_mark_value: true, allow_anytime: true, slug: true, url_path: true,
+      exam_type: true, show_in_mock_tests: true, supports_hindi: true, is_premium: true,
+      exam_categories: { select: { logo_url: true, icon: true } },
+    };
+
+    const [heroData, categoriesData, popularTestsData, blogsData, banners] = await Promise.all([
+      prisma.homepage_hero.findUnique({ where: { slug: DEFAULT_SLUG } }),
+      prisma.exam_categories.findMany({
+        where: { OR: [{ is_active: true }, { is_active: null }] },
+        select: { id: true, name: true, slug: true, description: true, logo_url: true, display_order: true, is_active: true },
+        orderBy: { display_order: 'asc' },
+      }),
+      prisma.page_popular_tests.findMany({
+        where: { page_identifier: 'homepage', is_active: true },
+        select: { id: true, display_order: true, exams: { select: examWithCategorySelect } },
+        orderBy: { display_order: 'asc' },
+      }),
+      prisma.blogs.findMany({
+        where: { is_published: true },
+        select: { id: true, title: true, slug: true, excerpt: true, featured_image_url: true, category: true, tags: true, author_id: true, is_published: true, is_featured: true, published_at: true, created_at: true, view_count: true, read_time: true },
+        orderBy: { published_at: 'desc' },
+        take: 10,
+      }),
       fetchBanners(true),
     ]);
 
     // Use curated exams from page_popular_tests if available, otherwise fall back to dynamic fetch
     let featuredExams = [];
-    const curatedTests = examsResult.data?.filter(item => item.exams) || [];
+    const curatedTests = popularTestsData?.filter(item => item.exams) || [];
     if (curatedTests.length > 0) {
       featuredExams = curatedTests.map(item => item.exams);
     } else {
-      const { data: dynamicExams } = await supabase
-        .from('exams')
-        .select('id, title, duration, total_marks, total_questions, category, category_id, subcategory, subcategory_id, difficulty, status, start_date, end_date, pass_percentage, is_free, image_url, logo_url, thumbnail_url, negative_marking, negative_mark_value, allow_anytime, slug, url_path, exam_type, show_in_mock_tests, supports_hindi, is_premium, exam_categories(logo_url, icon)')
-        .eq('is_published', true)
-        .is('deleted_at', null)
-        .or('is_current_affair.eq.false,is_current_affair.is.null')
-        .or('status.eq.ongoing,status.eq.anytime,allow_anytime.eq.true')
-        .limit(4);
-      featuredExams = dynamicExams || [];
+      featuredExams = await prisma.exams.findMany({
+        where: {
+          is_published: true,
+          deleted_at: null,
+          OR: [{ is_current_affair: false }, { is_current_affair: null }],
+          AND: [{ OR: [{ status: 'ongoing' }, { status: 'anytime' }, { allow_anytime: true }] }],
+        },
+        select: examWithCategorySelect,
+        take: 4,
+      });
     }
 
-    let featuredArticles = blogsResult.data || [];
-
-    if ((!featuredArticles || featuredArticles.length === 0) && blogsResult.error) {
-      logger.warn('Homepage blogs fetch failed, falling back to legacy articles table', blogsResult.error);
-    }
+    let featuredArticles = blogsData || [];
 
     if (!featuredArticles || featuredArticles.length === 0) {
-      const { data: articleFallback } = await supabase
-        .from('articles')
-        .select('id, title, slug, excerpt, featured_image, category, tags, author_name, author_avatar, is_published, published_at, created_at, views, read_time')
-        .eq('is_published', true)
-        .order('published_at', { ascending: false })
-        .limit(10);
-      featuredArticles = articleFallback || [];
+      // BUGFIX (2026-07-20): this fallback selected featured_image/tags/author_name/
+      // author_avatar, none of which are real columns on `articles` — real columns are
+      // image_url, no tags column, and author info via the authors relation (see
+      // MIGRATION_TRACKER.md §4.5). Query real columns/relation, then flatten to the
+      // same output shape (featured_image/author_name/author_avatar/tags) the frontend
+      // presumably expects, so this is a query fix, not an API contract change.
+      try {
+        const rows = await prisma.articles.findMany({
+          where: { is_published: true },
+          select: {
+            id: true, title: true, slug: true, excerpt: true, image_url: true, category: true,
+            is_published: true, published_at: true, created_at: true, views: true, read_time: true,
+            authors: { select: { name: true, avatar_url: true } },
+          },
+          orderBy: { published_at: 'desc' },
+          take: 10,
+        });
+        featuredArticles = rows.map(({ authors, image_url, ...rest }) => ({
+          ...rest,
+          featured_image: image_url,
+          author_name: authors?.name || null,
+          author_avatar: authors?.avatar_url || null,
+          tags: [],
+        }));
+      } catch (fallbackError) {
+        logger.warn('Homepage articles fallback failed', fallbackError);
+        featuredArticles = [];
+      }
     }
 
-    const categories = categoriesResult.data || [];
+    const categories = categoriesData || [];
     const categoryIds = categories.map(c => c.id);
 
     let subcategoriesByCategory = {};
     if (categoryIds.length > 0) {
-      const { data: allSubcategories } = await supabase
-        .from('exam_subcategories')
-        .select('id, name, slug, description, category_id, logo_url, display_order, is_active')
-        .in('category_id', categoryIds)
-        .or('is_active.eq.true,is_active.is.null')
-        .order('display_order', { ascending: true });
+      const allSubcategories = await prisma.exam_subcategories.findMany({
+        where: {
+          category_id: { in: categoryIds },
+          OR: [{ is_active: true }, { is_active: null }],
+        },
+        select: { id: true, name: true, slug: true, description: true, category_id: true, logo_url: true, display_order: true, is_active: true },
+        orderBy: { display_order: 'asc' },
+      });
 
       if (allSubcategories) {
         for (const sub of allSubcategories) {
@@ -318,7 +309,7 @@ const getHomepageData = async (req, res) => {
     const responsePayload = {
       success: true,
       data: {
-        hero: heroResult.data || null,
+        hero: heroData || null,
         banners,
         categories: categories.map(cat => ({
           ...cat,
@@ -368,10 +359,7 @@ const createBanner = async (req, res) => {
 
     let orderValue = Number(display_order);
     if (!Number.isFinite(orderValue)) {
-      const { count } = await supabase
-        .from('homepage_banners')
-        .select('*', { count: 'exact', head: true });
-      orderValue = (count || 0);
+      orderValue = await prisma.homepage_banners.count();
     }
 
     const normalizePlacement = (value) => (value && value.toLowerCase() === 'mid' ? 'mid' : 'top');
@@ -387,13 +375,10 @@ const createBanner = async (req, res) => {
       placement: normalizePlacement(req.body.placement)
     };
 
-    const { data, error } = await supabase
-      .from('homepage_banners')
-      .insert(payload)
-      .select('*')
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.homepage_banners.create({ data: payload });
+    } catch (error) {
       logger.error('Create banner error:', error);
       return res.status(500).json(formatError('Failed to create banner'));
     }
@@ -428,14 +413,10 @@ const updateBanner = async (req, res) => {
       return res.status(400).json(formatError('No fields to update'));
     }
 
-    const { data, error } = await supabase
-      .from('homepage_banners')
-      .update(payload)
-      .eq('id', id)
-      .select('*')
-      .maybeSingle();
-
-    if (error || !data) {
+    let data;
+    try {
+      data = await prisma.homepage_banners.update({ where: { id }, data: payload });
+    } catch (error) {
       logger.error('Update banner error:', error);
       return res.status(404).json(formatError('Banner not found or failed to update'));
     }
@@ -455,12 +436,9 @@ const deleteBanner = async (req, res) => {
       return res.status(400).json(formatError('Banner ID is required'));
     }
 
-    const { error } = await supabase
-      .from('homepage_banners')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
+    try {
+      await prisma.homepage_banners.delete({ where: { id } });
+    } catch (error) {
       logger.error('Delete banner error:', error);
       return res.status(500).json(formatError('Failed to delete banner'));
     }
@@ -480,14 +458,9 @@ const reorderBanners = async (req, res) => {
       return res.status(400).json(formatError('Order array is required'));
     }
 
-    const updates = order.map((id, index) =>
-      supabase
-        .from('homepage_banners')
-        .update({ display_order: index })
-        .eq('id', id)
+    await prisma.$transaction(
+      order.map((id, index) => prisma.homepage_banners.update({ where: { id }, data: { display_order: index } }))
     );
-
-    await Promise.all(updates);
 
     await invalidateHomepageCache();
     return res.json({ success: true });

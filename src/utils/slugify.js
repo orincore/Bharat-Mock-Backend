@@ -1,5 +1,7 @@
-const slugify = (text = '') => {
-  return text
+const slugify = (text = '', options = {}) => {
+  const { fallback = 'item' } = options;
+
+  const base = text
     .toString()
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -9,9 +11,17 @@ const slugify = (text = '') => {
     .replace(/^-+|-+$/g, '')
     .replace(/-{2,}/g, '-')
     .substring(0, 180);
+
+  // Titles made entirely of characters outside a-z0-9 (emoji, non-Latin
+  // scripts like Hindi, pure punctuation, etc.) normalize to an empty
+  // string. Never return that - an empty slug collides with every other
+  // empty-title tab and breaks the URL. Fall back to a short random key.
+  if (base) return base;
+
+  return `${fallback}-${Math.random().toString(36).slice(2, 8)}`;
 };
 
-const ensureUniqueSlug = async (client, table, baseSlug, options = {}) => {
+const ensureUniqueSlug = async (model, baseSlug, options = {}) => {
   const { column = 'slug', excludeId, filters = {} } = options;
 
   let slug = baseSlug || 'item';
@@ -20,31 +30,12 @@ const ensureUniqueSlug = async (client, table, baseSlug, options = {}) => {
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    let query = client
-      .from(table)
-      .select('id')
-      .eq(column, uniqueSlug)
-      .limit(1);
+    const where = { [column]: uniqueSlug, ...filters };
+    if (excludeId) where.id = { not: excludeId };
 
-    Object.entries(filters || {}).forEach(([key, value]) => {
-      if (value !== undefined && value !== null) {
-        query = query.eq(key, value);
-      }
-    });
+    const existing = await model.findFirst({ where, select: { id: true } });
 
-    if (excludeId) {
-      query = query.neq('id', excludeId);
-    }
-
-    const { data, error } = await query.maybeSingle();
-
-    if (error && error.code !== 'PGRST116') {
-      throw error;
-    }
-
-    if (!data) {
-      break;
-    }
+    if (!existing) break;
 
     uniqueSlug = `${slug}-${counter}`;
     counter += 1;

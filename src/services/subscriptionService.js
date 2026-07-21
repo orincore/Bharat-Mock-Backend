@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 const normalizePlan = (plan) => {
@@ -27,124 +27,115 @@ const normalizePromocode = (promo) => {
 };
 
 const listPlans = async ({ includeInactive = false } = {}) => {
-  let query = supabase
-    .from('subscription_plans')
-    .select('*')
-    .order('sale_price_cents', { ascending: true, nullsFirst: false })
-    .order('normal_price_cents');
-
-  if (!includeInactive) {
-    query = query.eq('is_active', true);
-  }
-
-  const { data, error } = await query;
-  if (error) {
+  try {
+    const plans = await prisma.subscription_plans.findMany({
+      where: includeInactive ? {} : { is_active: true },
+      orderBy: [
+        { sale_price_cents: { sort: 'asc', nulls: 'last' } },
+        { normal_price_cents: 'asc' }
+      ]
+    });
+    return plans.map(normalizePlan);
+  } catch (error) {
     logger.error('Failed to fetch subscription plans:', error);
     throw new Error('Unable to load subscription plans');
   }
-  return data.map(normalizePlan);
 };
 
 const getPlanById = async (planId) => {
-  const { data, error } = await supabase
-    .from('subscription_plans')
-    .select('*')
-    .eq('id', planId)
-    .single();
-
-  if (error) {
+  try {
+    const plan = await prisma.subscription_plans.findUnique({ where: { id: planId } });
+    return normalizePlan(plan);
+  } catch (error) {
     logger.error('Failed to load plan by id:', error, { planId });
     return null;
   }
-  return normalizePlan(data);
 };
 
 const createPlan = async (payload) => {
-  const { data, error } = await supabase
-    .from('subscription_plans')
-    .insert(payload)
-    .select('*')
-    .single();
-
-  if (error) {
+  try {
+    const plan = await prisma.subscription_plans.create({ data: payload });
+    return normalizePlan(plan);
+  } catch (error) {
     logger.error('Failed to create plan:', error);
     throw new Error('Unable to create plan');
   }
-  return normalizePlan(data);
 };
 
 const updatePlan = async (planId, payload) => {
-  const { data, error } = await supabase
-    .from('subscription_plans')
-    .update(payload)
-    .eq('id', planId)
-    .select('*')
-    .single();
-
-  if (error) {
+  try {
+    const plan = await prisma.subscription_plans.update({ where: { id: planId }, data: payload });
+    return normalizePlan(plan);
+  } catch (error) {
     logger.error('Failed to update plan:', error, { planId });
     throw new Error('Unable to update plan');
   }
-  return normalizePlan(data);
 };
 
 const togglePlan = async (planId, isActive) => updatePlan(planId, { is_active: isActive });
 
 const listPromocodes = async () => {
-  const { data, error } = await supabase
-    .from('promocodes')
-    .select('*, promocode_plan_links (plan_id)')
-    .order('created_at', { ascending: false });
-
-  if (error) {
+  try {
+    const promocodes = await prisma.promocodes.findMany({
+      include: { promocode_plan_links: { select: { plan_id: true } } },
+      orderBy: { created_at: 'desc' }
+    });
+    return promocodes.map(normalizePromocode);
+  } catch (error) {
     logger.error('Failed to list promocodes:', error);
     throw new Error('Unable to list promocodes');
   }
-  return data.map(normalizePromocode);
 };
 
 const listSubscriptionTransactions = async ({ status, planId, search, limit = 50 } = {}) => {
   const safeLimit = Math.max(1, Math.min(Number(limit) || 50, 200));
-  let query = supabase
-    .from('user_subscriptions')
-    .select(`
-      *,
-      user:users ( id, name, email ),
-      plan:subscription_plans ( id, name, normal_price_cents, sale_price_cents, currency_code ),
-      promocode:promocodes ( id, code, discount_type, discount_value )
-    `)
-    .order('created_at', { ascending: false })
-    .limit(safeLimit);
 
+  const where = {};
   if (status && status !== 'all') {
-    query = query.eq('status', status);
+    where.status = status;
   }
-
   if (planId) {
-    query = query.eq('plan_id', planId);
+    where.plan_id = planId;
   }
-
   if (search) {
     const sanitized = search.replace(/[,]/g, '');
-    query = query.or(`razorpay_order_id.ilike.%${sanitized}%,razorpay_payment_id.ilike.%${sanitized}%`);
+    where.OR = [
+      { razorpay_order_id: { contains: sanitized, mode: 'insensitive' } },
+      { razorpay_payment_id: { contains: sanitized, mode: 'insensitive' } }
+    ];
   }
 
-  const { data, error } = await query;
-  if (error) {
+  try {
+    const rows = await prisma.user_subscriptions.findMany({
+      where,
+      orderBy: { created_at: 'desc' },
+      take: safeLimit,
+      include: {
+        users: { select: { id: true, name: true, email: true } },
+        subscription_plans: {
+          select: { id: true, name: true, normal_price_cents: true, sale_price_cents: true, currency_code: true }
+        },
+        promocodes: { select: { id: true, code: true, discount_type: true, discount_value: true } }
+      }
+    });
+
+    return rows.map(({ users, subscription_plans, promocodes, ...rest }) => ({
+      ...rest,
+      user: users,
+      plan: subscription_plans,
+      promocode: promocodes
+    }));
+  } catch (error) {
     logger.error('Failed to list subscription transactions:', error);
     throw new Error('Unable to fetch subscription transactions');
   }
-  return data || [];
 };
 
 const setPromocodePlanLinks = async (promocodeId, planIds = []) => {
-  const { error: deleteError } = await supabase
-    .from('promocode_plan_links')
-    .delete()
-    .eq('promocode_id', promocodeId);
-
-  if (deleteError) {
-    logger.error('Failed to clear promocode links:', deleteError, { promocodeId });
+  try {
+    await prisma.promocode_plan_links.deleteMany({ where: { promocode_id: promocodeId } });
+  } catch (error) {
+    logger.error('Failed to clear promocode links:', error, { promocodeId });
     throw new Error('Unable to update promocode plan links');
   }
 
@@ -152,41 +143,34 @@ const setPromocodePlanLinks = async (promocodeId, planIds = []) => {
     return;
   }
 
-  const rows = planIds.map(planId => ({ promocode_id: promocodeId, plan_id: planId }));
-  const { error: insertError } = await supabase.from('promocode_plan_links').insert(rows);
-
-  if (insertError) {
-    logger.error('Failed to insert promocode links:', insertError, { promocodeId, planIds });
+  try {
+    await prisma.promocode_plan_links.createMany({
+      data: planIds.map(planId => ({ promocode_id: promocodeId, plan_id: planId }))
+    });
+  } catch (error) {
+    logger.error('Failed to insert promocode links:', error, { promocodeId, planIds });
     throw new Error('Unable to save promocode plan links');
   }
 };
 
 const createPromocode = async (payload, planIds = []) => {
-  const { data, error } = await supabase
-    .from('promocodes')
-    .insert(payload)
-    .select('*')
-    .single();
-
-  if (error) {
+  let created;
+  try {
+    created = await prisma.promocodes.create({ data: payload });
+  } catch (error) {
     logger.error('Failed to create promocode:', error);
     throw new Error('Unable to create promocode');
   }
 
-  await setPromocodePlanLinks(data.id, planIds);
+  await setPromocodePlanLinks(created.id, planIds);
 
-  return getPromocodeById(data.id);
+  return getPromocodeById(created.id);
 };
 
 const updatePromocode = async (promocodeId, payload, planIds = null) => {
-  const { data, error } = await supabase
-    .from('promocodes')
-    .update(payload)
-    .eq('id', promocodeId)
-    .select('*')
-    .single();
-
-  if (error) {
+  try {
+    await prisma.promocodes.update({ where: { id: promocodeId }, data: payload });
+  } catch (error) {
     logger.error('Failed to update promocode:', error, { promocodeId });
     throw new Error('Unable to update promocode');
   }
@@ -199,53 +183,40 @@ const updatePromocode = async (promocodeId, payload, planIds = null) => {
 };
 
 const getPromocodeById = async (id) => {
-  const { data, error } = await supabase
-    .from('promocodes')
-    .select('*, promocode_plan_links (plan_id)')
-    .eq('id', id)
-    .single();
-
-  if (error) {
+  try {
+    const promo = await prisma.promocodes.findUnique({
+      where: { id },
+      include: { promocode_plan_links: { select: { plan_id: true } } }
+    });
+    return normalizePromocode(promo);
+  } catch (error) {
     logger.warn('Promocode lookup by id failed', { id, error });
     return null;
   }
-  return normalizePromocode(data);
 };
 
 const getPromocodeByCode = async (code) => {
-  const { data, error } = await supabase
-    .from('promocodes')
-    .select('*, promocode_plan_links (plan_id)')
-    .ilike('code', code)
-    .single();
-
-  if (error) {
+  try {
+    const promo = await prisma.promocodes.findFirst({
+      where: { code: { equals: code, mode: 'insensitive' } },
+      include: { promocode_plan_links: { select: { plan_id: true } } }
+    });
+    return normalizePromocode(promo);
+  } catch (error) {
     logger.warn('Promocode lookup failed', { code, error });
     return null;
   }
-  return normalizePromocode(data);
 };
 
 const incrementPromocodeUsage = async (promocodeId) => {
   if (!promocodeId) return;
-  const { data, error } = await supabase
-    .from('promocodes')
-    .select('redemptions_count')
-    .eq('id', promocodeId)
-    .single();
-
-  if (error || !data) {
-    logger.error('Failed to fetch promocode for increment:', error, { promocodeId });
-    return;
-  }
-
-  const { error: updateError } = await supabase
-    .from('promocodes')
-    .update({ redemptions_count: (data.redemptions_count || 0) + 1 })
-    .eq('id', promocodeId);
-
-  if (updateError) {
-    logger.error('Failed to increment promocode usage:', updateError, { promocodeId });
+  try {
+    await prisma.promocodes.update({
+      where: { id: promocodeId },
+      data: { redemptions_count: { increment: 1 } }
+    });
+  } catch (error) {
+    logger.error('Failed to increment promocode usage:', error, { promocodeId });
   }
 };
 
@@ -258,141 +229,142 @@ const createPendingSubscription = async ({
   amountCents,
   currencyCode
 }) => {
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .insert({
-      user_id: userId,
-      plan_id: planId,
-      promocode_id: promocodeId,
-      auto_renew: autoRenew,
-      status: 'pending',
-      razorpay_order_id: razorpayOrderId,
-      amount_cents: amountCents,
-      currency_code: currencyCode,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    })
-    .select('*')
-    .single();
+  try {
+    const subscription = await prisma.user_subscriptions.create({
+      data: {
+        user_id: userId,
+        plan_id: planId,
+        promocode_id: promocodeId,
+        auto_renew: autoRenew,
+        status: 'pending',
+        razorpay_order_id: razorpayOrderId,
+        amount_cents: amountCents,
+        currency_code: currencyCode
+      }
+    });
 
-  if (error) {
+    return { ...subscription, amount_cents: amountCents };
+  } catch (error) {
     logger.error('Failed to create pending subscription:', error);
     throw new Error('Unable to create subscription record');
   }
-
-  return { ...data, amount_cents: amountCents };
 };
 
 const markSubscriptionActive = async ({ subscriptionId, paymentId, startDate, endDate }) => {
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .update({
-      status: 'active',
-      razorpay_payment_id: paymentId,
-      started_at: startDate,
-      expires_at: endDate,
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', subscriptionId)
-    .select('*')
-    .single();
-
-  if (error) {
+  try {
+    return await prisma.user_subscriptions.update({
+      where: { id: subscriptionId },
+      data: {
+        status: 'active',
+        razorpay_payment_id: paymentId,
+        started_at: startDate,
+        expires_at: endDate,
+        updated_at: new Date()
+      }
+    });
+  } catch (error) {
     logger.error('Failed to activate subscription:', error, { subscriptionId });
     throw new Error('Unable to activate subscription');
   }
-  return data;
 };
 
 const getSubscriptionsForRenewalReminder = async (windowHours = 72) => {
   const now = new Date();
   const windowEnd = new Date(now.getTime() + windowHours * 60 * 60 * 1000);
 
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .select(`
-      id,
-      user_id,
-      plan_id,
-      expires_at,
-      amount_cents,
-      currency_code,
-      auto_renew,
-      status,
-      renewal_reminder_sent_at,
-      user:users!inner ( id, email, name ),
-      plan:subscription_plans!inner ( id, name, normal_price_cents, sale_price_cents, duration_days )
-    `)
-    .eq('status', 'active')
-    .eq('auto_renew', true)
-    .is('renewal_reminder_sent_at', null)
-    .not('expires_at', 'is', null)
-    .gte('expires_at', now.toISOString())
-    .lte('expires_at', windowEnd.toISOString());
+  try {
+    const rows = await prisma.user_subscriptions.findMany({
+      where: {
+        status: 'active',
+        auto_renew: true,
+        renewal_reminder_sent_at: null,
+        expires_at: { not: null, gte: now, lte: windowEnd }
+      },
+      select: {
+        id: true,
+        user_id: true,
+        plan_id: true,
+        expires_at: true,
+        amount_cents: true,
+        currency_code: true,
+        auto_renew: true,
+        status: true,
+        renewal_reminder_sent_at: true,
+        users: { select: { id: true, email: true, name: true } },
+        subscription_plans: {
+          select: { id: true, name: true, normal_price_cents: true, sale_price_cents: true, duration_days: true }
+        }
+      }
+    });
 
-  if (error) {
+    return rows.map(({ users, subscription_plans, ...rest }) => ({ ...rest, user: users, plan: subscription_plans }));
+  } catch (error) {
     logger.error('Failed to fetch subscriptions for renewal reminder:', error);
     return [];
   }
-  return data || [];
 };
 
 const getSubscriptionsForExpiryReminder = async (windowHours = 72) => {
   const now = new Date();
   const windowEnd = new Date(now.getTime() + windowHours * 60 * 60 * 1000);
 
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .select(`
-      id,
-      user_id,
-      plan_id,
-      expires_at,
-      amount_cents,
-      currency_code,
-      auto_renew,
-      status,
-      expiry_reminder_sent_at,
-      user:users!inner ( id, email, name ),
-      plan:subscription_plans!inner ( id, name, normal_price_cents, sale_price_cents, duration_days )
-    `)
-    .eq('status', 'active')
-    .eq('auto_renew', false)
-    .is('expiry_reminder_sent_at', null)
-    .not('expires_at', 'is', null)
-    .gte('expires_at', now.toISOString())
-    .lte('expires_at', windowEnd.toISOString());
+  try {
+    const rows = await prisma.user_subscriptions.findMany({
+      where: {
+        status: 'active',
+        auto_renew: false,
+        expiry_reminder_sent_at: null,
+        expires_at: { not: null, gte: now, lte: windowEnd }
+      },
+      select: {
+        id: true,
+        user_id: true,
+        plan_id: true,
+        expires_at: true,
+        amount_cents: true,
+        currency_code: true,
+        auto_renew: true,
+        status: true,
+        expiry_reminder_sent_at: true,
+        users: { select: { id: true, email: true, name: true } },
+        subscription_plans: {
+          select: { id: true, name: true, normal_price_cents: true, sale_price_cents: true, duration_days: true }
+        }
+      }
+    });
 
-  if (error) {
+    return rows.map(({ users, subscription_plans, ...rest }) => ({ ...rest, user: users, plan: subscription_plans }));
+  } catch (error) {
     logger.error('Failed to fetch subscriptions for expiry reminder:', error);
     return [];
   }
-  return data || [];
 };
 
 const getSubscriptionsToExpire = async () => {
-  const nowIso = new Date().toISOString();
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .select(`
-      id,
-      user_id,
-      plan_id,
-      expires_at,
-      auto_renew,
-      status,
-      user:users!inner ( id, email, name ),
-      plan:subscription_plans!inner ( id, name )
-    `)
-    .in('status', ['active', 'canceled'])
-    .not('expires_at', 'is', null)
-    .lte('expires_at', nowIso);
+  const now = new Date();
+  try {
+    const rows = await prisma.user_subscriptions.findMany({
+      where: {
+        status: { in: ['active', 'canceled'] },
+        expires_at: { not: null, lte: now }
+      },
+      select: {
+        id: true,
+        user_id: true,
+        plan_id: true,
+        expires_at: true,
+        auto_renew: true,
+        status: true,
+        users: { select: { id: true, email: true, name: true } },
+        subscription_plans: { select: { id: true, name: true } }
+      }
+    });
 
-  if (error) {
+    return rows.map(({ users, subscription_plans, ...rest }) => ({ ...rest, user: users, plan: subscription_plans }));
+  } catch (error) {
     logger.error('Failed to fetch subscriptions to expire:', error);
     return [];
   }
-  return data || [];
 };
 
 const getMidnightExpiredSubscriptions = async () => {
@@ -409,146 +381,142 @@ const getMidnightExpiredSubscriptions = async () => {
     0, 0, 0, 0
   ) - istOffsetMs); // convert back to UTC
 
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .select(`
-      id,
-      user_id,
-      plan_id,
-      expires_at,
-      status,
-      user:users!inner ( id, email, name, is_premium ),
-      plan:subscription_plans!inner ( id, name )
-    `)
-    .in('status', ['active', 'canceled'])
-    .not('expires_at', 'is', null)
-    .lt('expires_at', startOfTodayIST.toISOString());
+  try {
+    const rows = await prisma.user_subscriptions.findMany({
+      where: {
+        status: { in: ['active', 'canceled'] },
+        expires_at: { not: null, lt: startOfTodayIST }
+      },
+      select: {
+        id: true,
+        user_id: true,
+        plan_id: true,
+        expires_at: true,
+        status: true,
+        users: { select: { id: true, email: true, name: true, is_premium: true } },
+        subscription_plans: { select: { id: true, name: true } }
+      }
+    });
 
-  if (error) {
+    return rows.map(({ users, subscription_plans, ...rest }) => ({ ...rest, user: users, plan: subscription_plans }));
+  } catch (error) {
     logger.error('[MidnightJob] Failed to fetch expired subscriptions:', error);
     return [];
   }
-  return data || [];
 };
 
 const markRenewalReminderSent = async (subscriptionId) => {
-  const timestamp = new Date().toISOString();
-  const { error } = await supabase
-    .from('user_subscriptions')
-    .update({
-      renewal_reminder_sent_at: timestamp,
-      updated_at: timestamp
-    })
-    .eq('id', subscriptionId);
-
-  if (error) {
+  const timestamp = new Date();
+  try {
+    await prisma.user_subscriptions.update({
+      where: { id: subscriptionId },
+      data: {
+        renewal_reminder_sent_at: timestamp,
+        updated_at: timestamp
+      }
+    });
+  } catch (error) {
     logger.error('Failed to mark renewal reminder sent:', error, { subscriptionId });
     throw new Error('Unable to update renewal reminder flag');
   }
 };
 
 const markExpiryReminderSent = async (subscriptionId) => {
-  const timestamp = new Date().toISOString();
-  const { error } = await supabase
-    .from('user_subscriptions')
-    .update({
-      expiry_reminder_sent_at: timestamp,
-      updated_at: timestamp
-    })
-    .eq('id', subscriptionId);
-
-  if (error) {
+  const timestamp = new Date();
+  try {
+    await prisma.user_subscriptions.update({
+      where: { id: subscriptionId },
+      data: {
+        expiry_reminder_sent_at: timestamp,
+        updated_at: timestamp
+      }
+    });
+  } catch (error) {
     logger.error('Failed to mark expiry reminder sent:', error, { subscriptionId });
     throw new Error('Unable to update expiry reminder flag');
   }
 };
 
 const markSubscriptionExpired = async (subscriptionId) => {
-  const timestamp = new Date().toISOString();
-  // Status guard prevents race condition: only the first job run that finds
-  // status = active/canceled wins; concurrent runs silently skip.
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .update({
-      status: 'expired',
-      auto_renew: false,
-      updated_at: timestamp
-    })
-    .eq('id', subscriptionId)
-    .in('status', ['active', 'canceled'])
-    .select('*')
-    .maybeSingle();
+  const timestamp = new Date();
+  try {
+    // Status guard prevents race condition: only the first job run that finds
+    // status = active/canceled wins; concurrent runs silently skip.
+    const result = await prisma.user_subscriptions.updateMany({
+      where: {
+        id: subscriptionId,
+        status: { in: ['active', 'canceled'] }
+      },
+      data: {
+        status: 'expired',
+        auto_renew: false,
+        updated_at: timestamp
+      }
+    });
 
-  if (error) {
+    // count === 0 means the guarded status filter matched nothing — caller should
+    // treat this as "already handled" (mirrors the old .maybeSingle() null result).
+    if (result.count === 0) {
+      return null;
+    }
+
+    return await prisma.user_subscriptions.findUnique({ where: { id: subscriptionId } });
+  } catch (error) {
     logger.error('Failed to mark subscription expired:', error, { subscriptionId });
     throw new Error('Unable to expire subscription');
   }
-  // Returns null when already expired — caller should treat null as "already handled"
-  return data;
 };
 
 const getPendingSubscriptionByOrder = async (orderId) => {
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .select('*')
-    .eq('razorpay_order_id', orderId)
-    .eq('status', 'pending')
-    .single();
-
-  if (error) {
+  try {
+    return await prisma.user_subscriptions.findFirst({
+      where: { razorpay_order_id: orderId, status: 'pending' }
+    });
+  } catch (error) {
     logger.error('Failed to fetch pending subscription by order:', error, { orderId });
     return null;
   }
-  return data;
 };
 
 const getLatestSubscriptionForUser = async (userId) => {
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .select('*')
-    .eq('user_id', userId)
-    .in('status', ['active', 'pending'])
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  if (error) {
+  try {
+    return await prisma.user_subscriptions.findFirst({
+      where: { user_id: userId, status: { in: ['active', 'pending'] } },
+      orderBy: { created_at: 'desc' }
+    });
+  } catch (error) {
     logger.error('Failed to fetch latest subscription:', error, { userId });
     return null;
   }
-  return data;
 };
 
 const updateSubscriptionAutoRenew = async (subscriptionId, autoRenew) => {
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .update({
-      auto_renew: autoRenew,
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', subscriptionId)
-    .select('*')
-    .single();
-
-  if (error) {
+  try {
+    return await prisma.user_subscriptions.update({
+      where: { id: subscriptionId },
+      data: {
+        auto_renew: autoRenew,
+        updated_at: new Date()
+      }
+    });
+  } catch (error) {
     logger.error('Failed to update subscription auto renew:', error, { subscriptionId });
     throw new Error('Unable to update subscription');
   }
-  return data;
 };
 
 const updateUserPremiumState = async ({ userId, planId, expiresAt, autoRenew }) => {
-  const { error } = await supabase
-    .from('users')
-    .update({
-      is_premium: true,
-      subscription_plan_id: planId,
-      subscription_expires_at: expiresAt,
-      subscription_auto_renew: autoRenew
-    })
-    .eq('id', userId);
-
-  if (error) {
+  try {
+    await prisma.users.update({
+      where: { id: userId },
+      data: {
+        is_premium: true,
+        subscription_plan_id: planId,
+        subscription_expires_at: expiresAt,
+        subscription_auto_renew: autoRenew
+      }
+    });
+  } catch (error) {
     logger.error('Failed to update user premium state:', error, { userId });
     throw new Error('Unable to update user profile');
   }
@@ -556,16 +524,20 @@ const updateUserPremiumState = async ({ userId, planId, expiresAt, autoRenew }) 
 
 const revokePremiumIfNeeded = async (userId) => {
   // Do NOT revoke if the user has another active subscription still running
-  const now = new Date().toISOString();
-  const { data: activeSubscription } = await supabase
-    .from('user_subscriptions')
-    .select('id, expires_at')
-    .eq('user_id', userId)
-    .in('status', ['active', 'canceled'])
-    .not('expires_at', 'is', null)
-    .gte('expires_at', now)
-    .limit(1)
-    .maybeSingle();
+  const now = new Date();
+  let activeSubscription = null;
+  try {
+    activeSubscription = await prisma.user_subscriptions.findFirst({
+      where: {
+        user_id: userId,
+        status: { in: ['active', 'canceled'] },
+        expires_at: { not: null, gte: now }
+      },
+      select: { id: true, expires_at: true }
+    });
+  } catch (error) {
+    logger.error('Failed to check for an active subscription in revokePremiumIfNeeded:', error, { userId });
+  }
 
   if (activeSubscription) {
     logger.info('revokePremiumIfNeeded: user still has active subscription, skipping revoke', {
@@ -574,93 +546,102 @@ const revokePremiumIfNeeded = async (userId) => {
     return;
   }
 
-  const { error } = await supabase
-    .from('users')
-    .update({
-      is_premium: false,
-      subscription_plan_id: null,
-      subscription_expires_at: null,
-      subscription_auto_renew: false
-    })
-    .eq('id', userId);
-
-  if (error) {
+  try {
+    await prisma.users.update({
+      where: { id: userId },
+      data: {
+        is_premium: false,
+        subscription_plan_id: null,
+        subscription_expires_at: null,
+        subscription_auto_renew: false
+      }
+    });
+  } catch (error) {
     logger.error('Failed to revoke premium access:', error, { userId });
     throw new Error('Unable to revert premium status');
   }
 };
 
 const updateUserAutoRenewFlag = async (userId, autoRenew) => {
-  const { error } = await supabase
-    .from('users')
-    .update({ subscription_auto_renew: autoRenew })
-    .eq('id', userId);
-
-  if (error) {
+  try {
+    await prisma.users.update({
+      where: { id: userId },
+      data: { subscription_auto_renew: autoRenew }
+    });
+  } catch (error) {
     logger.error('Failed to update user auto renew flag:', error, { userId });
     throw new Error('Unable to update user preferences');
   }
 };
 
 const cancelSubscription = async (subscriptionId, userId) => {
-  const timestamp = new Date().toISOString();
+  const timestamp = new Date();
 
-  // Fetch current subscription to get expires_at
-  const { data: existing, error: fetchError } = await supabase
-    .from('user_subscriptions')
-    .select('expires_at')
-    .eq('id', subscriptionId)
-    .single();
-
-  if (fetchError) {
-    logger.error('Failed to fetch subscription for cancellation:', fetchError, { subscriptionId });
+  try {
+    // Existence check — mirrors the old .single() error-on-no-match guard.
+    await prisma.user_subscriptions.findUniqueOrThrow({
+      where: { id: subscriptionId },
+      select: { id: true }
+    });
+  } catch (error) {
+    logger.error('Failed to fetch subscription for cancellation:', error, { subscriptionId });
     throw new Error('Unable to cancel subscription');
   }
 
-  // Mark as cancelled but keep premium active until expiry date
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .update({
-      status: 'canceled',
-      auto_renew: false,
-      updated_at: timestamp
-    })
-    .eq('id', subscriptionId)
-    .select('*')
-    .single();
-
-  if (error) {
+  let updated;
+  try {
+    updated = await prisma.user_subscriptions.update({
+      where: { id: subscriptionId },
+      data: {
+        status: 'canceled',
+        auto_renew: false,
+        updated_at: timestamp
+      }
+    });
+  } catch (error) {
     logger.error('Failed to cancel subscription:', error, { subscriptionId });
     throw new Error('Unable to cancel subscription');
   }
 
-  // Only disable auto-renew on the user record — keep is_premium true until expires_at
-  await supabase
-    .from('users')
-    .update({ subscription_auto_renew: false })
-    .eq('id', userId);
+  // Only disable auto-renew on the user record — keep is_premium true until expires_at.
+  // Best-effort: never let a failure here block the cancellation response.
+  try {
+    await prisma.users.update({
+      where: { id: userId },
+      data: { subscription_auto_renew: false }
+    });
+  } catch (error) {
+    logger.error('Failed to sync user auto_renew flag during cancellation:', error, { subscriptionId, userId });
+  }
 
   // Premium access remains active until the expiry date.
   // The scheduled job (subscriptionJobs) will call revokePremiumIfNeeded when expires_at passes.
 
-  return data;
+  return updated;
 };
 
 const getUserLatestSubscriptionWithPlan = async (userId) => {
-  const { data, error } = await supabase
-    .from('user_subscriptions')
-    .select('id, status, expires_at, auto_renew, plan:subscription_plans(id, name)')
-    .eq('user_id', userId)
-    .in('status', ['active', 'canceled', 'pending'])
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  try {
+    const row = await prisma.user_subscriptions.findFirst({
+      where: { user_id: userId, status: { in: ['active', 'canceled', 'pending'] } },
+      orderBy: { created_at: 'desc' },
+      select: {
+        id: true,
+        status: true,
+        expires_at: true,
+        auto_renew: true,
+        subscription_plans: { select: { id: true, name: true } }
+      }
+    });
 
-  if (error) {
+    if (!row) return null;
+
+    const { subscription_plans, ...rest } = row;
+    return { ...rest, plan: subscription_plans };
+  } catch (error) {
     logger.error('Failed to fetch user subscription with plan:', error, { userId });
     return null;
   }
-  return data || null;
 };
 
 module.exports = {

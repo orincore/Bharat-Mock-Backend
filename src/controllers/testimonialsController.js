@@ -1,22 +1,12 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { uploadToR2, deleteFromR2 } = require('../utils/fileUpload');
 const { R2_PUBLIC_URL } = require('../config/r2');
 
-const TABLE = 'testimonials';
-
-const baseSelect = `
-  id,
-  name,
-  profile_photo_url,
-  review,
-  exam,
-  highlight,
-  is_published,
-  display_order,
-  created_at,
-  updated_at
-`;
+const baseSelect = {
+  id: true, name: true, profile_photo_url: true, review: true, exam: true,
+  highlight: true, is_published: true, display_order: true, created_at: true, updated_at: true,
+};
 
 const formatTestimonial = (record) => ({
   id: record.id,
@@ -40,19 +30,12 @@ const getPublicTestimonials = async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 12, 50);
 
-    const { data, error } = await supabase
-      .from(TABLE)
-      .select(baseSelect)
-      .eq('is_published', true)
-      .order('highlight', { ascending: false })
-      .order('display_order', { ascending: true })
-      .order('created_at', { ascending: false })
-      .limit(limit);
-
-    if (error) {
-      logger.error('[testimonials] get public error', error);
-      return res.status(500).json({ success: false, message: 'Failed to load testimonials' });
-    }
+    const data = await prisma.testimonials.findMany({
+      where: { is_published: true },
+      select: baseSelect,
+      orderBy: [{ highlight: 'desc' }, { display_order: 'asc' }, { created_at: 'desc' }],
+      take: limit,
+    });
 
     return res.json({
       success: true,
@@ -78,19 +61,19 @@ const adminCreateTestimonial = async (req, res) => {
       profilePhotoUrl = uploadResult.url;
     }
 
-    const { data, error } = await supabase
-      .from(TABLE)
-      .insert({
-        name: name.slice(0, 150),
-        profile_photo_url: profilePhotoUrl,
-        review,
-        exam: exam || null,
-        display_order: displayOrder ? parseInt(displayOrder, 10) : 0
-      })
-      .select(baseSelect)
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.testimonials.create({
+        data: {
+          name: name.slice(0, 150),
+          profile_photo_url: profilePhotoUrl,
+          review,
+          exam: exam || null,
+          display_order: displayOrder ? parseInt(displayOrder, 10) : 0
+        },
+        select: baseSelect,
+      });
+    } catch (error) {
       logger.error('[testimonials] admin create error', error);
       return res.status(500).json({ success: false, message: 'Failed to create testimonial' });
     }
@@ -105,19 +88,19 @@ const adminCreateTestimonial = async (req, res) => {
 const getAllTestimonialsAdmin = async (req, res) => {
   try {
     const { highlight } = req.query;
-    let query = supabase
-      .from(TABLE)
-      .select(baseSelect)
-      .order('display_order', { ascending: true })
-      .order('created_at', { ascending: false });
-
+    const where = {};
     if (typeof highlight !== 'undefined') {
-      query = query.eq('highlight', highlight === 'true');
+      where.highlight = highlight === 'true';
     }
 
-    const { data, error } = await query;
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.testimonials.findMany({
+        where,
+        select: baseSelect,
+        orderBy: [{ display_order: 'asc' }, { created_at: 'desc' }],
+      });
+    } catch (error) {
       logger.error('[testimonials] admin list error', error);
       return res.status(500).json({ success: false, message: 'Failed to load testimonials' });
     }
@@ -134,13 +117,12 @@ const adminUpdateTestimonial = async (req, res) => {
     const { id } = req.params;
     const { name, review, exam, highlight, isPublished, displayOrder } = req.body || {};
 
-    const { data: existing, error: fetchError } = await supabase
-      .from(TABLE)
-      .select('profile_photo_url')
-      .eq('id', id)
-      .maybeSingle();
+    const existing = await prisma.testimonials.findUnique({
+      where: { id },
+      select: { profile_photo_url: true },
+    });
 
-    if (fetchError || !existing) {
+    if (!existing) {
       return res.status(404).json({ success: false, message: 'Testimonial not found' });
     }
 
@@ -171,14 +153,10 @@ const adminUpdateTestimonial = async (req, res) => {
       return res.status(400).json({ success: false, message: 'No updates provided' });
     }
 
-    const { data, error } = await supabase
-      .from(TABLE)
-      .update(updates)
-      .eq('id', id)
-      .select(baseSelect)
-      .maybeSingle();
-
-    if (error || !data) {
+    let data;
+    try {
+      data = await prisma.testimonials.update({ where: { id }, data: updates, select: baseSelect });
+    } catch (error) {
       logger.error('[testimonials] admin update error', error);
       return res.status(500).json({ success: false, message: 'Failed to update testimonial' });
     }
@@ -194,13 +172,12 @@ const adminDeleteTestimonial = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: existing, error: fetchError } = await supabase
-      .from(TABLE)
-      .select('profile_photo_url')
-      .eq('id', id)
-      .maybeSingle();
+    const existing = await prisma.testimonials.findUnique({
+      where: { id },
+      select: { profile_photo_url: true },
+    });
 
-    if (fetchError || !existing) {
+    if (!existing) {
       return res.status(404).json({ success: false, message: 'Testimonial not found' });
     }
 
@@ -215,12 +192,9 @@ const adminDeleteTestimonial = async (req, res) => {
       }
     }
 
-    const { error } = await supabase
-      .from(TABLE)
-      .delete()
-      .eq('id', id);
-
-    if (error) {
+    try {
+      await prisma.testimonials.delete({ where: { id } });
+    } catch (error) {
       logger.error('[testimonials] admin delete error', error);
       return res.status(500).json({ success: false, message: 'Failed to delete testimonial' });
     }

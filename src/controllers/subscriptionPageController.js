@@ -1,29 +1,25 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const { uploadToR2 } = require('../utils/fileUpload');
 
 const subscriptionPageController = {
   async getPageContent(req, res) {
     try {
-      const [{ data: sectionsData, error: sectionsError }, { data: blocksData, error: blocksError }, { data: metaData, error: metaError }] = await Promise.all([
-        supabase
-          .from('subscription_page_sections')
-          .select('*')
-          .eq('is_active', true)
-          .order('display_order', { ascending: true }),
-        supabase
-          .from('subscription_page_blocks')
-          .select('*')
-          .order('display_order', { ascending: true }),
-        supabase
-          .from('subscription_page_meta')
-          .select('*')
-          .limit(1)
-          .maybeSingle()
+      const [sectionsData, blocksData, metaData] = await Promise.all([
+        prisma.subscription_page_sections.findMany({
+          where: { is_active: true },
+          orderBy: { display_order: 'asc' },
+        }),
+        prisma.subscription_page_blocks.findMany({
+          orderBy: { display_order: 'asc' },
+        }),
+        // BUGFIX (2026-07-20): this table has 2 rows in production when the code assumes
+        // a singleton (found while migrating — see MIGRATION_TRACKER.md §4.5). A bare
+        // findFirst()/`.limit(1)` with no ORDER BY is non-deterministic across calls.
+        // Ordering by created_at makes which row is "the" meta row stable and
+        // predictable — it does not resolve *why* there are two, which is a content
+        // decision, not a code bug; flagging that separately.
+        prisma.subscription_page_meta.findFirst({ orderBy: { created_at: 'asc' } }),
       ]);
-
-      if (sectionsError || blocksError || metaError) {
-        throw sectionsError || blocksError || metaError;
-      }
 
       const sections = (sectionsData || []).map((section) => ({
         ...section,
@@ -82,23 +78,18 @@ const subscriptionPageController = {
         }
       });
 
-      const { data, error } = await supabase
-        .from('subscription_page_sections')
-        .update(payload)
-        .eq('id', id)
-        .select('*')
-        .maybeSingle();
-
-      if (error) {
-        throw error;
-      }
-
-      if (!data) {
+      const existing = await prisma.subscription_page_sections.findUnique({ where: { id } });
+      if (!existing) {
         return res.status(404).json({
           success: false,
           message: 'Section not found'
         });
       }
+
+      const data = await prisma.subscription_page_sections.update({
+        where: { id },
+        data: payload,
+      });
 
       res.json({
         success: true,
@@ -142,15 +133,7 @@ const subscriptionPageController = {
         settings: settings || {}
       };
 
-      const { data, error } = await supabase
-        .from('subscription_page_sections')
-        .insert(payload)
-        .select('*')
-        .maybeSingle();
-
-      if (error) {
-        throw error;
-      }
+      const data = await prisma.subscription_page_sections.create({ data: payload });
 
       res.status(201).json({
         success: true,
@@ -170,23 +153,15 @@ const subscriptionPageController = {
     const { id } = req.params;
 
     try {
-      const { data, error } = await supabase
-        .from('subscription_page_sections')
-        .delete()
-        .eq('id', id)
-        .select('id')
-        .maybeSingle();
-
-      if (error) {
-        throw error;
-      }
-
-      if (!data) {
+      const existing = await prisma.subscription_page_sections.findUnique({ where: { id }, select: { id: true } });
+      if (!existing) {
         return res.status(404).json({
           success: false,
           message: 'Section not found'
         });
       }
+
+      await prisma.subscription_page_sections.delete({ where: { id } });
 
       res.json({
         success: true,
@@ -237,23 +212,18 @@ const subscriptionPageController = {
         }
       });
 
-      const { data, error } = await supabase
-        .from('subscription_page_blocks')
-        .update(payload)
-        .eq('id', id)
-        .select('*')
-        .maybeSingle();
-
-      if (error) {
-        throw error;
-      }
-
-      if (!data) {
+      const existing = await prisma.subscription_page_blocks.findUnique({ where: { id } });
+      if (!existing) {
         return res.status(404).json({
           success: false,
           message: 'Block not found'
         });
       }
+
+      const data = await prisma.subscription_page_blocks.update({
+        where: { id },
+        data: payload,
+      });
 
       res.json({
         success: true,
@@ -297,15 +267,7 @@ const subscriptionPageController = {
         metadata: metadata || {}
       };
 
-      const { data, error } = await supabase
-        .from('subscription_page_blocks')
-        .insert(payload)
-        .select('*')
-        .maybeSingle();
-
-      if (error) {
-        throw error;
-      }
+      const data = await prisma.subscription_page_blocks.create({ data: payload });
 
       res.status(201).json({
         success: true,
@@ -325,23 +287,15 @@ const subscriptionPageController = {
     const { id } = req.params;
 
     try {
-      const { data, error } = await supabase
-        .from('subscription_page_blocks')
-        .delete()
-        .eq('id', id)
-        .select('id')
-        .maybeSingle();
-
-      if (error) {
-        throw error;
-      }
-
-      if (!data) {
+      const existing = await prisma.subscription_page_blocks.findUnique({ where: { id }, select: { id: true } });
+      if (!existing) {
         return res.status(404).json({
           success: false,
           message: 'Block not found'
         });
       }
+
+      await prisma.subscription_page_blocks.delete({ where: { id } });
 
       res.json({
         success: true,
@@ -370,15 +324,8 @@ const subscriptionPageController = {
     } = req.body;
 
     try {
-      const { data: existingMeta, error: metaFetchError } = await supabase
-        .from('subscription_page_meta')
-        .select('*')
-        .limit(1)
-        .maybeSingle();
-
-      if (metaFetchError) {
-        throw metaFetchError;
-      }
+      // Same determinism fix as getPageContent — must target the same row consistently.
+      const existingMeta = await prisma.subscription_page_meta.findFirst({ orderBy: { created_at: 'asc' } });
 
       let data;
 
@@ -394,16 +341,7 @@ const subscriptionPageController = {
           structured_data: structured_data || {}
         };
 
-        const insertResult = await supabase
-          .from('subscription_page_meta')
-          .insert(insertPayload)
-          .select('*')
-          .maybeSingle();
-
-        if (insertResult.error) {
-          throw insertResult.error;
-        }
-        data = insertResult.data;
+        data = await prisma.subscription_page_meta.create({ data: insertPayload });
       } else {
         const updatePayload = {
           meta_title,
@@ -422,18 +360,10 @@ const subscriptionPageController = {
           }
         });
 
-        const updateResult = await supabase
-          .from('subscription_page_meta')
-          .update(updatePayload)
-          .eq('id', existingMeta.id)
-          .select('*')
-          .maybeSingle();
-
-        if (updateResult.error) {
-          throw updateResult.error;
-        }
-
-        data = updateResult.data;
+        data = await prisma.subscription_page_meta.update({
+          where: { id: existingMeta.id },
+          data: updatePayload,
+        });
       }
 
       res.json({

@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
 
@@ -59,7 +59,7 @@ const sanitizeLinkPayload = (payload = {}, userId = null) => {
   };
 };
 
-const safeSelect = `id, label, href, display_order, is_active, open_in_new_tab, created_at, updated_at`;
+const safeSelect = { id: true, label: true, href: true, display_order: true, is_active: true, open_in_new_tab: true, created_at: true, updated_at: true };
 
 const handleSupabaseError = (res, message, error) => {
   logger.error(message, error);
@@ -75,17 +75,11 @@ const getNavigationLinks = async (req, res) => {
     }
     console.log('[Cache] MISS navigation:links — fetching from DB');
 
-    const { data, error } = await supabase
-      .from('navigation_links')
-      .select(safeSelect)
-      .is('deleted_at', null)
-      .eq('is_active', true)
-      .order('display_order', { ascending: true })
-      .order('created_at', { ascending: true });
-
-    if (error) {
-      return handleSupabaseError(res, 'Failed to fetch navigation links', error);
-    }
+    const data = await prisma.navigation_links.findMany({
+      where: { deleted_at: null, is_active: true },
+      select: safeSelect,
+      orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+    });
 
     const responsePayload = { success: true, data: data || [] };
     await redisCache.set(NAV_CACHE_KEY, responsePayload, NAV_TTL);
@@ -98,16 +92,11 @@ const getNavigationLinks = async (req, res) => {
 
 const getAdminNavigationLinks = async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('navigation_links')
-      .select(`${safeSelect}, is_active, open_in_new_tab`)
-      .is('deleted_at', null)
-      .order('display_order', { ascending: true })
-      .order('created_at', { ascending: true });
-
-    if (error) {
-      return handleSupabaseError(res, 'Failed to fetch navigation links', error);
-    }
+    const data = await prisma.navigation_links.findMany({
+      where: { deleted_at: null },
+      select: safeSelect,
+      orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+    });
 
     return res.json({ success: true, data: data || [] });
   } catch (error) {
@@ -120,13 +109,10 @@ const createNavigationLink = async (req, res) => {
     const payload = sanitizeLinkPayload(req.body, req.user?.id || null);
     payload.created_by = req.user?.id || null;
 
-    const { data, error } = await supabase
-      .from('navigation_links')
-      .insert(payload)
-      .select(safeSelect)
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.navigation_links.create({ data: payload, select: safeSelect });
+    } catch (error) {
       return handleSupabaseError(res, 'Failed to create navigation link', error);
     }
 
@@ -149,20 +135,16 @@ const updateNavigationLink = async (req, res) => {
 
     const payload = sanitizeLinkPayload(req.body, req.user?.id || null);
 
-    const { data, error } = await supabase
-      .from('navigation_links')
-      .update(payload)
-      .eq('id', id)
-      .is('deleted_at', null)
-      .select(safeSelect)
-      .single();
-
-    if (error) {
-      return handleSupabaseError(res, 'Failed to update navigation link', error);
+    const existing = await prisma.navigation_links.findFirst({ where: { id, deleted_at: null } });
+    if (!existing) {
+      return res.status(404).json({ success: false, message: 'Navigation link not found' });
     }
 
-    if (!data) {
-      return res.status(404).json({ success: false, message: 'Navigation link not found' });
+    let data;
+    try {
+      data = await prisma.navigation_links.update({ where: { id }, data: payload, select: safeSelect });
+    } catch (error) {
+      return handleSupabaseError(res, 'Failed to update navigation link', error);
     }
 
     await invalidateNavCache();
@@ -182,15 +164,10 @@ const deleteNavigationLink = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Navigation link ID is required' });
     }
 
-    const { error } = await supabase
-      .from('navigation_links')
-      .update({ deleted_at: new Date().toISOString(), is_active: false })
-      .eq('id', id)
-      .is('deleted_at', null);
-
-    if (error) {
-      return handleSupabaseError(res, 'Failed to delete navigation link', error);
-    }
+    await prisma.navigation_links.updateMany({
+      where: { id, deleted_at: null },
+      data: { deleted_at: new Date(), is_active: false },
+    });
 
     await invalidateNavCache();
     return res.json({ success: true, message: 'Navigation link deleted successfully' });
@@ -206,18 +183,21 @@ const reorderNavigationLinks = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Order payload must be a non-empty array' });
     }
 
+    // As with footerController's reorder, every id here comes from reordering existing
+    // links — a real upsert would violate NOT NULL constraints on label/href since
+    // they're not in this payload. Per-row update is the faithful equivalent.
     const updates = order.map((item, index) => ({
       id: item.id,
       display_order: sanitizeNumber(item.display_order ?? index),
-      updated_at: new Date().toISOString(),
+      updated_at: new Date(),
       updated_by: req.user?.id || null
     }));
 
-    const { error } = await supabase
-      .from('navigation_links')
-      .upsert(updates, { onConflict: 'id' });
-
-    if (error) {
+    try {
+      await prisma.$transaction(
+        updates.map(({ id, ...data }) => prisma.navigation_links.update({ where: { id }, data }))
+      );
+    } catch (error) {
       return handleSupabaseError(res, 'Failed to reorder navigation links', error);
     }
 

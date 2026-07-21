@@ -1,54 +1,55 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 const getColleges = async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 10, 
-      search, 
-      location, 
+    const {
+      page = 1,
+      limit = 10,
+      search,
+      location,
       type,
       sortBy = 'ranking'
     } = req.query;
 
     const offset = (page - 1) * limit;
 
-    let query = supabase
-      .from('colleges')
-      .select('*', { count: 'exact' })
-      .eq('is_published', true)
-      .is('deleted_at', null);
+    const where = {
+      is_published: true,
+      deleted_at: null,
+    };
 
     if (search) {
-      query = query.or(`name.ilike.%${search}%,location.ilike.%${search}%`);
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { location: { contains: search, mode: 'insensitive' } },
+      ];
     }
 
     if (location) {
-      query = query.ilike('location', `%${location}%`);
+      where.location = { contains: location, mode: 'insensitive' };
     }
 
     if (type) {
-      query = query.eq('type', type);
+      where.type = type;
     }
 
+    let orderBy;
     if (sortBy === 'ranking') {
-      query = query.order('ranking', { ascending: true, nullsLast: true });
+      orderBy = { ranking: { sort: 'asc', nulls: 'last' } };
     } else if (sortBy === 'rating') {
-      query = query.order('rating', { ascending: false, nullsLast: true });
+      orderBy = { rating: { sort: 'desc', nulls: 'last' } };
     }
 
-    query = query.range(offset, offset + parseInt(limit) - 1);
-
-    const { data: colleges, error, count } = await query;
-
-    if (error) {
-      logger.error('Get colleges error:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to fetch colleges'
-      });
-    }
+    const [colleges, count] = await Promise.all([
+      prisma.colleges.findMany({
+        where,
+        ...(orderBy ? { orderBy } : {}),
+        skip: offset,
+        take: parseInt(limit),
+      }),
+      prisma.colleges.count({ where }),
+    ]);
 
     res.json({
       success: true,
@@ -73,60 +74,55 @@ const getCollegeById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: college, error } = await supabase
-      .from('colleges')
-      .select('*')
-      .eq('id', id)
-      .eq('is_published', true)
-      .is('deleted_at', null)
-      .single();
+    const college = await prisma.colleges.findFirst({
+      where: { id, is_published: true, deleted_at: null },
+    });
 
-    if (error || !college) {
+    if (!college) {
       return res.status(404).json({
         success: false,
         message: 'College not found'
       });
     }
 
-    const { data: accreditations } = await supabase
-      .from('college_accreditations')
-      .select('accreditation')
-      .eq('college_id', id);
+    const [accreditations, facilities, fees, cutoffs, placement] = await Promise.all([
+      prisma.college_accreditations.findMany({
+        where: { college_id: id },
+        select: { accreditation: true },
+      }),
+      prisma.college_facilities.findMany({
+        where: { college_id: id },
+        select: { facility: true },
+      }),
+      prisma.college_fees.findMany({
+        where: { college_id: id },
+        select: { course: true, fee: true, currency: true },
+      }),
+      prisma.college_cutoffs.findMany({
+        where: { college_id: id },
+        select: { exam: true, year: true, category: true, rank: true },
+        orderBy: { year: 'desc' },
+      }),
+      prisma.college_placements.findUnique({
+        where: { college_id: id },
+        select: {
+          average_package: true,
+          highest_package: true,
+          placement_percentage: true,
+          college_recruiters: { select: { recruiter_name: true } },
+        },
+      }),
+    ]);
 
-    const { data: facilities } = await supabase
-      .from('college_facilities')
-      .select('facility')
-      .eq('college_id', id);
+    // Decimal columns come back as Decimal.js objects, not plain numbers —
+    // must convert before doing arithmetic like Math.min/Math.max.
+    const feeAmounts = fees.map(f => Number(f.fee));
 
-    const { data: fees } = await supabase
-      .from('college_fees')
-      .select('course, fee, currency')
-      .eq('college_id', id);
-
-    const { data: cutoffs } = await supabase
-      .from('college_cutoffs')
-      .select('exam, year, category, rank')
-      .eq('college_id', id)
-      .order('year', { ascending: false });
-
-    const { data: placement } = await supabase
-      .from('college_placements')
-      .select(`
-        average_package,
-        highest_package,
-        placement_percentage,
-        college_recruiters (
-          recruiter_name
-        )
-      `)
-      .eq('college_id', id)
-      .single();
-
-    college.accreditation = accreditations?.map(a => a.accreditation) || [];
-    college.facilities = facilities?.map(f => f.facility) || [];
+    college.accreditation = accreditations.map(a => a.accreditation) || [];
+    college.facilities = facilities.map(f => f.facility) || [];
     college.fees = {
-      minFee: fees?.length > 0 ? Math.min(...fees.map(f => f.fee)) : 0,
-      maxFee: fees?.length > 0 ? Math.max(...fees.map(f => f.fee)) : 0,
+      minFee: feeAmounts.length > 0 ? Math.min(...feeAmounts) : 0,
+      maxFee: feeAmounts.length > 0 ? Math.max(...feeAmounts) : 0,
       currency: fees?.[0]?.currency || 'INR',
       details: fees || []
     };

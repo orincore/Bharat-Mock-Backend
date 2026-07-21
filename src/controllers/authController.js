@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { sendWelcomeEmail, sendPasswordOtpEmail, sendEmailVerificationOtpEmail, sendPasswordChangedEmail } = require('../utils/emailService');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
@@ -41,12 +41,47 @@ const normalizePlanRecord = (planData) => {
   };
 };
 
+// user_education.percentage is a Decimal column — Prisma returns Decimal.js objects
+// that serialize to JSON strings, not plain numbers. Normalize on the way out.
+const normalizeEducation = (rows) => (rows || []).map(row => ({
+  ...row,
+  percentage: row.percentage !== null && row.percentage !== undefined ? Number(row.percentage) : row.percentage
+}));
+
 // `tv` (token version) is embedded in every token. The auth middleware rejects a
 // token whose tv no longer matches the user's current token_version, so bumping that
 // column invalidates outstanding sessions.
 const generateToken = (userId, role, tokenVersion = 0) => {
   return jwt.sign({ userId, role: role || 'user', tv: tokenVersion ?? 0 }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || '7d'
+  });
+};
+
+// Mirrors the access token in an httpOnly cookie alongside the existing JSON-body
+// token. Purely additive — every existing Bearer-header flow (apiClient, mobile
+// clients, etc.) is untouched. The frontend's same-origin /api/session route reads
+// this cookie server-side to check auth state without a cross-origin round trip.
+const SESSION_COOKIE_NAME = 'bm_session';
+const SESSION_COOKIE_MAX_AGE_MS = Number(process.env.SESSION_COOKIE_MAX_AGE_MS) || 7 * 24 * 60 * 60 * 1000; // 7d, matches default JWT_EXPIRES_IN
+
+const setSessionCookie = (res, token) => {
+  res.cookie(SESSION_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    domain: process.env.COOKIE_DOMAIN || undefined,
+    maxAge: SESSION_COOKIE_MAX_AGE_MS,
+    path: '/',
+  });
+};
+
+const clearSessionCookie = (res) => {
+  res.clearCookie(SESSION_COOKIE_NAME, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
+    domain: process.env.COOKIE_DOMAIN || undefined,
+    path: '/',
   });
 };
 
@@ -91,12 +126,10 @@ const register = async (req, res) => {
   try {
     const { email, password, name, phone } = req.body;
 
-    const { data: existingUser } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', email)
-      .is('deleted_at', null)
-      .single();
+    const existingUser = await prisma.users.findFirst({
+      where: { email, deleted_at: null },
+      select: { id: true }
+    });
 
     if (existingUser) {
       return res.status(409).json({
@@ -107,20 +140,20 @@ const register = async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    const { data: user, error } = await supabase
-      .from('users')
-      .insert({
-        email,
-        password_hash: hashedPassword,
-        name,
-        phone: phone || null,
-        is_verified: false,
-        role: 'user'
-      })
-      .select('id, email, name, phone, avatar_url, role, created_at')
-      .single();
-
-    if (error) {
+    let user;
+    try {
+      user = await prisma.users.create({
+        data: {
+          email,
+          password_hash: hashedPassword,
+          name,
+          phone: phone || null,
+          is_verified: false,
+          role: 'user'
+        },
+        select: { id: true, email: true, name: true, phone: true, avatar_url: true, role: true, created_at: true }
+      });
+    } catch (error) {
       logger.error('Registration error:', error);
       return res.status(500).json({
         success: false,
@@ -128,15 +161,18 @@ const register = async (req, res) => {
       });
     }
 
-    await supabase.from('user_preferences').insert({
-      user_id: user.id,
-      notifications: true,
-      newsletter: true,
-      exam_reminders: true
+    await prisma.user_preferences.create({
+      data: {
+        user_id: user.id,
+        notifications: true,
+        newsletter: true,
+        exam_reminders: true
+      }
     });
 
     const token = generateToken(user.id, user.role);
     const refreshToken = generateRefreshToken(user.id);
+    setSessionCookie(res, token);
 
     res.status(201).json({
       success: true,
@@ -164,12 +200,10 @@ const sendRegistrationOtp = async (req, res) => {
     }
 
     // Check if already registered
-    const { data: existing } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', email)
-      .is('deleted_at', null)
-      .single();
+    const existing = await prisma.users.findFirst({
+      where: { email, deleted_at: null },
+      select: { id: true }
+    });
 
     if (existing) {
       return res.status(409).json({ success: false, message: 'Email already registered' });
@@ -179,15 +213,14 @@ const sendRegistrationOtp = async (req, res) => {
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
 
     // Invalidate any previous OTPs for this email stored in a temp table
-    await supabase
-      .from('email_verification_otps')
-      .update({ is_used: true })
-      .eq('email', email)
-      .eq('is_used', false);
+    await prisma.email_verification_otps.updateMany({
+      where: { email, is_used: false },
+      data: { is_used: true }
+    });
 
-    await supabase
-      .from('email_verification_otps')
-      .insert({ email, otp, expires_at: expiresAt.toISOString(), is_used: false });
+    await prisma.email_verification_otps.create({
+      data: { email, otp, expires_at: expiresAt, is_used: false }
+    });
 
     try {
       await sendEmailVerificationOtpEmail(email, name, otp);
@@ -209,16 +242,13 @@ const verifyRegistrationOtp = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Email and OTP are required' });
     }
 
-    const { data: record, error } = await supabase
-      .from('email_verification_otps')
-      .select('id, otp, expires_at, is_used')
-      .eq('email', email)
-      .eq('is_used', false)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single();
+    const record = await prisma.email_verification_otps.findFirst({
+      where: { email, is_used: false },
+      select: { id: true, otp: true, expires_at: true, is_used: true },
+      orderBy: { created_at: 'desc' }
+    });
 
-    if (error || !record) {
+    if (!record) {
       return res.status(400).json({ success: false, message: 'Invalid or expired OTP' });
     }
 
@@ -231,10 +261,10 @@ const verifyRegistrationOtp = async (req, res) => {
     }
 
     // Mark OTP as used
-    await supabase
-      .from('email_verification_otps')
-      .update({ is_used: true })
-      .eq('id', record.id);
+    await prisma.email_verification_otps.update({
+      where: { id: record.id },
+      data: { is_used: true }
+    });
 
     res.json({ success: true, message: 'OTP verified successfully' });
   } catch (error) {
@@ -247,13 +277,15 @@ const login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const { data: user, error: fetchError } = await supabase
-      .from('users')
-      .select('id, email, password_hash, name, avatar_url, phone, role, is_blocked, block_reason, deleted_at, created_at, token_version')
-      .eq('email', email)
-      .single();
+    const user = await prisma.users.findUnique({
+      where: { email },
+      select: {
+        id: true, email: true, password_hash: true, name: true, avatar_url: true, phone: true,
+        role: true, is_blocked: true, block_reason: true, deleted_at: true, created_at: true, token_version: true
+      }
+    });
 
-    if (fetchError || !user) {
+    if (!user) {
       return res.status(401).json({
         success: false,
         message: 'Invalid email or password'
@@ -290,6 +322,7 @@ const login = async (req, res) => {
 
     const token = generateToken(user.id, user.role, user.token_version);
     const refreshToken = generateRefreshToken(user.id, user.token_version);
+    setSessionCookie(res, token);
 
     // eslint-disable-next-line no-unused-vars
     const { password_hash, token_version, ...userWithoutPassword } = user;
@@ -322,50 +355,44 @@ const getProfile = async (req, res) => {
     }
     console.log(`[Cache] MISS ${cacheKey} — fetching from DB`);
 
-    const { data: user, error } = await supabase
-      .from('users')
-      .select(`
-        id,
-        email,
-        name,
-        phone,
-        avatar_url,
-        role,
-        bio,
-        is_verified,
-        is_blocked,
-        block_reason,
-        is_premium,
-        auth_provider,
-        is_onboarded,
-        subscription_plan_id,
-        subscription_expires_at,
-        subscription_auto_renew,
-        created_at,
-        deleted_at,
-        user_education (
-          level,
-          institution,
-          year,
-          percentage
-        ),
-        user_preferences (
-          notifications,
-          newsletter,
-          exam_reminders
-        )
-      `)
-      .eq('id', req.user.id)
-      .single();
+    const user = await prisma.users.findUnique({
+      where: { id: req.user.id },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        phone: true,
+        avatar_url: true,
+        role: true,
+        bio: true,
+        is_verified: true,
+        is_blocked: true,
+        block_reason: true,
+        is_premium: true,
+        auth_provider: true,
+        is_onboarded: true,
+        subscription_plan_id: true,
+        subscription_expires_at: true,
+        subscription_auto_renew: true,
+        created_at: true,
+        deleted_at: true,
+        user_education: {
+          select: { level: true, institution: true, year: true, percentage: true }
+        },
+        user_preferences: {
+          select: { notifications: true, newsletter: true, exam_reminders: true }
+        }
+      }
+    });
 
-    if (error) {
+    if (!user) {
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
 
-    if (user?.deleted_at) {
+    if (user.deleted_at) {
       return res.status(410).json({
         success: false,
         message: 'This account has been deleted'
@@ -373,12 +400,11 @@ const getProfile = async (req, res) => {
     }
 
     let subscriptionPlan = null;
-    if (user?.subscription_plan_id) {
-      const { data: planData } = await supabase
-        .from('subscription_plans')
-        .select('id, name, description, duration_days, normal_price_cents, sale_price_cents, currency_code')
-        .eq('id', user.subscription_plan_id)
-        .maybeSingle();
+    if (user.subscription_plan_id) {
+      const planData = await prisma.subscription_plans.findUnique({
+        where: { id: user.subscription_plan_id },
+        select: { id: true, name: true, description: true, duration_days: true, normal_price_cents: true, sale_price_cents: true, currency_code: true }
+      });
 
       if (planData) {
         subscriptionPlan = normalizePlanRecord(planData);
@@ -389,6 +415,7 @@ const getProfile = async (req, res) => {
       success: true,
       data: {
         ...user,
+        user_education: normalizeEducation(user.user_education),
         subscription_plan: subscriptionPlan
       }
     };
@@ -416,13 +443,10 @@ const updateProfile = async (req, res) => {
     if (bio !== undefined) updateData.bio = bio;
 
     if (Object.keys(updateData).length > 0) {
-      const { error: userError } = await supabase
-        .from('users')
-        .update(updateData)
-        .eq('id', req.user.id);
-
-      if (userError) {
-        logger.error('Update user error:', userError);
+      try {
+        await prisma.users.update({ where: { id: req.user.id }, data: updateData });
+      } catch (error) {
+        logger.error('Update user error:', error);
         return res.status(500).json({
           success: false,
           message: 'Failed to update profile'
@@ -431,29 +455,31 @@ const updateProfile = async (req, res) => {
     }
 
     if (education) {
-      const { data: existingEducation } = await supabase
-        .from('user_education')
-        .select('id')
-        .eq('user_id', req.user.id)
-        .single();
+      const existingEducation = await prisma.user_education.findFirst({
+        where: { user_id: req.user.id },
+        select: { id: true }
+      });
 
       if (existingEducation) {
-        await supabase
-          .from('user_education')
-          .update(education)
-          .eq('user_id', req.user.id);
+        // updateMany (not update) — the original filtered by user_id, not by the
+        // specific row id, matching that exactly rather than assuming one row.
+        await prisma.user_education.updateMany({
+          where: { user_id: req.user.id },
+          data: education
+        });
       } else {
-        await supabase
-          .from('user_education')
-          .insert({ ...education, user_id: req.user.id });
+        await prisma.user_education.create({ data: { ...education, user_id: req.user.id } });
       }
     }
 
     if (preferences) {
-      await supabase
-        .from('user_preferences')
-        .update(preferences)
-        .eq('user_id', req.user.id);
+      // updateMany so a missing preferences row (shouldn't normally happen, but the
+      // original supabase .update() silently no-ops rather than throwing) behaves the
+      // same way here instead of throwing P2025.
+      await prisma.user_preferences.updateMany({
+        where: { user_id: req.user.id },
+        data: preferences
+      });
     }
 
     // Profile changed — drop cached copies so the next load reflects the update.
@@ -478,12 +504,10 @@ const forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
 
-    const { data: user } = await supabase
-      .from('users')
-      .select('id, email, name')
-      .eq('email', email)
-      .is('deleted_at', null)
-      .single();
+    const user = await prisma.users.findFirst({
+      where: { email, deleted_at: null },
+      select: { id: true, email: true, name: true }
+    });
 
     if (!user) {
       return res.json({
@@ -495,20 +519,19 @@ const forgotPassword = async (req, res) => {
     const otp = generateNumericOtp();
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
-    await supabase
-      .from('password_reset_tokens')
-      .update({ is_used: true })
-      .eq('user_id', user.id)
-      .eq('is_used', false);
+    await prisma.password_reset_tokens.updateMany({
+      where: { user_id: user.id, is_used: false },
+      data: { is_used: true }
+    });
 
-    await supabase
-      .from('password_reset_tokens')
-      .insert({
+    await prisma.password_reset_tokens.create({
+      data: {
         user_id: user.id,
         token: otp,
-        expires_at: expiresAt.toISOString(),
+        expires_at: expiresAt,
         is_used: false
-      });
+      }
+    });
 
     try {
       await sendPasswordOtpEmail(user.email, user.name, otp);
@@ -533,13 +556,12 @@ const resetPassword = async (req, res) => {
   try {
     const { token, newPassword } = req.body;
 
-    const { data: resetToken, error: tokenError } = await supabase
-      .from('password_reset_tokens')
-      .select('user_id, expires_at, is_used')
-      .eq('token', token)
-      .single();
+    const resetToken = await prisma.password_reset_tokens.findUnique({
+      where: { token },
+      select: { user_id: true, expires_at: true, is_used: true }
+    });
 
-    if (tokenError || !resetToken || resetToken.is_used) {
+    if (!resetToken || resetToken.is_used) {
       return res.status(400).json({
         success: false,
         message: 'Invalid or expired reset code'
@@ -553,11 +575,10 @@ const resetPassword = async (req, res) => {
       });
     }
 
-    const { data: user } = await supabase
-      .from('users')
-      .select('password_hash, email, name, token_version')
-      .eq('id', resetToken.user_id)
-      .single();
+    const user = await prisma.users.findUnique({
+      where: { id: resetToken.user_id },
+      select: { password_hash: true, email: true, name: true, token_version: true }
+    });
 
     const isSamePassword = await bcrypt.compare(newPassword, user.password_hash);
     if (isSamePassword) {
@@ -572,21 +593,21 @@ const resetPassword = async (req, res) => {
     // Bump token_version to revoke EVERY existing session for this account. After a
     // password reset the legitimate owner must sign in again with the new password,
     // and anyone who had hijacked a session is logged out immediately.
-    await supabase
-      .from('users')
-      .update({
+    await prisma.users.update({
+      where: { id: resetToken.user_id },
+      data: {
         password_hash: hashedPassword,
-        token_version: (user.token_version ?? 0) + 1
-      })
-      .eq('id', resetToken.user_id);
+        token_version: { increment: 1 }
+      }
+    });
 
     // Drop the cached profile/init so no revoked session is served stale data.
     await bustUserCaches(resetToken.user_id);
 
-    await supabase
-      .from('password_reset_tokens')
-      .update({ is_used: true })
-      .eq('token', token);
+    await prisma.password_reset_tokens.update({
+      where: { token },
+      data: { is_used: true }
+    });
 
     try {
       await sendPasswordChangedEmail(user.email, user.name);
@@ -619,12 +640,10 @@ const maskEmail = (email = '') => {
 // logged-in user's registered address. Reuses the password_reset_tokens store.
 const sendChangePasswordOtp = async (req, res) => {
   try {
-    const { data: user } = await supabase
-      .from('users')
-      .select('id, email, name')
-      .eq('id', req.user.id)
-      .is('deleted_at', null)
-      .single();
+    const user = await prisma.users.findFirst({
+      where: { id: req.user.id, deleted_at: null },
+      select: { id: true, email: true, name: true }
+    });
 
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
@@ -634,20 +653,19 @@ const sendChangePasswordOtp = async (req, res) => {
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
 
     // Invalidate any previous unused codes for this user.
-    await supabase
-      .from('password_reset_tokens')
-      .update({ is_used: true })
-      .eq('user_id', user.id)
-      .eq('is_used', false);
+    await prisma.password_reset_tokens.updateMany({
+      where: { user_id: user.id, is_used: false },
+      data: { is_used: true }
+    });
 
-    await supabase
-      .from('password_reset_tokens')
-      .insert({
+    await prisma.password_reset_tokens.create({
+      data: {
         user_id: user.id,
         token: otp,
-        expires_at: expiresAt.toISOString(),
+        expires_at: expiresAt,
         is_used: false
-      });
+      }
+    });
 
     try {
       await sendPasswordOtpEmail(user.email, user.name, otp);
@@ -672,14 +690,11 @@ const changePassword = async (req, res) => {
   try {
     const { otp, newPassword } = req.body;
 
-    const { data: resetToken } = await supabase
-      .from('password_reset_tokens')
-      .select('id, expires_at, is_used')
-      .eq('user_id', req.user.id)
-      .eq('token', otp)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+    const resetToken = await prisma.password_reset_tokens.findFirst({
+      where: { user_id: req.user.id, token: otp },
+      select: { id: true, expires_at: true, is_used: true },
+      orderBy: { created_at: 'desc' }
+    });
 
     if (!resetToken || resetToken.is_used) {
       return res.status(400).json({
@@ -695,11 +710,10 @@ const changePassword = async (req, res) => {
       });
     }
 
-    const { data: user } = await supabase
-      .from('users')
-      .select('password_hash, email, name, role, token_version')
-      .eq('id', req.user.id)
-      .single();
+    const user = await prisma.users.findUnique({
+      where: { id: req.user.id },
+      select: { password_hash: true, email: true, name: true, role: true, token_version: true }
+    });
 
     if (user.password_hash) {
       const isSamePassword = await bcrypt.compare(newPassword, user.password_hash);
@@ -718,20 +732,20 @@ const changePassword = async (req, res) => {
     // old tv). We then immediately mint fresh tokens for THIS session below, so the user
     // who initiated the change stays logged in while every other device — including a
     // hijacker's — is signed out.
-    await supabase
-      .from('users')
-      .update({
+    await prisma.users.update({
+      where: { id: req.user.id },
+      data: {
         password_hash: hashedPassword,
         token_version: nextTokenVersion
-      })
-      .eq('id', req.user.id);
+      }
+    });
 
     await bustUserCaches(req.user.id);
 
-    await supabase
-      .from('password_reset_tokens')
-      .update({ is_used: true })
-      .eq('id', resetToken.id);
+    await prisma.password_reset_tokens.update({
+      where: { id: resetToken.id },
+      data: { is_used: true }
+    });
 
     try {
       await sendPasswordChangedEmail(user.email, user.name);
@@ -743,6 +757,7 @@ const changePassword = async (req, res) => {
     // revocation. The client must replace its stored tokens with these.
     const newToken = generateToken(req.user.id, user.role, nextTokenVersion);
     const newRefreshToken = generateRefreshToken(req.user.id, nextTokenVersion);
+    setSessionCookie(res, newToken);
 
     res.json({
       success: true,
@@ -775,6 +790,7 @@ const googleCallback = async (req, res) => {
 
     const token = generateToken(user.id, user.role, user.token_version);
     const refreshToken = generateRefreshToken(user.id, user.token_version);
+    setSessionCookie(res, token);
 
     const redirectUrl = user.is_onboarded
       ? `${process.env.FRONTEND_URL}/auth/callback?token=${token}&refresh=${refreshToken}`
@@ -827,12 +843,10 @@ const completeGoogleRegistration = async (req, res) => {
 
     // Guard against a duplicate (completed in another tab, or an email account already
     // uses this address). Never create a second row for the same email.
-    const { data: existing } = await supabase
-      .from('users')
-      .select('id')
-      .eq('email', pending.email)
-      .is('deleted_at', null)
-      .maybeSingle();
+    const existing = await prisma.users.findFirst({
+      where: { email: pending.email, deleted_at: null },
+      select: { id: true }
+    });
 
     if (existing) {
       return res.status(409).json({
@@ -844,25 +858,25 @@ const completeGoogleRegistration = async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 10);
 
-    const { data: newUser, error: createError } = await supabase
-      .from('users')
-      .insert({
-        email: pending.email,
-        name: pending.name,
-        avatar_url: pending.avatar_url || null,
-        password_hash: passwordHash,
-        phone,
-        role: 'user',
-        is_verified: true,
-        is_onboarded: true,
-        auth_provider: 'google',
-        google_id: pending.google_id
-      })
-      .select('id, email, name, phone, avatar_url, role, is_verified, is_onboarded, created_at')
-      .single();
-
-    if (createError || !newUser) {
-      logger.error('Google registration create error:', createError);
+    let newUser;
+    try {
+      newUser = await prisma.users.create({
+        data: {
+          email: pending.email,
+          name: pending.name,
+          avatar_url: pending.avatar_url || null,
+          password_hash: passwordHash,
+          phone,
+          role: 'user',
+          is_verified: true,
+          is_onboarded: true,
+          auth_provider: 'google',
+          google_id: pending.google_id
+        },
+        select: { id: true, email: true, name: true, phone: true, avatar_url: true, role: true, is_verified: true, is_onboarded: true, created_at: true }
+      });
+    } catch (error) {
+      logger.error('Google registration create error:', error);
       return res.status(500).json({
         success: false,
         message: 'Failed to create your account. Please try again.'
@@ -870,11 +884,13 @@ const completeGoogleRegistration = async (req, res) => {
     }
 
     // Default preferences (mirror email registration).
-    await supabase.from('user_preferences').insert({
-      user_id: newUser.id,
-      notifications: true,
-      newsletter: true,
-      exam_reminders: true
+    await prisma.user_preferences.create({
+      data: {
+        user_id: newUser.id,
+        notifications: true,
+        newsletter: true,
+        exam_reminders: true
+      }
     });
 
     try {
@@ -885,6 +901,7 @@ const completeGoogleRegistration = async (req, res) => {
 
     const token = generateToken(newUser.id, newUser.role);
     const refreshToken = generateRefreshToken(newUser.id);
+    setSessionCookie(res, token);
 
     res.status(201).json({
       success: true,
@@ -920,13 +937,10 @@ const completeOnboarding = async (req, res) => {
       updatePayload.password_hash = await bcrypt.hash(password, 10);
     }
 
-    const { error: updateError } = await supabase
-      .from('users')
-      .update(updatePayload)
-      .eq('id', userId);
-
-    if (updateError) {
-      logger.error('Onboarding update error:', updateError);
+    try {
+      await prisma.users.update({ where: { id: userId }, data: updatePayload });
+    } catch (error) {
+      logger.error('Onboarding update error:', error);
       return res.status(500).json({
         success: false,
         message: 'Failed to update profile'
@@ -937,21 +951,20 @@ const completeOnboarding = async (req, res) => {
     // would keep returning is_onboarded=false and bounce the user back to onboarding.
     await bustUserCaches(userId);
 
-    const { data: updatedUser } = await supabase
-      .from('users')
-      .select(`
-        id,
-        email,
-        name,
-        phone,
-        avatar_url,
-        role,
-        is_verified,
-        is_onboarded,
-        created_at
-      `)
-      .eq('id', userId)
-      .single();
+    const updatedUser = await prisma.users.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        phone: true,
+        avatar_url: true,
+        role: true,
+        is_verified: true,
+        is_onboarded: true,
+        created_at: true
+      }
+    });
 
     if (!alreadyOnboarded) {
       try {
@@ -995,11 +1008,10 @@ const refreshAuthToken = async (req, res) => {
     }
 
     const userId = decoded.userId;
-    const { data: user } = await supabase
-      .from('users')
-      .select('id, role, is_blocked, block_reason, token_version')
-      .eq('id', userId)
-      .maybeSingle();
+    const user = await prisma.users.findUnique({
+      where: { id: userId },
+      select: { id: true, role: true, is_blocked: true, block_reason: true, token_version: true }
+    });
 
     if (!user) {
       return res.status(401).json({
@@ -1028,6 +1040,7 @@ const refreshAuthToken = async (req, res) => {
 
     const newAccessToken = generateToken(userId, user.role, user.token_version);
     const newRefreshToken = generateRefreshToken(userId, user.token_version);
+    setSessionCookie(res, newAccessToken);
 
     res.json({
       success: true,
@@ -1049,22 +1062,17 @@ const refreshAuthToken = async (req, res) => {
 const getPublicProfile = async (req, res) => {
   try {
     const { id } = req.params;
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('id, name, avatar_url, bio, role, created_at')
-      .eq('id', id)
-      .single();
+    const user = await prisma.users.findUnique({
+      where: { id },
+      select: { id: true, name: true, avatar_url: true, bio: true, role: true, created_at: true }
+    });
 
-    if (error || !user) {
+    if (!user) {
       return res.status(404).json({ success: false, message: 'Author not found' });
     }
 
     // Count published blogs by this author
-    const { count } = await supabase
-      .from('blogs')
-      .select('id', { count: 'exact', head: true })
-      .eq('author_id', id)
-      .eq('is_published', true);
+    const count = await prisma.blogs.count({ where: { author_id: id, is_published: true } });
 
     res.json({ success: true, data: { ...user, blog_count: count || 0 } });
   } catch (error) {
@@ -1077,13 +1085,15 @@ const deleteAccount = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const { error } = await supabase
-      .from('users')
-      .update({ deleted_at: new Date().toISOString() })
-      .eq('id', userId)
-      .is('deleted_at', null);
-
-    if (error) {
+    try {
+      // updateMany with a compound {id, deleted_at: null} filter, same as the original
+      // .eq('id',...).is('deleted_at', null) — a second delete call on an already-deleted
+      // account must stay a true no-op, not overwrite deleted_at with a later timestamp.
+      await prisma.users.updateMany({
+        where: { id: userId, deleted_at: null },
+        data: { deleted_at: new Date() }
+      });
+    } catch (error) {
       logger.error('Delete account error:', error);
       return res.status(500).json({ success: false, message: 'Failed to delete account' });
     }
@@ -1105,10 +1115,12 @@ const deleteAccount = async (req, res) => {
 const logout = async (req, res) => {
   try {
     await bustUserCaches(req.user?.id);
+    clearSessionCookie(res);
     res.json({ success: true, message: 'Logged out' });
   } catch (error) {
     logger.error('Logout error:', error);
     // Logout should never fail the client — report success regardless.
+    clearSessionCookie(res);
     res.json({ success: true, message: 'Logged out' });
   }
 };

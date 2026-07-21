@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 const requireAdmin = async (req, res, next) => {
@@ -15,13 +15,12 @@ const requireAdmin = async (req, res, next) => {
       return next();
     }
 
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('role')
-      .eq('id', req.user.id)
-      .single();
+    const user = await prisma.users.findUnique({
+      where: { id: req.user.id },
+      select: { role: true },
+    });
 
-    if (error || !user) {
+    if (!user) {
       return res.status(403).json({
         success: false,
         message: 'Access denied'
@@ -60,13 +59,12 @@ const requireAdminOrEditor = async (req, res, next) => {
       return next();
     }
 
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('role')
-      .eq('id', req.user.id)
-      .single();
+    const user = await prisma.users.findUnique({
+      where: { id: req.user.id },
+      select: { role: true },
+    });
 
-    if (error || !user) {
+    if (!user) {
       return res.status(403).json({
         success: false,
         message: 'Access denied'

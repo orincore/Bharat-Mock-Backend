@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 const { uploadCategoryLogo, uploadSubcategoryLogo, deleteFile, extractKeyFromUrl } = require('../services/uploadService');
@@ -49,50 +49,38 @@ const invalidateSubcategoryCache = async (categoryId, subcategoryId) => {
   console.log(`[Cache] Invalidated taxonomy:categories + init:public + init:user:* + homepage:data + metadata${categoryId ? ` + taxonomy:subcategories:${categoryId}` : ''}${subcategoryId ? ` + page_content:${subcategoryId}` : ''} (subcategory change)`);
 };
 
-const fetchSubcategoryRecord = async (categoryId, subcategorySlug, select = 'id, name, slug, description, category_id, logo_url, display_order, is_active, show_mock_tests_tab, show_previous_papers_tab, created_at, updated_at', includeActiveFilter = true) => {
-  let baseQuery = supabase
-    .from('exam_subcategories')
-    .select(select)
-    .eq('slug', subcategorySlug)
-    .eq('category_id', categoryId);
+const SUBCATEGORY_DETAIL_SELECT = {
+  id: true, name: true, slug: true, description: true, category_id: true, logo_url: true,
+  display_order: true, is_active: true, show_mock_tests_tab: true, show_previous_papers_tab: true,
+  created_at: true, updated_at: true
+};
 
+// The original had a fallback retry for `error.code === '42703'` (undefined column) —
+// defensive code for when display_order/is_active/tab-visibility columns hadn't been
+// migrated onto exam_subcategories yet. Confirmed via introspection all of these columns
+// exist in the live schema, so — same reasoning as the exam_sections.language dead
+// fallback documented in MIGRATION_TRACKER.md §4.5b — that retry path is unreachable
+// dead code now and has been dropped; this always uses the full column set.
+const fetchSubcategoryRecord = async (categoryId, subcategorySlug, select = SUBCATEGORY_DETAIL_SELECT, includeActiveFilter = true) => {
+  const where = { slug: subcategorySlug, category_id: categoryId };
   if (includeActiveFilter) {
-    baseQuery = baseQuery.or('is_active.eq.true,is_active.is.null');
+    where.OR = [{ is_active: true }, { is_active: null }];
   }
 
-  let { data, error } = await baseQuery.limit(1);
-
-  // If columns are missing (e.g. logo_url not yet migrated), retry with safe columns
-  if (error?.code === '42703') {
-    let fallbackQuery = supabase
-      .from('exam_subcategories')
-      .select('id, name, slug, description, category_id, created_at, updated_at')
-      .eq('slug', subcategorySlug)
-      .eq('category_id', categoryId);
-
-    if (includeActiveFilter) {
-      fallbackQuery = fallbackQuery.or('is_active.eq.true,is_active.is.null');
-    }
-
-    ({ data, error } = await fallbackQuery.limit(1));
-  }
-
-  // .limit(1) returns an array; extract the first row or null
-  const row = Array.isArray(data) ? data[0] || null : data;
-  return { data: row, error: row ? null : error };
+  const data = await prisma.exam_subcategories.findFirst({ where, select });
+  return { data: data || null, error: null };
 };
 
 const deleteSubcategory = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: subcategory, error: fetchError } = await supabase
-      .from('exam_subcategories')
-      .select('logo_url, category_id')
-      .eq('id', id)
-      .single();
+    const subcategory = await prisma.exam_subcategories.findUnique({
+      where: { id },
+      select: { logo_url: true, category_id: true }
+    });
 
-    if (fetchError || !subcategory) {
+    if (!subcategory) {
       return res.status(404).json({ success: false, message: 'Subcategory not found' });
     }
 
@@ -108,19 +96,16 @@ const deleteSubcategory = async (req, res) => {
     }
 
     // Null out subcategory_id on exams referencing this subcategory
-    await supabase.from('exams').update({ subcategory_id: null }).eq('subcategory_id', id);
+    await prisma.exams.updateMany({ where: { subcategory_id: id }, data: { subcategory_id: null } });
 
     // Test series also reference this subcategory via a nullable FK
     // (test_series_subcategory_id_fkey) with no ON DELETE action, so the delete is
     // blocked until those references are cleared. Detach them like we do for exams.
-    await supabase.from('test_series').update({ subcategory_id: null }).eq('subcategory_id', id);
+    await prisma.test_series.updateMany({ where: { subcategory_id: id }, data: { subcategory_id: null } });
 
-    const { error } = await supabase
-      .from('exam_subcategories')
-      .delete()
-      .eq('id', id);
-
-    if (error) {
+    try {
+      await prisma.exam_subcategories.delete({ where: { id } });
+    } catch (error) {
       logger.error('Delete subcategory error:', error);
       return res.status(500).json({ success: false, message: 'Failed to delete subcategory' });
     }
@@ -133,99 +118,105 @@ const deleteSubcategory = async (req, res) => {
   }
 };
 
-deleteCategory = async (req, res) => {
+const deleteCategory = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: category, error: fetchError } = await supabase
-      .from('exam_categories')
-      .select('id, logo_url')
-      .eq('id', id)
-      .single();
+    const category = await prisma.exam_categories.findUnique({
+      where: { id },
+      select: { id: true, logo_url: true }
+    });
 
-    if (fetchError || !category) {
+    if (!category) {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
     // Fetch all subcategories under this category
-    const { data: subcategories } = await supabase
-      .from('exam_subcategories')
-      .select('id, logo_url')
-      .eq('category_id', id);
+    const subcategories = await prisma.exam_subcategories.findMany({
+      where: { category_id: id },
+      select: { id: true, logo_url: true }
+    });
 
-    const subIds = (subcategories || []).map((s) => s.id);
+    const subIds = subcategories.map((s) => s.id);
 
     // Fetch all exams belonging to this category (directly or via subcategory)
-    let examQuery = supabase
-      .from('exams')
-      .select('id, logo_url, thumbnail_url')
-      .eq('category_id', id);
-
-    const { data: directExams } = await examQuery;
+    const directExams = await prisma.exams.findMany({
+      where: { category_id: id },
+      select: { id: true, logo_url: true, thumbnail_url: true }
+    });
 
     let subExams = [];
     if (subIds.length > 0) {
-      const { data: se } = await supabase
-        .from('exams')
-        .select('id, logo_url, thumbnail_url')
-        .in('subcategory_id', subIds);
-      subExams = se || [];
+      subExams = await prisma.exams.findMany({
+        where: { subcategory_id: { in: subIds } },
+        select: { id: true, logo_url: true, thumbnail_url: true }
+      });
     }
 
-    const allExams = [...(directExams || []), ...subExams];
+    const allExams = [...directExams, ...subExams];
     const examIds = allExams.map((e) => e.id);
 
     // --- Delete all exam data in correct FK order ---
     if (examIds.length > 0) {
       // Get all question IDs for these exams
-      const { data: questions } = await supabase
-        .from('questions')
-        .select('id, image_url')
-        .in('exam_id', examIds);
+      const questions = await prisma.questions.findMany({
+        where: { exam_id: { in: examIds } },
+        select: { id: true, image_url: true }
+      });
 
-      const questionIds = (questions || []).map((q) => q.id);
+      const questionIds = questions.map((q) => q.id);
 
       // Delete question option images + records
       if (questionIds.length > 0) {
-        const { data: options } = await supabase
-          .from('question_options')
-          .select('id, image_url')
-          .in('question_id', questionIds);
+        const options = await prisma.question_options.findMany({
+          where: { question_id: { in: questionIds } },
+          select: { id: true, image_url: true }
+        });
 
-        for (const opt of options || []) {
+        for (const opt of options) {
           if (opt.image_url) {
             try { await deleteFile(extractKeyFromUrl(opt.image_url)); } catch (e) { logger.warn('Failed to delete option image:', e); }
           }
         }
 
-        await supabase.from('question_options').delete().in('question_id', questionIds);
+        await prisma.question_options.deleteMany({ where: { question_id: { in: questionIds } } });
       }
 
       // Delete question images + records
-      for (const q of questions || []) {
+      for (const q of questions) {
         if (q.image_url) {
           try { await deleteFile(extractKeyFromUrl(q.image_url)); } catch (e) { logger.warn('Failed to delete question image:', e); }
         }
       }
-      await supabase.from('questions').delete().in('exam_id', examIds);
+      await prisma.questions.deleteMany({ where: { exam_id: { in: examIds } } });
 
       // Delete exam sections and syllabus
-      await supabase.from('exam_sections').delete().in('exam_id', examIds);
-      await supabase.from('exam_syllabus').delete().in('exam_id', examIds);
+      await prisma.exam_sections.deleteMany({ where: { exam_id: { in: examIds } } });
+      await prisma.exam_syllabus.deleteMany({ where: { exam_id: { in: examIds } } });
 
-      // Delete attempt-related data (section_analysis → results → user_answers → exam_attempts)
-      const { data: attempts } = await supabase
-        .from('exam_attempts')
-        .select('id')
-        .in('exam_id', examIds);
+      // Delete attempt-related data (results → user_answers → exam_attempts)
+      const attempts = await prisma.exam_attempts.findMany({
+        where: { exam_id: { in: examIds } },
+        select: { id: true }
+      });
 
-      const attemptIds = (attempts || []).map((a) => a.id);
+      const attemptIds = attempts.map((a) => a.id);
 
       if (attemptIds.length > 0) {
-        await supabase.from('section_analysis').delete().in('attempt_id', attemptIds);
-        await supabase.from('results').delete().in('attempt_id', attemptIds);
-        await supabase.from('user_answers').delete().in('attempt_id', attemptIds);
-        await supabase.from('exam_attempts').delete().in('id', attemptIds);
+        // NOTE: the original also attempted `section_analysis.delete().in('attempt_id',
+        // attemptIds)` here, but section_analysis has no attempt_id column at all (only
+        // result_id) — confirmed via introspection. That call always failed silently
+        // in the original (its error was never checked). Omitted here rather than
+        // reproduced literally, because Prisma would throw a hard client-side
+        // validation error for a nonexistent field and abort this whole cascading
+        // delete partway through — a real regression the original's silently-ignored
+        // failure never caused. No functional loss: section_analysis rows are cleaned
+        // up automatically anyway via its `results` relation's ON DELETE CASCADE, which
+        // fires when `results` (deleted next) and ultimately `exam_attempts` (deleted
+        // below) are removed.
+        await prisma.results.deleteMany({ where: { attempt_id: { in: attemptIds } } });
+        await prisma.user_answers.deleteMany({ where: { attempt_id: { in: attemptIds } } });
+        await prisma.exam_attempts.deleteMany({ where: { id: { in: attemptIds } } });
       }
 
       // Delete exam media files
@@ -239,8 +230,9 @@ deleteCategory = async (req, res) => {
       }
 
       // Delete the exams themselves
-      const { error: examsDeleteError } = await supabase.from('exams').delete().in('id', examIds);
-      if (examsDeleteError) {
+      try {
+        await prisma.exams.deleteMany({ where: { id: { in: examIds } } });
+      } catch (examsDeleteError) {
         logger.error('Delete exams error:', examsDeleteError);
         return res.status(500).json({ success: false, message: 'Failed to delete linked exams' });
       }
@@ -250,19 +242,20 @@ deleteCategory = async (req, res) => {
     // FKs (no ON DELETE action), otherwise the subcategory/category deletes below are
     // blocked by test_series_subcategory_id_fkey / test_series_category_id_fkey.
     if (subIds.length > 0) {
-      await supabase.from('test_series').update({ subcategory_id: null }).in('subcategory_id', subIds);
+      await prisma.test_series.updateMany({ where: { subcategory_id: { in: subIds } }, data: { subcategory_id: null } });
     }
-    await supabase.from('test_series').update({ category_id: null }).eq('category_id', id);
+    await prisma.test_series.updateMany({ where: { category_id: id }, data: { category_id: null } });
 
     // Delete subcategory logos + records
-    for (const sub of subcategories || []) {
+    for (const sub of subcategories) {
       if (sub.logo_url) {
         try { await deleteFile(extractKeyFromUrl(sub.logo_url)); } catch (e) { logger.warn('Failed to delete subcategory logo:', e); }
       }
     }
     if (subIds.length > 0) {
-      const { error: subDeleteError } = await supabase.from('exam_subcategories').delete().in('id', subIds);
-      if (subDeleteError) {
+      try {
+        await prisma.exam_subcategories.deleteMany({ where: { id: { in: subIds } } });
+      } catch (subDeleteError) {
         logger.error('Delete subcategories error:', subDeleteError);
         return res.status(500).json({ success: false, message: 'Failed to delete linked subcategories' });
       }
@@ -274,12 +267,17 @@ deleteCategory = async (req, res) => {
     }
 
     // Finally delete the category
-    const { error } = await supabase.from('exam_categories').delete().eq('id', id);
-    if (error) {
+    try {
+      await prisma.exam_categories.delete({ where: { id } });
+    } catch (error) {
       logger.error('Delete category error:', error);
       return res.status(500).json({ success: false, message: 'Failed to delete category' });
     }
 
+    // NOTE (preserved from original): `category` was only fetched with `{id, logo_url}`
+    // above, so `category?.slug` is always undefined here — the per-slug cache key is
+    // never actually busted by this call. Not fixed here; same as the original, and the
+    // main categories list + init + homepage caches are still busted regardless.
     await invalidateCategoryCache(category?.slug);
     res.json({
       success: true,
@@ -289,7 +287,7 @@ deleteCategory = async (req, res) => {
     logger.error('Delete category error:', error);
     res.status(500).json({ success: false, message: 'Server error while deleting category' });
   }
-}
+};
 
 const getCategories = async (req, res) => {
   try {
@@ -305,19 +303,14 @@ const getCategories = async (req, res) => {
       console.log('[Cache] MISS taxonomy:categories — fetching from DB');
     }
 
-    let query = supabase
-      .from('exam_categories')
-      .select('id, name, slug, description, logo_url, icon, display_order, is_active, created_at, updated_at')
-      .order('display_order', { ascending: true })
-      .order('name', { ascending: true });
-
-    if (search) {
-      query = query.ilike('name', `%${search}%`);
-    }
-
-    const { data, error } = await query;
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.exam_categories.findMany({
+        where: search ? { name: { contains: search, mode: 'insensitive' } } : undefined,
+        select: { id: true, name: true, slug: true, description: true, logo_url: true, icon: true, display_order: true, is_active: true, created_at: true, updated_at: true },
+        orderBy: [{ display_order: 'asc' }, { name: 'asc' }]
+      });
+    } catch (error) {
       logger.error('Get categories error:', error);
       return res.status(500).json({ success: false, message: 'Failed to fetch categories' });
     }
@@ -346,7 +339,7 @@ const createCategory = async (req, res) => {
     }
 
     const normalizedSlug = slugify(slug || name);
-    const uniqueSlug = await ensureUniqueSlug(supabase, 'exam_categories', normalizedSlug);
+    const uniqueSlug = await ensureUniqueSlug(prisma.exam_categories, normalizedSlug);
 
     let logo_url = null;
     if (logoFile) {
@@ -364,13 +357,10 @@ const createCategory = async (req, res) => {
       is_active: is_active !== undefined ? is_active === 'true' || is_active === true : true
     };
 
-    const { data, error } = await supabase
-      .from('exam_categories')
-      .insert(insertData)
-      .select()
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.exam_categories.create({ data: insertData });
+    } catch (error) {
       logger.error('Create category error:', error);
       return res.status(500).json({ success: false, message: 'Failed to create category' });
     }
@@ -393,18 +383,17 @@ const updateCategory = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Category name is required' });
     }
 
-    const { data: existingCategory } = await supabase
-      .from('exam_categories')
-      .select('logo_url')
-      .eq('id', id)
-      .single();
+    const existingCategory = await prisma.exam_categories.findUnique({
+      where: { id },
+      select: { logo_url: true }
+    });
 
     if (!existingCategory) {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
     let updatedSlug = slug ? slugify(slug) : slugify(name);
-    updatedSlug = await ensureUniqueSlug(supabase, 'exam_categories', updatedSlug, {
+    updatedSlug = await ensureUniqueSlug(prisma.exam_categories, updatedSlug, {
       excludeId: id
     });
 
@@ -432,14 +421,10 @@ const updateCategory = async (req, res) => {
       updateData.logo_url = uploadResult.url;
     }
 
-    const { data, error } = await supabase
-      .from('exam_categories')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.exam_categories.update({ where: { id }, data: updateData });
+    } catch (error) {
       logger.error('Update category error:', error);
       return res.status(500).json({ success: false, message: 'Failed to update category' });
     }
@@ -469,39 +454,23 @@ const getSubcategories = async (req, res) => {
       console.log(`[Cache] MISS taxonomy:subcategories:${category_id} — fetching from DB`);
     }
 
-    const baseSelect = 'id, category_id, name, slug, description, logo_url, display_order, is_active, show_mock_tests_tab, show_previous_papers_tab, created_at, updated_at, exam_categories(name, slug)';
-    let query = supabase
-      .from('exam_subcategories')
-      .select(baseSelect)
-      .order('display_order', { ascending: true })
-      .order('name', { ascending: true });
+    const where = {};
+    if (category_id) where.category_id = category_id;
+    if (search) where.name = { contains: search, mode: 'insensitive' };
 
-    if (category_id) {
-      query = query.eq('category_id', category_id);
-    }
-
-    if (search) {
-      query = query.ilike('name', `%${search}%`);
-    }
-
-    let { data, error } = await query;
-
-    if (error?.code === '42703') {
-      logger.warn('exam_subcategories missing new columns, retrying without display_order/is_active. Run migrations.');
-      query = supabase
-        .from('exam_subcategories')
-        .select('id, category_id, name, slug, description, created_at, updated_at, exam_categories(name, slug)')
-        .order('name', { ascending: true });
-      if (category_id) {
-        query = query.eq('category_id', category_id);
-      }
-      if (search) {
-        query = query.ilike('name', `%${search}%`);
-      }
-      ({ data, error } = await query);
-    }
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.exam_subcategories.findMany({
+        where,
+        select: {
+          id: true, category_id: true, name: true, slug: true, description: true, logo_url: true,
+          display_order: true, is_active: true, show_mock_tests_tab: true, show_previous_papers_tab: true,
+          created_at: true, updated_at: true,
+          exam_categories: { select: { name: true, slug: true } }
+        },
+        orderBy: [{ display_order: 'asc' }, { name: 'asc' }]
+      });
+    } catch (error) {
       logger.error('Get subcategories error:', error);
       return res.status(500).json({ success: false, message: 'Failed to fetch subcategories' });
     }
@@ -529,18 +498,14 @@ const createSubcategory = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Category ID and name are required' });
     }
 
-    const { data: category } = await supabase
-      .from('exam_categories')
-      .select('id')
-      .eq('id', category_id)
-      .single();
+    const category = await prisma.exam_categories.findUnique({ where: { id: category_id }, select: { id: true } });
 
     if (!category) {
       return res.status(404).json({ success: false, message: 'Parent category not found' });
     }
 
     const normalizedSlug = slugify(slug || name);
-    const uniqueSlug = await ensureUniqueSlug(supabase, 'exam_subcategories', normalizedSlug);
+    const uniqueSlug = await ensureUniqueSlug(prisma.exam_subcategories, normalizedSlug);
 
     let logo_url = null;
     if (logoFile) {
@@ -560,13 +525,10 @@ const createSubcategory = async (req, res) => {
       show_previous_papers_tab: show_previous_papers_tab !== undefined ? show_previous_papers_tab === 'true' || show_previous_papers_tab === true : true
     };
 
-    const { data, error } = await supabase
-      .from('exam_subcategories')
-      .insert(insertData)
-      .select()
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.exam_subcategories.create({ data: insertData });
+    } catch (error) {
       logger.error('Create subcategory error:', error);
       return res.status(500).json({ success: false, message: 'Failed to create subcategory' });
     }
@@ -589,18 +551,17 @@ const updateSubcategory = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Subcategory name is required' });
     }
 
-    const { data: existingSubcategory, error: fetchError } = await supabase
-      .from('exam_subcategories')
-      .select('category_id, slug, logo_url')
-      .eq('id', id)
-      .single();
+    const existingSubcategory = await prisma.exam_subcategories.findUnique({
+      where: { id },
+      select: { category_id: true, slug: true, logo_url: true }
+    });
 
-    if (fetchError || !existingSubcategory) {
+    if (!existingSubcategory) {
       return res.status(404).json({ success: false, message: 'Subcategory not found' });
     }
 
     let normalizedSlug = slug ? slugify(slug) : slugify(name);
-    normalizedSlug = await ensureUniqueSlug(supabase, 'exam_subcategories', normalizedSlug, {
+    normalizedSlug = await ensureUniqueSlug(prisma.exam_subcategories, normalizedSlug, {
       excludeId: id
     });
 
@@ -641,25 +602,10 @@ const updateSubcategory = async (req, res) => {
       updateData.logo_url = uploadResult.url;
     }
 
-    let { data, error } = await supabase
-      .from('exam_subcategories')
-      .update(updateData)
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error?.code === 'PGRST204') {
-      const fallbackData = { name: updateData.name, description: updateData.description, slug: updateData.slug };
-      logger.warn('Column missing on exam_subcategories, retrying update without optional fields. Run latest migrations to add display_order/is_active.');
-      ({ data, error } = await supabase
-        .from('exam_subcategories')
-        .update(fallbackData)
-        .eq('id', id)
-        .select()
-        .single());
-    }
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.exam_subcategories.update({ where: { id }, data: updateData });
+    } catch (error) {
       logger.error('Update subcategory error:', error);
       return res.status(500).json({ success: false, message: 'Failed to update subcategory' });
     }
@@ -674,12 +620,13 @@ const updateSubcategory = async (req, res) => {
 
 const getDifficulties = async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('exam_difficulties')
-      .select('id, name, slug, description, level_order')
-      .order('level_order', { ascending: true });
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.exam_difficulties.findMany({
+        select: { id: true, name: true, slug: true, description: true, level_order: true },
+        orderBy: { level_order: 'asc' }
+      });
+    } catch (error) {
       logger.error('Get difficulties error:', error);
       return res.status(500).json({ success: false, message: 'Failed to fetch difficulty levels' });
     }
@@ -700,15 +647,14 @@ const createDifficulty = async (req, res) => {
     }
 
     const normalizedSlug = slugify(slug || name);
-    const uniqueSlug = await ensureUniqueSlug(supabase, 'exam_difficulties', normalizedSlug);
+    const uniqueSlug = await ensureUniqueSlug(prisma.exam_difficulties, normalizedSlug);
 
-    const { data, error } = await supabase
-      .from('exam_difficulties')
-      .insert({ name, description, slug: uniqueSlug, level_order: level_order ? parseInt(level_order) : 0 })
-      .select()
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.exam_difficulties.create({
+        data: { name, description, slug: uniqueSlug, level_order: level_order ? parseInt(level_order) : 0 }
+      });
+    } catch (error) {
       logger.error('Create difficulty error:', error);
       return res.status(500).json({ success: false, message: 'Failed to create difficulty level' });
     }
@@ -724,13 +670,12 @@ const getCategoryById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const { data: category, error } = await supabase
-      .from('exam_categories')
-      .select('id, name, slug, description, logo_url, icon, display_order, is_active, created_at, updated_at')
-      .eq('id', id)
-      .single();
+    const category = await prisma.exam_categories.findUnique({
+      where: { id },
+      select: { id: true, name: true, slug: true, description: true, logo_url: true, icon: true, display_order: true, is_active: true, created_at: true, updated_at: true }
+    });
 
-    if (error || !category) {
+    if (!category) {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
@@ -753,14 +698,12 @@ const getCategoryBySlug = async (req, res) => {
     }
     console.log(`[Cache] MISS taxonomy:category:${slug} — fetching from DB`);
 
-    const { data: categories, error } = await supabase
-      .from('exam_categories')
-      .select('id, name, slug, description, logo_url, icon')
-      .eq('slug', slug)
-      .or('is_active.eq.true,is_active.is.null');
+    const category = await prisma.exam_categories.findFirst({
+      where: { slug, OR: [{ is_active: true }, { is_active: null }] },
+      select: { id: true, name: true, slug: true, description: true, logo_url: true, icon: true }
+    });
 
-    const category = categories?.[0];
-    if (error || !category) {
+    if (!category) {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
@@ -782,41 +725,16 @@ const getSubcategoryById = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Subcategory identifier is required' });
     }
 
-    const detailedSelect = 'id, name, slug, description, category_id, logo_url, display_order, is_active, show_mock_tests_tab, show_previous_papers_tab, created_at, updated_at';
-    const fallbackSelect = 'id, name, slug, description, category_id, logo_url, created_at, updated_at';
-
-    let { data, error } = await supabase
-      .from('exam_subcategories')
-      .select(detailedSelect)
-      .eq('id', identifier)
-      .maybeSingle();
-
-    if (error?.code === '42703') {
-      ({ data, error } = await supabase
-        .from('exam_subcategories')
-        .select(fallbackSelect)
-        .eq('id', identifier)
-        .maybeSingle());
-    }
+    let data = await prisma.exam_subcategories.findUnique({
+      where: { id: identifier },
+      select: SUBCATEGORY_DETAIL_SELECT
+    }).catch(() => null); // non-UUID identifier throws on the UUID cast — fall through to slug lookup
 
     if (!data) {
-      let fallback = await supabase
-        .from('exam_subcategories')
-        .select(detailedSelect)
-        .eq('slug', identifier)
-        .maybeSingle();
-      data = fallback.data;
-      error = fallback.error;
-
-      if (error?.code === '42703') {
-        fallback = await supabase
-          .from('exam_subcategories')
-          .select(fallbackSelect)
-          .eq('slug', identifier)
-          .maybeSingle();
-        data = fallback.data;
-        error = fallback.error;
-      }
+      data = await prisma.exam_subcategories.findFirst({
+        where: { slug: identifier },
+        select: SUBCATEGORY_DETAIL_SELECT
+      });
     }
 
     if (!data) {
@@ -826,13 +744,12 @@ const getSubcategoryById = async (req, res) => {
     let category = null;
     let categorySlug = null;
     if (data.category_id) {
-      const { data: categoryData, error: categoryError } = await supabase
-        .from('exam_categories')
-        .select('id, name, slug')
-        .eq('id', data.category_id)
-        .maybeSingle();
+      const categoryData = await prisma.exam_categories.findUnique({
+        where: { id: data.category_id },
+        select: { id: true, name: true, slug: true }
+      });
 
-      if (categoryData && !categoryError) {
+      if (categoryData) {
         category = categoryData;
         categorySlug = categoryData.slug;
       }
@@ -852,62 +769,49 @@ const getExamsByCategory = async (req, res) => {
     const pageNumber = Number.parseInt(page, 10) || 1;
     const limitNumber = Math.min(Number.parseInt(limit, 10) || 12, 100);
 
-    const { data: categories } = await supabase
-      .from('exam_categories')
-      .select('id')
-      .eq('slug', slug)
-      .or('is_active.eq.true,is_active.is.null');
+    const category = await prisma.exam_categories.findFirst({
+      where: { slug, OR: [{ is_active: true }, { is_active: null }] },
+      select: { id: true }
+    });
 
-    const category = categories?.[0];
     if (!category) {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
     const offset = (pageNumber - 1) * limitNumber;
 
-    let query = supabase
-      .from('exams')
-      .select(`
-        id,
-        title,
-        duration,
-        total_marks,
-        total_questions,
-        difficulty,
-        status,
-        start_date,
-        end_date,
-        is_free,
-        logo_url,
-        thumbnail_url,
-        slug,
-        url_path,
-        subcategory,
-        supports_hindi
-      `, { count: 'exact' })
-      .or(`category_id.eq.${category.id},category.ilike.%${slug}%`)
-      .eq('is_published', true)
-      .is('deleted_at', null)
-      .or('is_current_affair.eq.false,is_current_affair.is.null')
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limitNumber - 1);
+    const where = {
+      OR: [{ category_id: category.id }, { category: { contains: slug, mode: 'insensitive' } }],
+      is_published: true,
+      deleted_at: null,
+      AND: [{ OR: [{ is_current_affair: false }, { is_current_affair: null }] }]
+    };
 
-    if (difficulty) {
-      query = query.eq('difficulty', difficulty);
-    }
-
-    if (subcategory) {
-      query = query.eq('subcategory', subcategory);
-    }
-
+    if (difficulty) where.difficulty = difficulty;
+    if (subcategory) where.subcategory = subcategory;
     if (search) {
       const searchTerm = search.trim();
-      query = query.or(`title.ilike.%${searchTerm}%`);
+      where.AND.push({ title: { contains: searchTerm, mode: 'insensitive' } });
     }
 
-    const { data: exams, error, count } = await query;
-
-    if (error) {
+    let exams, count;
+    try {
+      [exams, count] = await Promise.all([
+        prisma.exams.findMany({
+          where,
+          select: {
+            id: true, title: true, duration: true, total_marks: true, total_questions: true,
+            difficulty: true, status: true, start_date: true, end_date: true, is_free: true,
+            logo_url: true, thumbnail_url: true, slug: true, url_path: true, subcategory: true,
+            supports_hindi: true
+          },
+          orderBy: { created_at: 'desc' },
+          skip: offset,
+          take: limitNumber
+        }),
+        prisma.exams.count({ where })
+      ]);
+    } catch (error) {
       logger.error('Get exams by category error:', error);
       return res.status(500).json({ success: false, message: 'Failed to fetch exams' });
     }
@@ -937,13 +841,11 @@ const getSubcategoryBySlug = async (req, res) => {
     const resolvedCategorySlug = parseCategorySlug(categorySlug);
     const resolvedSubcategorySlug = parseSubcategorySlug(subcategorySlug);
 
-    const { data: categories } = await supabase
-      .from('exam_categories')
-      .select('id, name, slug')
-      .eq('slug', resolvedCategorySlug)
-      .or('is_active.eq.true,is_active.is.null');
+    const category = await prisma.exam_categories.findFirst({
+      where: { slug: resolvedCategorySlug, OR: [{ is_active: true }, { is_active: null }] },
+      select: { id: true, name: true, slug: true }
+    });
 
-    const category = categories?.[0];
     if (!category) {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
@@ -955,8 +857,8 @@ const getSubcategoryBySlug = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Subcategory not found' });
     }
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       data: {
         ...subcategory,
         category
@@ -968,6 +870,13 @@ const getSubcategoryBySlug = async (req, res) => {
   }
 };
 
+const EXAM_LISTING_SELECT = {
+  id: true, title: true, duration: true, total_marks: true, total_questions: true,
+  difficulty: true, status: true, start_date: true, end_date: true, is_free: true,
+  logo_url: true, thumbnail_url: true, pdf_url_en: true, pdf_url_hi: true, slug: true,
+  url_path: true, exam_type: true, subcategory: true, supports_hindi: true, show_in_mock_tests: true
+};
+
 const getExamsBySubcategory = async (req, res) => {
   try {
     const { categorySlug, subcategorySlug } = req.params;
@@ -977,18 +886,16 @@ const getExamsBySubcategory = async (req, res) => {
     const pageNumber = Number.parseInt(page, 10) || 1;
     const limitNumber = Math.min(Number.parseInt(limit, 10) || 12, 100);
 
-    const { data: categories } = await supabase
-      .from('exam_categories')
-      .select('id')
-      .eq('slug', resolvedCategorySlug)
-      .or('is_active.eq.true,is_active.is.null');
+    const category = await prisma.exam_categories.findFirst({
+      where: { slug: resolvedCategorySlug, OR: [{ is_active: true }, { is_active: null }] },
+      select: { id: true }
+    });
 
-    const category = categories?.[0];
     if (!category) {
       return res.status(404).json({ success: false, message: 'Category not found' });
     }
 
-    const { data: subcategory } = await fetchSubcategoryRecord(category.id, resolvedSubcategorySlug, 'id', false);
+    const { data: subcategory } = await fetchSubcategoryRecord(category.id, resolvedSubcategorySlug, { id: true }, false);
 
     if (!subcategory) {
       return res.json({ success: true, data: [], pagination: { page: pageNumber, limit: limitNumber, total: 0, totalPages: 0 } });
@@ -996,53 +903,33 @@ const getExamsBySubcategory = async (req, res) => {
 
     const offset = (pageNumber - 1) * limitNumber;
 
-    let query = supabase
-      .from('exams')
-      .select(`
-        id,
-        title,
-        duration,
-        total_marks,
-        total_questions,
-        difficulty,
-        status,
-        start_date,
-        end_date,
-        is_free,
-        logo_url,
-        thumbnail_url,
-        pdf_url_en,
-        pdf_url_hi,
-        slug,
-        url_path,
-        exam_type,
-        subcategory,
-        supports_hindi,
-        show_in_mock_tests
-      `, { count: 'exact' })
-      .eq('subcategory_id', subcategory.id)
-      .eq('is_published', true)
-      .is('deleted_at', null)
-      .or('is_current_affair.eq.false,is_current_affair.is.null')
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limitNumber - 1);
+    const where = {
+      subcategory_id: subcategory.id,
+      is_published: true,
+      deleted_at: null,
+      OR: [{ is_current_affair: false }, { is_current_affair: null }]
+    };
 
-    if (difficulty) {
-      query = query.eq('difficulty', difficulty);
-    }
-
-    if (exam_type) {
-      query = query.eq('exam_type', exam_type);
-    }
-
+    if (difficulty) where.difficulty = difficulty;
+    if (exam_type) where.exam_type = exam_type;
     if (search) {
       const searchTerm = search.trim();
-      query = query.or(`title.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%`);
+      where.AND = [{ OR: [{ title: { contains: searchTerm, mode: 'insensitive' } }, { slug: { contains: searchTerm, mode: 'insensitive' } }] }];
     }
 
-    const { data: exams, error, count } = await query;
-
-    if (error) {
+    let exams, count;
+    try {
+      [exams, count] = await Promise.all([
+        prisma.exams.findMany({
+          where,
+          select: EXAM_LISTING_SELECT,
+          orderBy: { created_at: 'desc' },
+          skip: offset,
+          take: limitNumber
+        }),
+        prisma.exams.count({ where })
+      ]);
+    } catch (error) {
       logger.error('Get exams by subcategory error:', error);
       return res.status(500).json({ success: false, message: 'Failed to fetch exams' });
     }
@@ -1071,17 +958,16 @@ const reorderSubcategories = async (req, res) => {
       return res.status(400).json({ success: false, message: 'orderedIds array is required' });
     }
 
-    const updates = orderedIds.map((id, index) =>
-      supabase
-        .from('exam_subcategories')
-        .update({ display_order: index })
-        .eq('id', id)
-    );
-
-    const results = await Promise.all(updates);
-    const failed = results.find((r) => r.error);
-    if (failed) {
-      logger.error('Reorder subcategories error:', failed.error);
+    try {
+      // updateMany (not update) so a nonexistent id silently no-ops instead of
+      // throwing, matching supabase-js's original behavior of a no-op 0-row update.
+      await Promise.all(
+        orderedIds.map((id, index) =>
+          prisma.exam_subcategories.updateMany({ where: { id }, data: { display_order: index } })
+        )
+      );
+    } catch (error) {
+      logger.error('Reorder subcategories error:', error);
       return res.status(500).json({ success: false, message: 'Failed to reorder subcategories' });
     }
 
@@ -1096,33 +982,21 @@ const getSubcategoryByOwnSlug = async (req, res) => {
   try {
     const { slug } = req.params;
 
-    let { data: subcategories, error } = await supabase
-      .from('exam_subcategories')
-      .select('id, name, slug, description, category_id, logo_url, display_order, is_active, show_mock_tests_tab, show_previous_papers_tab, created_at, updated_at')
-      .eq('slug', slug)
-      .or('is_active.eq.true,is_active.is.null');
+    const subcategory = await prisma.exam_subcategories.findFirst({
+      where: { slug, OR: [{ is_active: true }, { is_active: null }] },
+      select: SUBCATEGORY_DETAIL_SELECT
+    });
 
-    // Tab-visibility columns not yet migrated — retry without them
-    if (error?.code === '42703') {
-      ({ data: subcategories, error } = await supabase
-        .from('exam_subcategories')
-        .select('id, name, slug, description, category_id, logo_url, display_order, is_active, created_at, updated_at')
-        .eq('slug', slug)
-        .or('is_active.eq.true,is_active.is.null'));
-    }
-
-    const subcategory = subcategories?.[0];
-    if (error || !subcategory) {
+    if (!subcategory) {
       return res.status(404).json({ success: false, message: 'Subcategory not found' });
     }
 
     let category = null;
     if (subcategory.category_id) {
-      const { data: categoryData } = await supabase
-        .from('exam_categories')
-        .select('id, name, slug')
-        .eq('id', subcategory.category_id)
-        .single();
+      const categoryData = await prisma.exam_categories.findUnique({
+        where: { id: subcategory.category_id },
+        select: { id: true, name: true, slug: true }
+      });
       if (categoryData) {
         category = categoryData;
       }
@@ -1142,66 +1016,44 @@ const getExamsBySubcategorySlug = async (req, res) => {
     const pageNumber = Number.parseInt(page, 10) || 1;
     const limitNumber = Math.min(Number.parseInt(limit, 10) || 12, 100);
 
-    const { data: subcategories } = await supabase
-      .from('exam_subcategories')
-      .select('id')
-      .eq('slug', slug)
-      .or('is_active.eq.true,is_active.is.null');
+    const subcategory = await prisma.exam_subcategories.findFirst({
+      where: { slug, OR: [{ is_active: true }, { is_active: null }] },
+      select: { id: true }
+    });
 
-    const subcategory = subcategories?.[0];
     if (!subcategory) {
       return res.json({ success: true, data: [], pagination: { page: pageNumber, limit: limitNumber, total: 0, totalPages: 0 } });
     }
 
     const offset = (pageNumber - 1) * limitNumber;
 
-    let query = supabase
-      .from('exams')
-      .select(`
-        id,
-        title,
-        duration,
-        total_marks,
-        total_questions,
-        difficulty,
-        status,
-        start_date,
-        end_date,
-        is_free,
-        logo_url,
-        thumbnail_url,
-        pdf_url_en,
-        pdf_url_hi,
-        slug,
-        url_path,
-        exam_type,
-        subcategory,
-        supports_hindi,
-        show_in_mock_tests
-      `, { count: 'exact' })
-      .eq('subcategory_id', subcategory.id)
-      .eq('is_published', true)
-      .is('deleted_at', null)
-      .or('is_current_affair.eq.false,is_current_affair.is.null')
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limitNumber - 1);
+    const where = {
+      subcategory_id: subcategory.id,
+      is_published: true,
+      deleted_at: null,
+      OR: [{ is_current_affair: false }, { is_current_affair: null }]
+    };
 
-    if (difficulty) {
-      query = query.eq('difficulty', difficulty);
-    }
-
-    if (exam_type) {
-      query = query.eq('exam_type', exam_type);
-    }
-
+    if (difficulty) where.difficulty = difficulty;
+    if (exam_type) where.exam_type = exam_type;
     if (search) {
       const searchTerm = search.trim();
-      query = query.or(`title.ilike.%${searchTerm}%,slug.ilike.%${searchTerm}%`);
+      where.AND = [{ OR: [{ title: { contains: searchTerm, mode: 'insensitive' } }, { slug: { contains: searchTerm, mode: 'insensitive' } }] }];
     }
 
-    const { data: exams, error, count } = await query;
-
-    if (error) {
+    let exams, count;
+    try {
+      [exams, count] = await Promise.all([
+        prisma.exams.findMany({
+          where,
+          select: EXAM_LISTING_SELECT,
+          orderBy: { created_at: 'desc' },
+          skip: offset,
+          take: limitNumber
+        }),
+        prisma.exams.count({ where })
+      ]);
+    } catch (error) {
       logger.error('Get exams by subcategory slug error:', error);
       return res.status(500).json({ success: false, message: 'Failed to fetch exams' });
     }
@@ -1236,13 +1088,11 @@ const resolveCombinedSlug = async (req, res) => {
       const candidateCatSlug = parts.slice(0, i + 1).join('-');
       const candidateSubSlug = parts.slice(i + 1).join('-');
 
-      const { data: categories } = await supabase
-        .from('exam_categories')
-        .select('id, name, slug')
-        .eq('slug', candidateCatSlug)
-        .or('is_active.eq.true,is_active.is.null');
+      const category = await prisma.exam_categories.findFirst({
+        where: { slug: candidateCatSlug, OR: [{ is_active: true }, { is_active: null }] },
+        select: { id: true, name: true, slug: true }
+      });
 
-      const category = categories?.[0];
       if (!category) continue;
 
       const { data: subcategory } = await fetchSubcategoryRecord(category.id, candidateSubSlug, undefined, false);

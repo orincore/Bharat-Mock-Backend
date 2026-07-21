@@ -1,48 +1,43 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 const { evaluateExam } = require('./examController');
 
-const resultSelectFields = `
-  id,
-  user_id,
-  score,
-  total_marks,
-  percentage,
-  correct_answers,
-  wrong_answers,
-  unattempted,
-  time_taken,
-  rank,
-  total_participants,
-  status,
-  created_at,
-  attempt_id,
-  exam_id,
-  exam_attempts!inner (
-    language
-  ),
-  exams (
-    id,
-    title,
-    category,
-    difficulty,
-    image_url,
-    pass_percentage,
-    total_questions,
-    duration,
-    slug,
-    url_path
-  )
-`;
+// score/total_marks/percentage/accuracy are Decimal columns — Prisma returns Decimal.js
+// objects, which JSON-serialize to strings, not numbers (unlike supabase-js, which
+// always returned these as plain numeric strings the frontend's `Number()`/arithmetic
+// coerced transparently). Every result/section-analysis row read from the DB must be
+// normalized before going into a res.json() response, or frontend code calling
+// `.toFixed()` on these fields throws (see MIGRATION_TRACKER §4.5).
+const normalizeResultDecimals = (result) => {
+  if (!result) return result;
+  if (result.score !== undefined) result.score = Number(result.score);
+  if (result.total_marks !== undefined) result.total_marks = Number(result.total_marks);
+  if (result.percentage !== undefined) result.percentage = Number(result.percentage);
+  return result;
+};
+
+const resultDetailSelect = {
+  id: true, user_id: true, score: true, total_marks: true, percentage: true,
+  correct_answers: true, wrong_answers: true, unattempted: true, time_taken: true,
+  rank: true, total_participants: true, status: true, created_at: true,
+  attempt_id: true, exam_id: true,
+  exam_attempts: { select: { language: true } },
+  exams: {
+    select: {
+      id: true, title: true, category: true, difficulty: true, image_url: true,
+      pass_percentage: true, total_questions: true, duration: true, slug: true, url_path: true,
+    },
+  },
+};
 
 const enrichResultComparisons = async (result) => {
-  const { data: examResults, error } = await supabase
-    .from('results')
-    .select('id, score')
-    .eq('exam_id', result.exam_id)
-    .eq('is_published', true);
-
-  if (error) {
+  let examResults;
+  try {
+    examResults = await prisma.results.findMany({
+      where: { exam_id: result.exam_id, is_published: true },
+      select: { id: true, score: true },
+    });
+  } catch (error) {
     logger.warn('Failed to fetch exam comparison stats:', error, { examId: result.exam_id, resultId: result.id });
     return {
       averageScore: null,
@@ -86,38 +81,34 @@ const enrichResultComparisons = async (result) => {
   };
 };
 
+// Faithful equivalent of the old `exam_attempts!inner(...)` embed — since results.attempt_id
+// is nullable, an inner join excluded any orphaned result with no attempt row at all.
 const fetchResultWithDetails = (filters = {}) => {
-  let query = supabase
-    .from('results')
-    .select(resultSelectFields)
-    .eq('is_published', true)
-    .eq('user_id', filters.userId);
+  const where = {
+    is_published: true,
+    user_id: filters.userId,
+    attempt_id: { not: null },
+  };
 
-  if (filters.id) {
-    query = query.eq('id', filters.id);
-  }
+  if (filters.id) where.id = filters.id;
+  if (filters.attemptId) where.attempt_id = filters.attemptId;
 
-  if (filters.attemptId) {
-    query = query.eq('attempt_id', filters.attemptId);
-  }
-
-  return query.single();
+  return prisma.results.findFirst({ where, select: resultDetailSelect }).then(normalizeResultDecimals);
 };
 
 const ensureResultForAttempt = async (attemptId, userId) => {
   try {
-    const { data: existingResult } = await fetchResultWithDetails({ attemptId, userId });
+    const existingResult = await fetchResultWithDetails({ attemptId, userId });
     if (existingResult) {
       return { result: existingResult };
     }
 
-    const { data: attempt, error: attemptError } = await supabase
-      .from('exam_attempts')
-      .select('id, exam_id, user_id, is_submitted')
-      .eq('id', attemptId)
-      .single();
+    const attempt = await prisma.exam_attempts.findUnique({
+      where: { id: attemptId },
+      select: { id: true, exam_id: true, user_id: true, is_submitted: true },
+    });
 
-    if (attemptError || !attempt || attempt.user_id !== userId) {
+    if (!attempt || attempt.user_id !== userId) {
       return { status: 404, message: 'Exam attempt not found' };
     }
 
@@ -127,9 +118,9 @@ const ensureResultForAttempt = async (attemptId, userId) => {
 
     await evaluateExam(attemptId, attempt.exam_id, userId);
 
-    const { data: regeneratedResult, error: regenerationError } = await fetchResultWithDetails({ attemptId, userId });
+    const regeneratedResult = await fetchResultWithDetails({ attemptId, userId });
 
-    if (regenerationError || !regeneratedResult) {
+    if (!regeneratedResult) {
       return { status: 404, message: 'Result not found' };
     }
 
@@ -145,38 +136,27 @@ const getResults = async (req, res) => {
     const { page = 1, limit = 10 } = req.query;
     const offset = (page - 1) * limit;
 
-    const { data: results, error, count } = await supabase
-      .from('results')
-      .select(`
-        id,
-        attempt_id,
-        score,
-        total_marks,
-        percentage,
-        correct_answers,
-        wrong_answers,
-        unattempted,
-        time_taken,
-        rank,
-        total_participants,
-        status,
-        created_at,
-        exam_attempts!inner (
-          language
-        ),
-        exams (
-          id,
-          title,
-          category,
-          image_url
-        )
-      `, { count: 'exact' })
-      .eq('user_id', req.user.id)
-      .eq('is_published', true)
-      .order('created_at', { ascending: false })
-      .range(offset, offset + parseInt(limit) - 1);
+    const where = { user_id: req.user.id, is_published: true, attempt_id: { not: null } };
 
-    if (error) {
+    let results, count;
+    try {
+      [results, count] = await Promise.all([
+        prisma.results.findMany({
+          where,
+          select: {
+            id: true, attempt_id: true, score: true, total_marks: true, percentage: true,
+            correct_answers: true, wrong_answers: true, unattempted: true, time_taken: true,
+            rank: true, total_participants: true, status: true, created_at: true,
+            exam_attempts: { select: { language: true } },
+            exams: { select: { id: true, title: true, category: true, image_url: true } },
+          },
+          orderBy: { created_at: 'desc' },
+          skip: offset,
+          take: parseInt(limit),
+        }),
+        prisma.results.count({ where }),
+      ]);
+    } catch (error) {
       logger.error('Get results error:', error);
       return res.status(500).json({
         success: false,
@@ -185,7 +165,7 @@ const getResults = async (req, res) => {
     }
 
     const formattedResults = results.map(r => ({
-      ...r,
+      ...normalizeResultDecimals(r),
       language: r.exam_attempts?.language || 'en',
       examTitle: r.exams?.title
     }));
@@ -211,14 +191,14 @@ const getResults = async (req, res) => {
 
 const getUserStats = async (req, res) => {
   try {
-    const { data: results, error } = await supabase
-      .from('results')
-      .select('percentage, created_at')
-      .eq('user_id', req.user.id)
-      .eq('is_published', true)
-      .order('created_at', { ascending: true });
-
-    if (error) {
+    let results;
+    try {
+      results = await prisma.results.findMany({
+        where: { user_id: req.user.id, is_published: true },
+        select: { percentage: true, created_at: true },
+        orderBy: { created_at: 'asc' },
+      });
+    } catch (error) {
       logger.error('Get user stats error:', error);
       return res.status(500).json({
         success: false,
@@ -235,8 +215,12 @@ const getUserStats = async (req, res) => {
       return set;
     }, new Set()).size;
 
+    // percentage is a Decimal column — Prisma returns Decimal.js objects, not plain
+    // numbers, so this must convert with Number() before summing (see MIGRATION_TRACKER
+    // §4.5 for the general gotcha; supabase-js returned this as a string, which the
+    // original `|| 0` coercion happened to tolerate differently than a Decimal object would).
     const avgScore = examsTaken > 0
-      ? parseFloat((results.reduce((sum, result) => sum + (result.percentage || 0), 0) / examsTaken).toFixed(1))
+      ? parseFloat((results.reduce((sum, result) => sum + (Number(result.percentage) || 0), 0) / examsTaken).toFixed(1))
       : 0;
 
     res.json({
@@ -264,12 +248,13 @@ const getUserStats = async (req, res) => {
 const loadSectionWiseAnalysis = async (resultId, attemptLanguage = 'en') => {
   if (!resultId) return [];
 
-  const { data: rows, error } = await supabase
-    .from('section_analysis')
-    .select('id, section_id, score, total_marks, correct_answers, wrong_answers, unattempted, accuracy, time_taken')
-    .eq('result_id', resultId);
-
-  if (error) {
+  let rows;
+  try {
+    rows = await prisma.section_analysis.findMany({
+      where: { result_id: resultId },
+      select: { id: true, section_id: true, score: true, total_marks: true, correct_answers: true, wrong_answers: true, unattempted: true, accuracy: true, time_taken: true },
+    });
+  } catch (error) {
     logger.error('Failed to load section_analysis:', error, { resultId });
     return [];
   }
@@ -278,10 +263,10 @@ const loadSectionWiseAnalysis = async (resultId, attemptLanguage = 'en') => {
   const sectionIds = [...new Set(rows.map(r => r.section_id).filter(Boolean))];
   const sectionById = new Map();
   if (sectionIds.length > 0) {
-    const { data: sections } = await supabase
-      .from('exam_sections')
-      .select('id, name, name_hi')
-      .in('id', sectionIds);
+    const sections = await prisma.exam_sections.findMany({
+      where: { id: { in: sectionIds } },
+      select: { id: true, name: true, name_hi: true },
+    });
     (sections || []).forEach(s => sectionById.set(s.id, s));
   }
 
@@ -356,42 +341,26 @@ const getResultById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const baseQuery = () => supabase
-      .from('results')
-      .select(`
-        id,
-        score,
-        total_marks,
-        percentage,
-        correct_answers,
-        wrong_answers,
-        unattempted,
-        time_taken,
-        rank,
-        total_participants,
-        status,
-        created_at,
-        attempt_id,
-        exam_id,
-        exams (
-          id,
-          title,
-          category,
-          difficulty,
-          image_url,
-          pass_percentage,
-          total_questions
-        )
-      `)
-      .eq('user_id', req.user.id);
+    const resultByIdSelect = {
+      id: true, score: true, total_marks: true, percentage: true, correct_answers: true,
+      wrong_answers: true, unattempted: true, time_taken: true, rank: true, total_participants: true,
+      status: true, created_at: true, attempt_id: true, exam_id: true,
+      exams: { select: { id: true, title: true, category: true, difficulty: true, image_url: true, pass_percentage: true, total_questions: true } },
+    };
 
-    let { data: result, error } = await baseQuery().eq('id', id).single();
+    let result = await prisma.results.findFirst({
+      where: { user_id: req.user.id, id },
+      select: resultByIdSelect,
+    });
 
-    if ((error || !result) && !error?.details?.includes('more than one row')) {
-      ({ data: result, error } = await baseQuery().eq('attempt_id', id).single());
+    if (!result) {
+      result = await prisma.results.findFirst({
+        where: { user_id: req.user.id, attempt_id: id },
+        select: resultByIdSelect,
+      });
     }
 
-    if (error || !result) {
+    if (!result) {
       const ensured = await ensureResultForAttempt(id, req.user.id);
 
       if (!ensured.result) {
@@ -436,19 +405,13 @@ const getAnswerReview = async (req, res) => {
   try {
     const { resultId } = req.params;
 
-    const { data: result } = await supabase
-      .from('results')
-      .select(`
-        attempt_id,
-        exam_id,
-        user_id,
-        exam_attempts!inner (
-          language
-        )
-      `)
-      .eq('id', resultId)
-      .eq('user_id', req.user.id)
-      .single();
+    const result = await prisma.results.findFirst({
+      where: { id: resultId, user_id: req.user.id, attempt_id: { not: null } },
+      select: {
+        attempt_id: true, exam_id: true, user_id: true,
+        exam_attempts: { select: { language: true } },
+      },
+    });
 
     if (!result) {
       return res.status(404).json({
@@ -459,29 +422,13 @@ const getAnswerReview = async (req, res) => {
 
     const attemptLanguage = result.exam_attempts?.language || 'en';
 
-    // Get sections with language filtering (same logic as examController)
-    let sectionsSelect = 'id, name, name_hi, total_questions, marks_per_question, duration, section_order';
-    let sectionsData;
-    let sectionsError;
-    try {
-      ({ data: sectionsData, error: sectionsError } = await supabase
-        .from('exam_sections')
-        .select(`${sectionsSelect}, language`)
-        .eq('exam_id', result.exam_id));
-      if (sectionsError && sectionsError.code === '42703') {
-        ({ data: sectionsData, error: sectionsError } = await supabase
-          .from('exam_sections')
-          .select(sectionsSelect)
-          .eq('exam_id', result.exam_id));
-      }
-    } catch (err) {
-      sectionsData = null;
-      sectionsError = err;
-    }
-
-    if (sectionsError) {
-      throw sectionsError;
-    }
+    // NOTE: exam_sections has no `language` column in the live schema — same as the
+    // note in examController.js. Querying the real columns directly is behaviorally
+    // identical to the fallback path that always actually ran.
+    const sectionsData = await prisma.exam_sections.findMany({
+      where: { exam_id: result.exam_id },
+      select: { id: true, name: true, name_hi: true, total_questions: true, marks_per_question: true, duration: true, section_order: true },
+    });
 
     const sections = (sectionsData || []).map(section => ({
       ...section,
@@ -509,48 +456,26 @@ const getAnswerReview = async (req, res) => {
       );
     };
 
-    const { data: questions } = await supabase
-      .from('questions')
-      .select(`
-        id,
-        section_id,
-        type,
-        text,
-        text_hi,
-        marks,
-        negative_marks,
-        explanation,
-        explanation_hi,
-        explanation_image_url,
-        image_url,
-        question_order,
-        question_number,
-        exam_sections!inner (
-          id,
-          name,
-          name_hi,
-          section_order
-        ),
-        question_options (
-          id,
-          option_text,
-          option_text_hi,
-          is_correct,
-          option_order,
-          image_url
-        )
-      `)
-      .eq('exam_id', result.exam_id)
-      .order('question_number');
+    const questions = await prisma.questions.findMany({
+      where: { exam_id: result.exam_id, section_id: { not: null } },
+      select: {
+        id: true, section_id: true, passage_id: true, type: true, text: true, text_hi: true, marks: true, negative_marks: true,
+        explanation: true, explanation_hi: true, explanation_image_url: true, image_url: true, question_order: true, question_number: true,
+        exam_sections: { select: { id: true, name: true, name_hi: true, section_order: true } },
+        question_options: { select: { id: true, option_text: true, option_text_hi: true, is_correct: true, option_order: true, image_url: true } },
+        passages: { select: { id: true, title: true, content: true, content_hi: true } },
+      },
+      orderBy: { question_number: 'asc' },
+    });
 
     const filteredQuestions = questions.filter(q =>
       allowedSectionIds.has(q.section_id) && questionHasContent(q, attemptLanguage)
     );
 
-    const { data: userAnswers } = await supabase
-      .from('user_answers')
-      .select('question_id, answer, is_correct, marks_obtained, time_taken')
-      .eq('attempt_id', result.attempt_id);
+    const userAnswers = await prisma.user_answers.findMany({
+      where: { attempt_id: result.attempt_id },
+      select: { question_id: true, answer: true, is_correct: true, marks_obtained: true, time_taken: true },
+    });
 
     const reviewData = filteredQuestions.map(q => {
       const userAnswer = userAnswers.find(ua => ua.question_id === q.id);
@@ -561,9 +486,17 @@ const getAnswerReview = async (req, res) => {
       return {
         id: q.id,
         sectionId: q.section_id,
-        sectionName: attemptLanguage === 'hi' && q.exam_sections?.name_hi 
-          ? q.exam_sections.name_hi 
+        sectionName: attemptLanguage === 'hi' && q.exam_sections?.name_hi
+          ? q.exam_sections.name_hi
           : q.exam_sections?.name || 'Section',
+        passageId: q.passage_id,
+        passage: q.passages
+          ? {
+              id: q.passages.id,
+              title: q.passages.title,
+              content: attemptLanguage === 'hi' && q.passages.content_hi ? q.passages.content_hi : q.passages.content,
+            }
+          : null,
         type: q.type,
         text: attemptLanguage === 'hi' && q.text_hi ? q.text_hi : q.text,
         marks: q.marks,
@@ -603,27 +536,17 @@ const getAnswerReview = async (req, res) => {
 
 const getIncompleteAttempts = async (req, res) => {
   try {
-    const { data: attempts, error } = await supabase
-      .from('exam_attempts')
-      .select(`
-        id,
-        exam_id,
-        language,
-        created_at,
-        updated_at,
-        exams (
-          id,
-          title,
-          total_questions,
-          duration,
-          image_url
-        )
-      `)
-      .eq('user_id', req.user.id)
-      .eq('is_submitted', false)
-      .order('updated_at', { ascending: false });
-
-    if (error) {
+    let attempts;
+    try {
+      attempts = await prisma.exam_attempts.findMany({
+        where: { user_id: req.user.id, is_submitted: false },
+        select: {
+          id: true, exam_id: true, language: true, created_at: true, updated_at: true,
+          exams: { select: { id: true, title: true, total_questions: true, duration: true, image_url: true } },
+        },
+        orderBy: { updated_at: 'desc' },
+      });
+    } catch (error) {
       logger.error('Get incomplete attempts error:', error);
       return res.status(500).json({ success: false, message: 'Failed to fetch incomplete attempts' });
     }
@@ -631,11 +554,9 @@ const getIncompleteAttempts = async (req, res) => {
     // For each attempt, count how many questions have been answered
     const attemptsWithProgress = await Promise.all(
       (attempts || []).map(async (attempt) => {
-        const { count } = await supabase
-          .from('user_answers')
-          .select('id', { count: 'exact', head: true })
-          .eq('attempt_id', attempt.id)
-          .not('answer', 'is', null);
+        const count = await prisma.user_answers.count({
+          where: { attempt_id: attempt.id, answer: { not: null } },
+        });
 
         return {
           attemptId: attempt.id,

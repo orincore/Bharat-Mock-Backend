@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const { uploadToR2 } = require('../utils/fileUpload');
 const { slugify, ensureUniqueSlug } = require('../utils/slugify');
 const { redisCache, buildCacheKey } = require('../utils/redisCache');
@@ -80,26 +80,23 @@ const blogController = {
       const { page = 1, limit = 12, category, categories, search, featured, published, status } = req.query;
       const offset = (page - 1) * limit;
 
-      let query = supabase
-        .from('blogs')
-        .select('*', { count: 'exact' });
-
+      const where = {};
       const isPrivileged = req.user && ['admin', 'editor', 'author'].includes(req.user.role);
 
       // Public users only see published blogs
       if (!isPrivileged) {
-        query = query.eq('is_published', true);
+        where.is_published = true;
       } else {
         if (published !== undefined) {
-          query = query.eq('is_published', published === 'true');
+          where.is_published = published === 'true';
         }
         if (status && VALID_STATUSES.has(status)) {
-          query = query.eq('status', status);
+          where.status = status;
         }
       }
 
       if (category) {
-        query = query.eq('category', category);
+        where.category = category;
       }
 
       if (categories) {
@@ -108,24 +105,33 @@ const blogController = {
           .map((item) => item.trim())
           .filter(Boolean);
         if (categoryList.length > 0) {
-          query = query.in('category', categoryList);
+          where.category = { in: categoryList };
         }
       }
 
       if (featured === 'true') {
-        query = query.eq('is_featured', true);
+        where.is_featured = true;
       }
 
       if (search) {
-        query = query.or(`title.ilike.%${search}%,excerpt.ilike.%${search}%`);
+        where.OR = [
+          { title: { contains: search, mode: 'insensitive' } },
+          { excerpt: { contains: search, mode: 'insensitive' } },
+        ];
       }
 
-      const { data, error, count } = await query
-        .order('published_at', { ascending: false, nullsFirst: false })
-        .order('created_at', { ascending: false })
-        .range(offset, offset + parseInt(limit) - 1);
-
-      if (error) {
+      let data, count;
+      try {
+        [data, count] = await Promise.all([
+          prisma.blogs.findMany({
+            where,
+            orderBy: [{ published_at: { sort: 'desc', nulls: 'last' } }, { created_at: 'desc' }],
+            skip: offset,
+            take: parseInt(limit),
+          }),
+          prisma.blogs.count({ where }),
+        ]);
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to fetch blogs', error);
       }
 
@@ -157,19 +163,17 @@ const blogController = {
         if (cached) {
           console.log(`[Cache] HIT  blog_slug:${slug}`);
           // Still increment view count fire-and-forget
-          supabase.from('blogs').update({ view_count: (cached.data?.view_count || 0) + 1 }).eq('id', cached.data?.id);
+          if (cached.data?.id) {
+            prisma.blogs.update({ where: { id: cached.data.id }, data: { view_count: (cached.data?.view_count || 0) + 1 } }).catch(() => {});
+          }
           return res.json(cached);
         }
         console.log(`[Cache] MISS blog_slug:${slug} — fetching from DB`);
       }
 
-      const { data, error } = await supabase
-        .from('blogs')
-        .select('*')
-        .eq('slug', slug)
-        .single();
+      const data = await prisma.blogs.findUnique({ where: { slug } });
 
-      if (error || !data) {
+      if (!data) {
         return res.status(404).json({ error: 'Blog not found' });
       }
 
@@ -178,20 +182,18 @@ const blogController = {
       }
 
       // Increment view count
-      await supabase
-        .from('blogs')
-        .update({ view_count: (data.view_count || 0) + 1 })
-        .eq('id', data.id);
+      await prisma.blogs.update({
+        where: { id: data.id },
+        data: { view_count: (data.view_count || 0) + 1 },
+      });
 
       // Fetch author separately
       let author = null;
       if (data.author_id) {
-        const { data: authorData } = await supabase
-          .from('users')
-          .select('id, name, avatar_url, bio, role')
-          .eq('id', data.author_id)
-          .maybeSingle();
-        author = authorData || null;
+        author = await prisma.users.findUnique({
+          where: { id: data.author_id },
+          select: { id: true, name: true, avatar_url: true, bio: true, role: true },
+        });
       }
 
       const responsePayload = { success: true, data: { ...data, author } };
@@ -215,13 +217,10 @@ const blogController = {
         return res.status(403).json({ error: 'Admin access required' });
       }
 
-      const { data, error } = await supabase
-        .from('blogs')
-        .select('*')
-        .eq('id', blogId)
-        .maybeSingle();
-
-      if (error) {
+      let data;
+      try {
+        data = await prisma.blogs.findUnique({ where: { id: blogId } });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to fetch blog', error);
       }
 
@@ -252,13 +251,12 @@ const blogController = {
         console.log(`[Cache] MISS blog_content:${blogId} — fetching from DB`);
       }
 
-      const { data: blog, error: blogError } = await supabase
-        .from('blogs')
-        .select('id, status, is_published')
-        .eq('id', blogId)
-        .single();
+      const blog = await prisma.blogs.findUnique({
+        where: { id: blogId },
+        select: { id: true, status: true, is_published: true },
+      });
 
-      if (blogError || !blog) {
+      if (!blog) {
         return res.status(404).json({ error: 'Blog not found' });
       }
 
@@ -266,13 +264,13 @@ const blogController = {
         return res.status(403).json({ error: 'Blog not published yet' });
       }
 
-      const { data: sections, error: sectionsError } = await supabase
-        .from('blog_sections')
-        .select('*')
-        .eq('blog_id', blogId)
-        .order('display_order', { ascending: true });
-
-      if (sectionsError) {
+      let sections;
+      try {
+        sections = await prisma.blog_sections.findMany({
+          where: { blog_id: blogId },
+          orderBy: { display_order: 'asc' },
+        });
+      } catch (sectionsError) {
         return buildErrorResponse(res, 'Failed to fetch blog sections', sectionsError);
       }
 
@@ -280,17 +278,14 @@ const blogController = {
       let blocks = [];
 
       if (sectionIds.length > 0) {
-        const { data: blocksData, error: blocksError } = await supabase
-          .from('blog_blocks')
-          .select('*')
-          .in('section_id', sectionIds)
-          .order('display_order', { ascending: true });
-
-        if (blocksError) {
+        try {
+          blocks = await prisma.blog_blocks.findMany({
+            where: { section_id: { in: sectionIds } },
+            orderBy: { display_order: 'asc' },
+          });
+        } catch (blocksError) {
           return buildErrorResponse(res, 'Failed to fetch blog blocks', blocksError);
         }
-
-        blocks = blocksData || [];
       }
 
       const sectionsWithBlocks = sections.map(section => ({
@@ -314,17 +309,15 @@ const blogController = {
 
   async getBlogCategories(req, res) {
     try {
-      let query = supabase
-        .from('blogs')
-        .select('category')
-        .not('category', 'is', null);
-
+      const where = { category: { not: null } };
       if (!req.user || !['admin', 'editor', 'author'].includes(req.user.role)) {
-        query = query.eq('is_published', true);
+        where.is_published = true;
       }
 
-      const { data, error } = await query;
-      if (error) {
+      let data;
+      try {
+        data = await prisma.blogs.findMany({ where, select: { category: true } });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to fetch categories', error);
       }
 
@@ -372,7 +365,7 @@ const blogController = {
       }
 
       const baseSlug = customSlug || slugify(title);
-      const uniqueSlug = await ensureUniqueSlug(supabase, 'blogs', baseSlug);
+      const uniqueSlug = await ensureUniqueSlug(prisma.blogs, baseSlug);
 
       const statusFields = buildStatusFields({
         requestedStatus,
@@ -406,13 +399,10 @@ const blogController = {
         updated_by: req.user?.id || null
       };
 
-      const { data, error } = await supabase
-        .from('blogs')
-        .insert([payload])
-        .select()
-        .single();
-
-      if (error) {
+      let data;
+      try {
+        data = await prisma.blogs.create({ data: payload });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to create blog', error);
       }
 
@@ -448,14 +438,13 @@ const blogController = {
         status: requestedStatus
       } = req.body;
 
-      const { data: existingBlog, error: existingError } = await supabase
-        .from('blogs')
-        .select('status, published_at')
-        .eq('id', blogId)
-        .single();
+      const existingBlog = await prisma.blogs.findUnique({
+        where: { id: blogId },
+        select: { status: true, published_at: true },
+      });
 
-      if (existingError) {
-        return buildErrorResponse(res, 'Blog not found', existingError);
+      if (!existingBlog) {
+        return buildErrorResponse(res, 'Blog not found', new Error('Blog not found'));
       }
 
       const payload = {
@@ -465,7 +454,7 @@ const blogController = {
 
       if (title !== undefined) payload.title = title;
       if (customSlug !== undefined) {
-        const uniqueSlug = await ensureUniqueSlug(supabase, 'blogs', customSlug, { excludeId: blogId });
+        const uniqueSlug = await ensureUniqueSlug(prisma.blogs, customSlug, { excludeId: blogId });
         payload.slug = uniqueSlug;
       }
       if (excerpt !== undefined) payload.excerpt = excerpt;
@@ -496,14 +485,10 @@ const blogController = {
       payload.is_published = statusFields.is_published;
       payload.published_at = statusFields.published_at;
 
-      const { data, error } = await supabase
-        .from('blogs')
-        .update(payload)
-        .eq('id', blogId)
-        .select()
-        .single();
-
-      if (error) {
+      let data;
+      try {
+        data = await prisma.blogs.update({ where: { id: blogId }, data: payload });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to update blog', error);
       }
 
@@ -520,12 +505,9 @@ const blogController = {
     try {
       const { blogId } = req.params;
 
-      const { error } = await supabase
-        .from('blogs')
-        .delete()
-        .eq('id', blogId);
-
-      if (error) {
+      try {
+        await prisma.blogs.delete({ where: { id: blogId } });
+      } catch (error) {
         return buildErrorResponse(res, 'Failed to delete blog', error);
       }
 
@@ -547,18 +529,18 @@ const blogController = {
       }
 
       // Fetch existing sections
-      const { data: existingSections } = await supabase
-        .from('blog_sections')
-        .select('id')
-        .eq('blog_id', blogId);
+      const existingSections = await prisma.blog_sections.findMany({
+        where: { blog_id: blogId },
+        select: { id: true },
+      });
 
-      const existingSectionIds = (existingSections || []).map(s => s.id);
+      const existingSectionIds = existingSections.map(s => s.id);
       const incomingSectionIds = sections.filter(s => s.id && !s.id.startsWith('temp-')).map(s => s.id);
 
       // Delete removed sections
       const sectionsToDelete = existingSectionIds.filter(id => !incomingSectionIds.includes(id));
       if (sectionsToDelete.length > 0) {
-        await supabase.from('blog_sections').delete().in('id', sectionsToDelete);
+        await prisma.blog_sections.deleteMany({ where: { id: { in: sectionsToDelete } } });
       }
 
       // Upsert sections and blocks
@@ -579,34 +561,25 @@ const blogController = {
         let sectionId = section.id;
 
         if (!sectionId || sectionId.startsWith('temp-')) {
-          const { data: newSection, error } = await supabase
-            .from('blog_sections')
-            .insert([sectionPayload])
-            .select()
-            .single();
-
-          if (error) throw error;
+          const newSection = await prisma.blog_sections.create({ data: sectionPayload });
           sectionId = newSection.id;
         } else {
-          await supabase
-            .from('blog_sections')
-            .update(sectionPayload)
-            .eq('id', sectionId);
+          await prisma.blog_sections.update({ where: { id: sectionId }, data: sectionPayload });
         }
 
         // Handle blocks
         const blocks = section.blocks || [];
-        const { data: existingBlocks } = await supabase
-          .from('blog_blocks')
-          .select('id')
-          .eq('section_id', sectionId);
+        const existingBlocks = await prisma.blog_blocks.findMany({
+          where: { section_id: sectionId },
+          select: { id: true },
+        });
 
-        const existingBlockIds = (existingBlocks || []).map(b => b.id);
+        const existingBlockIds = existingBlocks.map(b => b.id);
         const incomingBlockIds = blocks.filter(b => b.id && !b.id.startsWith('temp-')).map(b => b.id);
 
         const blocksToDelete = existingBlockIds.filter(id => !incomingBlockIds.includes(id));
         if (blocksToDelete.length > 0) {
-          await supabase.from('blog_blocks').delete().in('id', blocksToDelete);
+          await prisma.blog_blocks.deleteMany({ where: { id: { in: blocksToDelete } } });
         }
 
         for (const block of blocks) {
@@ -619,9 +592,9 @@ const blogController = {
           };
 
           if (!block.id || block.id.startsWith('temp-')) {
-            await supabase.from('blog_blocks').insert([blockPayload]);
+            await prisma.blog_blocks.create({ data: blockPayload });
           } else {
-            await supabase.from('blog_blocks').update(blockPayload).eq('id', block.id);
+            await prisma.blog_blocks.update({ where: { id: block.id }, data: blockPayload });
           }
         }
       }

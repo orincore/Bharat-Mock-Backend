@@ -1,5 +1,22 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const { redisCache, CACHE_TTL, buildCacheKey } = require('../utils/redisCache');
+
+const examWithCategorySelect = {
+  id: true, title: true, slug: true, duration: true, total_questions: true, total_marks: true,
+  thumbnail_url: true, logo_url: true, image_url: true, difficulty: true,
+  category_id: true, subcategory_id: true, exam_type: true, is_premium: true, is_free: true,
+  status: true, allow_anytime: true, start_date: true, end_date: true, supports_hindi: true,
+  url_path: true, attempts: true,
+  exam_categories: { select: { logo_url: true, icon: true } },
+};
+
+const adminExamWithCategorySelect = {
+  id: true, title: true, slug: true, duration: true, total_questions: true, thumbnail_url: true,
+  logo_url: true, image_url: true, difficulty: true, category: true, subcategory: true,
+  exam_type: true, is_premium: true, is_free: true, status: true, total_marks: true,
+  supports_hindi: true, url_path: true, attempts: true,
+  exam_categories: { select: { logo_url: true, icon: true } },
+};
 
 const buildErrorResponse = (message, statusCode = 500) => ({ success: false, message, statusCode });
 
@@ -16,11 +33,10 @@ const invalidatePopularTestsCache = async (pageIdentifier) => {
 
 // Resolve which page a popular-test row belongs to (remove/toggle only receive the row id)
 const getPageIdentifierForTest = async (id) => {
-  const { data } = await supabase
-    .from('page_popular_tests')
-    .select('page_identifier')
-    .eq('id', id)
-    .single();
+  const data = await prisma.page_popular_tests.findUnique({
+    where: { id },
+    select: { page_identifier: true },
+  });
   return data?.page_identifier || null;
 };
 
@@ -32,24 +48,14 @@ const getPopularTests = async (req, res) => {
     const cachedResponse = await redisCache.get(cacheKey);
     if (cachedResponse) return res.json(cachedResponse);
 
-    const { data, error } = await supabase
-      .from('page_popular_tests')
-      .select(`
-        id,
-        display_order,
-        exams (
-          id, title, slug, duration, total_questions, total_marks,
-          thumbnail_url, logo_url, image_url, difficulty,
-          category_id, subcategory_id, exam_type, is_premium, is_free,
-          status, allow_anytime, start_date, end_date, supports_hindi,
-          url_path, exam_categories(logo_url, icon), attempts
-        )
-      `)
-      .eq('page_identifier', pageIdentifier)
-      .eq('is_active', true)
-      .order('display_order', { ascending: true });
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.page_popular_tests.findMany({
+        where: { page_identifier: pageIdentifier, is_active: true },
+        select: { id: true, display_order: true, exams: { select: examWithCategorySelect } },
+        orderBy: { display_order: 'asc' },
+      });
+    } catch (error) {
       console.error('Error fetching popular tests:', error);
       return res.status(500).json(buildErrorResponse('Failed to fetch popular tests'));
     }
@@ -74,22 +80,18 @@ const getPopularTestsAdmin = async (req, res) => {
   try {
     const { pageIdentifier } = req.params;
 
-    const { data, error } = await supabase
-      .from('page_popular_tests')
-      .select(`
-        id, page_identifier, exam_id, display_order, is_active,
-        created_at, updated_at,
-        exams (
-          id, title, slug, duration, total_questions, thumbnail_url,
-          logo_url, image_url, difficulty, category, subcategory,
-          exam_type, is_premium, is_free, status, total_marks,
-          supports_hindi, url_path, exam_categories(logo_url, icon), attempts
-        )
-      `)
-      .eq('page_identifier', pageIdentifier)
-      .order('display_order', { ascending: true });
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.page_popular_tests.findMany({
+        where: { page_identifier: pageIdentifier },
+        select: {
+          id: true, page_identifier: true, exam_id: true, display_order: true, is_active: true,
+          created_at: true, updated_at: true,
+          exams: { select: adminExamWithCategorySelect },
+        },
+        orderBy: { display_order: 'asc' },
+      });
+    } catch (error) {
       console.error('Error fetching popular tests (admin):', error);
       return res.status(500).json(buildErrorResponse('Failed to fetch popular tests'));
     }
@@ -120,37 +122,33 @@ const addPopularTest = async (req, res) => {
       return res.status(400).json(buildErrorResponse('Page identifier and exam ID are required', 400));
     }
 
-    const { data: existingTests, error: fetchError } = await supabase
-      .from('page_popular_tests')
-      .select('display_order')
-      .eq('page_identifier', pageIdentifier)
-      .order('display_order', { ascending: false })
-      .limit(1);
-
-    if (fetchError) {
+    let existingTests;
+    try {
+      existingTests = await prisma.page_popular_tests.findMany({
+        where: { page_identifier: pageIdentifier },
+        select: { display_order: true },
+        orderBy: { display_order: 'desc' },
+        take: 1,
+      });
+    } catch (fetchError) {
       console.error('Error fetching existing tests:', fetchError);
       return res.status(500).json(buildErrorResponse('Failed to add popular test'));
     }
 
     const nextOrder = existingTests.length > 0 ? existingTests[0].display_order + 1 : 0;
 
-    const { data, error } = await supabase
-      .from('page_popular_tests')
-      .insert({ page_identifier: pageIdentifier, exam_id: examId, display_order: nextOrder, is_active: true })
-      .select(`
-        id, page_identifier, exam_id, display_order, is_active,
-        created_at, updated_at,
-        exams (
-          id, title, slug, duration, total_questions, thumbnail_url,
-          logo_url, image_url, difficulty, category, subcategory,
-          exam_type, is_premium, is_free, status, total_marks,
-          supports_hindi, url_path, exam_categories(logo_url, icon), attempts
-        )
-      `)
-      .single();
-
-    if (error) {
-      if (error.code === '23505') {
+    let data;
+    try {
+      data = await prisma.page_popular_tests.create({
+        data: { page_identifier: pageIdentifier, exam_id: examId, display_order: nextOrder, is_active: true },
+        select: {
+          id: true, page_identifier: true, exam_id: true, display_order: true, is_active: true,
+          created_at: true, updated_at: true,
+          exams: { select: adminExamWithCategorySelect },
+        },
+      });
+    } catch (error) {
+      if (error.code === 'P2002') {
         return res.status(409).json(buildErrorResponse('This exam is already in the popular tests list', 409));
       }
       console.error('Error adding popular test:', error);
@@ -184,9 +182,9 @@ const removePopularTest = async (req, res) => {
     const { id } = req.params;
     // Capture the page before deleting so we know which cache(s) to bust
     const pageIdentifier = await getPageIdentifierForTest(id);
-    const { error } = await supabase.from('page_popular_tests').delete().eq('id', id);
-
-    if (error) {
+    try {
+      await prisma.page_popular_tests.delete({ where: { id } });
+    } catch (error) {
       console.error('Error removing popular test:', error);
       return res.status(500).json(buildErrorResponse('Failed to remove popular test'));
     }
@@ -209,15 +207,14 @@ const reorderPopularTests = async (req, res) => {
       return res.status(400).json(buildErrorResponse('Ordered IDs array is required', 400));
     }
 
-    const updates = orderedIds.map((id, index) =>
-      supabase.from('page_popular_tests')
-        .update({ display_order: index })
-        .eq('id', id)
-        .eq('page_identifier', pageIdentifier)
-    );
-
-    const results = await Promise.all(updates);
-    if (results.some(r => r.error)) {
+    try {
+      await prisma.$transaction(
+        orderedIds.map((id, index) => prisma.page_popular_tests.updateMany({
+          where: { id, page_identifier: pageIdentifier },
+          data: { display_order: index },
+        }))
+      );
+    } catch (error) {
       console.error('Error reordering popular tests');
       return res.status(500).json(buildErrorResponse('Failed to reorder popular tests'));
     }
@@ -240,14 +237,10 @@ const togglePopularTestStatus = async (req, res) => {
       return res.status(400).json(buildErrorResponse('isActive must be a boolean', 400));
     }
 
-    const { data, error } = await supabase
-      .from('page_popular_tests')
-      .update({ is_active: isActive })
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (error) {
+    let data;
+    try {
+      data = await prisma.page_popular_tests.update({ where: { id }, data: { is_active: isActive } });
+    } catch (error) {
       console.error('Error toggling popular test status:', error);
       return res.status(500).json(buildErrorResponse('Failed to update popular test status'));
     }

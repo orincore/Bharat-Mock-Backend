@@ -1,4 +1,4 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 const privacyFields = ['title', 'last_updated', 'intro_body', 'contact_email', 'contact_url'];
@@ -9,56 +9,35 @@ const handleError = (res, message, error) => {
 };
 
 const getPolicyContent = async () => {
-  const { data, error } = await supabase
-    .from('privacy_policy_content')
-    .select('*')
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .single();
-
-  if (error && error.code !== 'PGRST116') {
-    throw error;
-  }
+  const data = await prisma.privacy_policy_content.findFirst({
+    orderBy: { created_at: 'asc' },
+  });
 
   return data || null;
 };
 
 const getSectionsWithPoints = async (includeInactive = false) => {
-  let sectionsQuery = supabase
-    .from('privacy_policy_sections')
-    .select('*')
-    .order('display_order', { ascending: true })
-    .order('created_at', { ascending: true });
+  const sections = await prisma.privacy_policy_sections.findMany({
+    where: includeInactive ? {} : { is_active: true },
+    orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+  });
 
-  if (!includeInactive) {
-    sectionsQuery = sectionsQuery.eq('is_active', true);
-  }
-
-  const { data: sections, error: sectionsError } = await sectionsQuery;
-  if (sectionsError) throw sectionsError;
-
-  const sectionIds = (sections || []).map((section) => section.id);
+  const sectionIds = sections.map((section) => section.id);
   if (!sectionIds.length) {
     return [];
   }
 
-  let pointsQuery = supabase
-    .from('privacy_policy_points')
-    .select('*')
-    .in('section_id', sectionIds)
-    .order('display_order', { ascending: true })
-    .order('created_at', { ascending: true });
-
-  if (!includeInactive) {
-    pointsQuery = pointsQuery.eq('is_active', true);
-  }
-
-  const { data: points, error: pointsError } = await pointsQuery;
-  if (pointsError) throw pointsError;
+  const points = await prisma.privacy_policy_points.findMany({
+    where: {
+      section_id: { in: sectionIds },
+      ...(includeInactive ? {} : { is_active: true }),
+    },
+    orderBy: [{ display_order: 'asc' }, { created_at: 'asc' }],
+  });
 
   return sections.map((section) => ({
     ...section,
-    points: (points || []).filter((point) => point.section_id === section.id)
+    points: points.filter((point) => point.section_id === section.id)
   }));
 };
 
@@ -81,6 +60,12 @@ const sanitizeContentPayload = (payload = {}) => {
 
   if (!sanitized.title) {
     return null;
+  }
+
+  // Prisma needs a real Date (or full ISO-8601 datetime string) for @db.Date columns —
+  // a bare "YYYY-MM-DD" string throws "premature end of input. Expected ISO-8601 DateTime."
+  if (sanitized.last_updated) {
+    sanitized.last_updated = new Date(sanitized.last_updated);
   }
 
   sanitized.updated_at = new Date().toISOString();
@@ -120,22 +105,20 @@ const sanitizePoints = (points = []) => {
 
 const upsertRecords = async (table, items = []) => {
   if (!items.length) return [];
-  const { data, error } = await supabase.from(table).upsert(items, { onConflict: 'id' }).select('*');
-  if (error) throw error;
-  return data || [];
+  return prisma.$transaction(items.map((item) => {
+    const { id, ...data } = item;
+    return prisma[table].upsert({ where: { id }, create: item, update: data });
+  }));
 };
 
 const insertRecords = async (table, items = []) => {
   if (!items.length) return [];
-  const { data, error } = await supabase.from(table).insert(items).select('*');
-  if (error) throw error;
-  return data || [];
+  return prisma.$transaction(items.map((item) => prisma[table].create({ data: item })));
 };
 
 const deleteRecords = async (table, ids = []) => {
   if (!Array.isArray(ids) || !ids.length) return;
-  const { error } = await supabase.from(table).delete().in('id', ids);
-  if (error) throw error;
+  await prisma[table].deleteMany({ where: { id: { in: ids } } });
 };
 
 const publicPrivacyPolicy = async (req, res) => {
@@ -164,17 +147,14 @@ const adminUpsertPrivacyPolicy = async (req, res) => {
     }
 
     const existing = await getPolicyContent();
-    if (existing?.id) {
-      const { error } = await supabase
-        .from('privacy_policy_content')
-        .update(payload)
-        .eq('id', existing.id);
-      if (error) return handleError(res, 'Failed to update Privacy Policy content', error);
-    } else {
-      const { error } = await supabase
-        .from('privacy_policy_content')
-        .insert(payload);
-      if (error) return handleError(res, 'Failed to create Privacy Policy content', error);
+    try {
+      if (existing?.id) {
+        await prisma.privacy_policy_content.update({ where: { id: existing.id }, data: payload });
+      } else {
+        await prisma.privacy_policy_content.create({ data: payload });
+      }
+    } catch (error) {
+      return handleError(res, existing?.id ? 'Failed to update Privacy Policy content' : 'Failed to create Privacy Policy content', error);
     }
 
     const sectionsPayload = sanitizeSections(req.body.sections || []);

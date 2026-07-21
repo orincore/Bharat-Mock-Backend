@@ -1,69 +1,56 @@
-const supabase = require('../config/database');
+const prisma = require('../config/prisma');
 const logger = require('../config/logger');
 
 const getArticles = async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 10, 
-      search, 
-      category 
+    const {
+      page = 1,
+      limit = 10,
+      search,
+      category
     } = req.query;
 
     const offset = (page - 1) * limit;
 
-    let query = supabase
-      .from('articles')
-      .select(`
-        id,
-        slug,
-        title,
-        excerpt,
-        category,
-        image_url,
-        read_time,
-        views,
-        published_at,
-        authors (
-          id,
-          name,
-          avatar_url
-        )
-      `, { count: 'exact' })
-      .eq('is_published', true)
-      .is('deleted_at', null)
-      .order('published_at', { ascending: false });
+    const where = {
+      is_published: true,
+      deleted_at: null,
+    };
 
     if (search) {
-      query = query.or(`title.ilike.%${search}%,excerpt.ilike.%${search}%`);
+      where.OR = [
+        { title: { contains: search, mode: 'insensitive' } },
+        { excerpt: { contains: search, mode: 'insensitive' } },
+      ];
     }
 
     if (category) {
-      query = query.eq('category', category);
+      where.category = category;
     }
 
-    query = query.range(offset, offset + parseInt(limit) - 1);
+    // Fetch tags via the relation in the same query instead of one extra query per
+    // article in a loop (N+1) — same result shape, far fewer round trips.
+    const [rows, count] = await Promise.all([
+      prisma.articles.findMany({
+        where,
+        select: {
+          id: true, slug: true, title: true, excerpt: true, category: true, image_url: true,
+          read_time: true, views: true, published_at: true,
+          authors: { select: { id: true, name: true, avatar_url: true } },
+          article_tags: { select: { tag: true } },
+        },
+        orderBy: { published_at: 'desc' },
+        skip: offset,
+        take: parseInt(limit),
+      }),
+      prisma.articles.count({ where }),
+    ]);
 
-    const { data: articles, error, count } = await query;
-
-    if (error) {
-      logger.error('Get articles error:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to fetch articles'
-      });
-    }
-
-    for (let article of articles) {
-      const { data: tags } = await supabase
-        .from('article_tags')
-        .select('tag')
-        .eq('article_id', article.id);
-      
-      article.tags = tags?.map(t => t.tag) || [];
-      article.author = article.authors;
-      delete article.authors;
-    }
+    const articles = rows.map(({ authors, article_tags, ...rest }) => ({
+      ...rest,
+      author: authors,
+      tags: article_tags.map(t => t.tag),
+    }));
 
     res.json({
       success: true,
@@ -88,53 +75,35 @@ const getArticleBySlug = async (req, res) => {
   try {
     const { slug } = req.params;
 
-    const { data: article, error } = await supabase
-      .from('articles')
-      .select(`
-        id,
-        slug,
-        title,
-        excerpt,
-        content,
-        category,
-        image_url,
-        read_time,
-        views,
-        published_at,
-        meta_title,
-        meta_description,
-        authors (
-          id,
-          name,
-          avatar_url,
-          bio
-        )
-      `)
-      .eq('slug', slug)
-      .eq('is_published', true)
-      .is('deleted_at', null)
-      .single();
+    const row = await prisma.articles.findFirst({
+      where: { slug, is_published: true, deleted_at: null },
+      select: {
+        id: true, slug: true, title: true, excerpt: true, content: true, category: true,
+        image_url: true, read_time: true, views: true, published_at: true,
+        meta_title: true, meta_description: true,
+        authors: { select: { id: true, name: true, avatar_url: true, bio: true } },
+        article_tags: { select: { tag: true } },
+      },
+    });
 
-    if (error || !article) {
+    if (!row) {
       return res.status(404).json({
         success: false,
         message: 'Article not found'
       });
     }
 
-    const { data: tags } = await supabase
-      .from('article_tags')
-      .select('tag')
-      .eq('article_id', article.id);
+    const { authors, article_tags, ...rest } = row;
+    const article = {
+      ...rest,
+      author: authors,
+      tags: article_tags.map(t => t.tag),
+    };
 
-    article.tags = tags?.map(t => t.tag) || [];
-    article.author = article.authors;
-    delete article.authors;
-
-    await supabase
-      .from('articles')
-      .update({ views: (article.views || 0) + 1 })
-      .eq('id', article.id);
+    await prisma.articles.update({
+      where: { id: article.id },
+      data: { views: (article.views || 0) + 1 },
+    });
 
     res.json({
       success: true,
@@ -151,19 +120,10 @@ const getArticleBySlug = async (req, res) => {
 
 const getArticleCategories = async (req, res) => {
   try {
-    const { data: categories, error } = await supabase
-      .from('articles')
-      .select('category')
-      .eq('is_published', true)
-      .is('deleted_at', null);
-
-    if (error) {
-      logger.error('Get categories error:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to fetch categories'
-      });
-    }
+    const categories = await prisma.articles.findMany({
+      where: { is_published: true, deleted_at: null },
+      select: { category: true },
+    });
 
     const uniqueCategories = [...new Set(categories.map(c => c.category))];
 
@@ -182,18 +142,10 @@ const getArticleCategories = async (req, res) => {
 
 const getPopularTags = async (req, res) => {
   try {
-    const { data: tags, error } = await supabase
-      .from('article_tags')
-      .select('tag, article_id')
-      .limit(100);
-
-    if (error) {
-      logger.error('Get tags error:', error);
-      return res.status(500).json({
-        success: false,
-        message: 'Failed to fetch tags'
-      });
-    }
+    const tags = await prisma.article_tags.findMany({
+      select: { tag: true, article_id: true },
+      take: 100,
+    });
 
     const tagCounts = tags.reduce((acc, { tag }) => {
       acc[tag] = (acc[tag] || 0) + 1;
