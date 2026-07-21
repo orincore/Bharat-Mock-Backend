@@ -15,7 +15,12 @@ data:
   COOKIE_DOMAIN: ".bharatmock.com"
   SESSION_COOKIE_MAX_AGE_MS: "604800000"
   RATE_LIMIT_WINDOW_MS: "900000"
-  RATE_LIMIT_MAX_REQUESTS: "100"
+  # 1000 req / 15 min per real client IP (~66/min). 100 was too low for a
+  # content site: each page load fires several XHRs (homepage, navigation,
+  # footer, taxonomy, exams...) and Indian mobile users often share a CGNAT
+  # IP, so legit browsing tripped 429s. Enforced across all pods via a shared
+  # Redis store (src/server.js) and keyed on CF-Connecting-IP.
+  RATE_LIMIT_MAX_REQUESTS: "1000"
   MAX_FILE_SIZE: "5242880"
   ALLOWED_FILE_TYPES: "image/jpeg,image/png,image/webp,application/pdf"
   LOG_LEVEL: "info"

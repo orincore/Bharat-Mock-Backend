@@ -5,6 +5,8 @@ const helmet = require('helmet');
 const compression = require('compression');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const { RedisStore } = require('rate-limit-redis');
+const { redisCache } = require('./utils/redisCache');
 const passport = require('./config/passport');
 const logger = require('./config/logger');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
@@ -103,24 +105,64 @@ if (process.env.NODE_ENV !== 'production') {
 
 const API_VERSION = process.env.API_VERSION || 'v1';
 
-const globalLimiter = rateLimit({
+// Rate limiters use a SHARED Redis store (rate-limit-redis) so a limit is
+// enforced across ALL backend pods, not per-pod. With the default in-memory
+// store each HPA replica kept its own counter, so an IP effectively got
+// (replicas x max) requests and the RateLimit-Remaining header jumped around
+// depending on which pod answered a given request. The store reuses the app's
+// existing ioredis client (src/utils/redisCache). If Redis is unavailable the
+// limiter falls back to its in-memory store, and passOnStoreError lets a
+// transient Redis failure fail-open (skip limiting) rather than 500 the API.
+//
+// Key = the true visitor IP. Behind Cloudflare, CF-Connecting-IP is the
+// authoritative client IP and is immune to how many proxy hops sit in front
+// (unlike req.ip, which depends on the exact `trust proxy` hop count). Falls
+// back to req.ip for direct / local access.
+const rateLimitKey = (req) => req.headers['cf-connecting-ip'] || req.ip;
+
+const makeLimiter = ({ windowMs, max, message, prefix }) => {
+  const options = {
+    windowMs,
+    max,
+    message,
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: { xForwardedForHeader: false },
+    keyGenerator: rateLimitKey,
+    passOnStoreError: true,
+  };
+  if (redisCache.client) {
+    const store = new RedisStore({
+      prefix,
+      sendCommand: (...args) => redisCache.client.call(...args),
+    });
+    // rate-limit-redis fires SCRIPT LOAD from its constructor and stores the
+    // (un-awaited) promises on the instance. If Redis is unreachable at boot
+    // those reject with no handler — attach no-op catches so a Redis outage
+    // during a deploy fails open (passOnStoreError) rather than surfacing as
+    // noisy "Unhandled Rejection" logs. The store reloads the scripts itself
+    // on the next request once Redis is reachable again.
+    Promise.resolve(store.incrementScriptSha).catch(() => {});
+    Promise.resolve(store.getScriptSha).catch(() => {});
+    options.store = store;
+  } else {
+    logger.warn('Rate limiter: Redis client unavailable — using per-pod in-memory store');
+  }
+  return rateLimit(options);
+};
+
+const globalLimiter = makeLimiter({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 900000,
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000,
   message: { success: false, message: 'Too many requests from this IP, please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: { xForwardedForHeader: false },
-  keyGenerator: (req) => req.ip,
+  prefix: 'rl:global:',
 });
 
-const authLimiter = rateLimit({
+const authLimiter = makeLimiter({
   windowMs: 15 * 60 * 1000,
   max: 30,
   message: { success: false, message: 'Too many auth attempts, please try again after 15 minutes.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  validate: { xForwardedForHeader: false },
-  keyGenerator: (req) => req.ip,
+  prefix: 'rl:auth:',
 });
 
 if (process.env.NODE_ENV === 'production') {
