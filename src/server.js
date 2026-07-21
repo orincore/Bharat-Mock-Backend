@@ -200,6 +200,21 @@ app.use(`/api/${API_VERSION}/about`, aboutRoutes);
 app.use(`/api/${API_VERSION}/privacy`, privacyRoutes);
 app.use(`/api/${API_VERSION}/disclaimer`, disclaimerRoutes);
 app.use(`/api/${API_VERSION}/refund-policy`, refundRoutes);
+// After any successful admin CONTENT mutation, purge the Cloudflare edge cache
+// so the edit shows immediately instead of waiting for the edge TTL. No-op
+// until CF_ZONE_ID / CF_PURGE_API_TOKEN are configured. Skip reads-via-POST
+// (PDF export) and pure media uploads, which don't change rendered page HTML.
+const { schedulePurgeEverything } = require('./utils/cloudflarePurge');
+app.use(`/api/${API_VERSION}/admin`, (req, res, next) => {
+  const isMutation = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+  const skip = req.path.includes('/pdf') || req.path.includes('/upload');
+  if (isMutation && !skip) {
+    res.on('finish', () => {
+      if (res.statusCode >= 200 && res.statusCode < 300) schedulePurgeEverything();
+    });
+  }
+  next();
+});
 app.use(`/api/${API_VERSION}/admin`, adminRoutes);
 app.use(`/api/${API_VERSION}/subscriptions`, subscriptionRoutes);
 app.use(`/api/${API_VERSION}/subscription-page`, subscriptionPageRoutes);
