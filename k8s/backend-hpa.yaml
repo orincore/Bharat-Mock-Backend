@@ -1,0 +1,27 @@
+# min=2 keeps zero-downtime rolling updates + crash self-healing available at
+# all times; max=4 is a hard CPU-budget cap, not a guess — see the note in
+# backend-deployment.yaml for the arithmetic against KVM2's 2 vCPU total.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: backend-hpa
+  namespace: bharatmock
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: backend
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300 # don't flap replicas down during brief lulls
+    scaleUp:
+      stabilizationWindowSeconds: 30

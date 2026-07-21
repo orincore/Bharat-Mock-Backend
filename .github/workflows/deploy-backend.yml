@@ -1,0 +1,59 @@
+name: Deploy backend
+
+on:
+  push:
+    branches: [main]
+
+# Only one deploy in flight at a time — a second push landing mid-rollout
+# should queue behind the first, not race it.
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/bharat-mock-backend
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Deploys over SSH rather than exposing the k3s API to the internet —
+      # see k8s/bootstrap-kvm2.sh for why 6443 is deliberately not opened.
+      # kubectl on KVM2 already has the cluster's kubeconfig locally.
+      - name: Roll out to KVM2
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.KVM2_HOST }}
+          username: ${{ secrets.KVM2_SSH_USER }}
+          key: ${{ secrets.KVM2_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+            kubectl set image deployment/backend backend=${{ env.IMAGE }}:${{ github.sha }} -n bharatmock
+            kubectl rollout status deployment/backend -n bharatmock --timeout=180s

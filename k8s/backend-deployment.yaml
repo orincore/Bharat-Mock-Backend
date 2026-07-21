@@ -1,0 +1,67 @@
+# Resource budget note (KVM2 = 2 vCPU / 8GB total, shared with the frontend,
+# Redis, and the k3s control plane + Traefik + metrics-server):
+#   requests: 200m CPU / 300Mi mem  x up to 4 replicas (HPA, see backend-hpa.yaml)
+#   limits:   600m CPU / 900Mi mem  — the 900Mi ceiling gives headroom for the
+#             one shared Chromium instance src/utils/pdfBrowser.js keeps alive
+#             per-pod for PDF exports (~150-250MB resident on its own).
+# At max replicas (4) this reserves ~800m CPU / 1.2GB mem in requests, leaving
+# room for the frontend's own HPA range + ~400-500m/1.5GB fixed cluster overhead
+# under the box's 2000m/8GB ceiling.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: bharatmock
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: backend
+          image: ghcr.io/OWNER/bharat-mock-backend:latest # replaced by CI on every deploy
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: backend-config
+            - secretRef:
+                name: backend-secret
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "300Mi"
+            limits:
+              cpu: "600m"
+              memory: "900Mi"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3

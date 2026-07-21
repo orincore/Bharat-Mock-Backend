@@ -1,0 +1,36 @@
+# Non-secret backend env vars. Secrets (DATABASE_URL, JWT_SECRET, R2/Razorpay/SMTP
+# keys, etc.) are NOT here — see k8s/README.md for how backend-secret is created
+# directly on the server from a gitignored .env.production file, never committed.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: bharatmock
+data:
+  NODE_ENV: "production"
+  PORT: "8000"
+  API_VERSION: "v1"
+  FRONTEND_URL: "https://bharatmock.com"
+  ALLOWED_ORIGINS: "https://bharatmock.com,https://www.bharatmock.com"
+  COOKIE_DOMAIN: ".bharatmock.com"
+  SESSION_COOKIE_MAX_AGE_MS: "604800000"
+  RATE_LIMIT_WINDOW_MS: "900000"
+  RATE_LIMIT_MAX_REQUESTS: "100"
+  MAX_FILE_SIZE: "5242880"
+  ALLOWED_FILE_TYPES: "image/jpeg,image/png,image/webp,application/pdf"
+  LOG_LEVEL: "info"
+  # KVM1 is a 1 vCPU / 4GB box — Postgres there is tuned for max_connections=40
+  # (see infra/kvm1-db/postgresql-tuning.conf) with PgBouncer in front. Each
+  # backend replica opens its own pg.Pool (src/config/prisma.js); DB_POOL_MAX
+  # here is the per-replica cap, sized so replicas * DB_POOL_MAX stays well
+  # under PgBouncer's default_pool_size, not under Postgres's max_connections
+  # directly — PgBouncer is what actually protects Postgres from being
+  # overwhelmed as HPA adds replicas.
+  DB_POOL_MAX: "10"
+  DB_POOL_MIN: "2"
+  DB_POOL_IDLE_TIMEOUT: "30000"
+  DB_POOL_ACQUIRE_TIMEOUT: "60000"
+  ENABLE_QUERY_LOGGING: "false"
+  REDIS_HOST: "redis.bharatmock.svc.cluster.local"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"

@@ -1,0 +1,15 @@
+# Traefik (k3s's bundled ingress controller — chosen over installing
+# ingress-nginx separately, since a second ingress controller would just be
+# ~150-200MB of redundant overhead on a 2 vCPU/8GB box) middleware for basic
+# API abuse protection at the edge, ahead of the app's own express-rate-limit
+# (defense in depth: this stops abusive traffic before it even reaches a pod).
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: api-ratelimit
+  namespace: bharatmock
+spec:
+  rateLimit:
+    average: 50 # requests/sec/source-IP, sustained
+    burst: 100
+    period: 1s

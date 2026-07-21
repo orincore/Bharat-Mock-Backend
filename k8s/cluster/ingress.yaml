@@ -1,0 +1,55 @@
+# Single Ingress for both bharatmock.com (frontend, service defined in the
+# Bharat-Mock-Frontend repo's own k8s/frontend-service.yaml — same namespace,
+# so it's addressable here) and api.bharatmock.com (backend). TLS uses a
+# Cloudflare Origin Certificate, not cert-manager/Let's Encrypt — Cloudflare is
+# already proxying both domains, so a 15-year Cloudflare-issued origin cert
+# avoids running cert-manager's controller+webhook+cainjector (~300MB combined)
+# for renewal automation that a 15-year cert doesn't need. See k8s/README.md
+# for how to create the `cloudflare-origin-tls` secret this references.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bharatmock-ingress
+  namespace: bharatmock
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: bharatmock-api-ratelimit@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - bharatmock.com
+        - www.bharatmock.com
+        - api.bharatmock.com
+      secretName: cloudflare-origin-tls
+  rules:
+    - host: bharatmock.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
+    - host: www.bharatmock.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
+    - host: api.bharatmock.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backend-service
+                port:
+                  number: 80

@@ -1,0 +1,66 @@
+# Redis lives on KVM2 (same node as the backend), not KVM1 with Postgres —
+# colocating it with the backend avoids an extra network hop on every cache
+# read, which matters more for latency than colocating with the DB. A single
+# instance is enough (this is a cache with an in-memory fallback already built
+# into src/utils/redisCache.js — losing the pod just means a cold cache, not
+# data loss), so no HPA/replicas here, and no PVC: cache data isn't worth
+# persisting through a restart on this box.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: bharatmock
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # a cache; no need for the rolling-update complexity of a stateful singleton
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args:
+            - "--maxmemory"
+            - "256mb"
+            - "--maxmemory-policy"
+            - "allkeys-lru"
+            - "--requirepass"
+            - "$(REDIS_PASSWORD)"
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: backend-secret
+                  key: REDIS_PASSWORD
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "320Mi"
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "redis-cli -a \"$REDIS_PASSWORD\" ping | grep -q PONG"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: bharatmock
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
