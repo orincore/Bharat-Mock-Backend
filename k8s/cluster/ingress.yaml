@@ -1,26 +1,38 @@
-# Single Ingress for both bharatmock.com (frontend, service defined in the
-# Bharat-Mock-Frontend repo's own k8s/frontend-service.yaml — same namespace,
-# so it's addressable here) and api.bharatmock.com (backend). TLS uses a
-# Cloudflare Origin Certificate, not cert-manager/Let's Encrypt — Cloudflare is
-# already proxying both domains, so a 15-year Cloudflare-issued origin cert
-# avoids running cert-manager's controller+webhook+cainjector (~300MB combined)
-# for renewal automation that a 15-year cert doesn't need. See k8s/README.md
-# for how to create the `cloudflare-origin-tls` secret this references.
+# TWO Ingresses — frontend (bharatmock.com/www) and API (api.bharatmock.com) —
+# split because Traefik's `router.middlewares` annotation is Ingress-wide and
+# the two need DIFFERENT middleware chains:
+#   - frontend: api-ratelimit + frontend-vary-normalize (rewrites Vary to
+#     Accept-Encoding so Cloudflare can edge-cache anonymous SSR HTML — see
+#     frontend-vary-middleware.yaml for the full reasoning)
+#   - api:      api-ratelimit only. The API's `Vary: Origin` (CORS) must NOT
+#     be stripped: API responses carry no Cache-Control, so a browser could
+#     heuristically cache them, and without Vary: Origin a response for one
+#     origin could be replayed for another.
+# (Historical note: these were one shared Ingress until 2026-07 — the shared
+# annotation silently applied api-ratelimit to the frontend hosts too, which
+# is preserved here deliberately.)
+#
+# TLS uses a Cloudflare Origin Certificate, not cert-manager/Let's Encrypt —
+# Cloudflare is already proxying all hostnames, so a 15-year Cloudflare-issued
+# origin cert avoids running cert-manager's controller+webhook+cainjector
+# (~300MB combined) for renewal automation that a 15-year cert doesn't need.
+# See k8s/README.md for how to create the `cloudflare-origin-tls` secret.
+# frontend-service is defined in the Bharat-Mock-Frontend repo's own
+# k8s/frontend-service.yaml — same namespace, so it's addressable here.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: bharatmock-ingress
+  name: bharatmock-frontend-ingress
   namespace: bharatmock
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.middlewares: bharatmock-api-ratelimit@kubernetescrd
+    traefik.ingress.kubernetes.io/router.middlewares: bharatmock-api-ratelimit@kubernetescrd,bharatmock-frontend-vary-normalize@kubernetescrd
 spec:
   ingressClassName: traefik
   tls:
     - hosts:
         - bharatmock.com
         - www.bharatmock.com
-        - api.bharatmock.com
       secretName: cloudflare-origin-tls
   rules:
     - host: bharatmock.com
@@ -43,6 +55,25 @@ spec:
                 name: frontend-service
                 port:
                   number: 80
+---
+# NOTE: keeps the historical name `bharatmock-ingress` so `kubectl apply`
+# updates the pre-split resource in place (no delete/create gap for the API
+# host) — do not rename.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: bharatmock-ingress
+  namespace: bharatmock
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.middlewares: bharatmock-api-ratelimit@kubernetescrd
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - api.bharatmock.com
+      secretName: cloudflare-origin-tls
+  rules:
     - host: api.bharatmock.com
       http:
         paths:

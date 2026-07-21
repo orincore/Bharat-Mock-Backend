@@ -1,0 +1,27 @@
+# Normalizes the frontend's Vary header so Cloudflare can edge-cache anonymous
+# SSR HTML. Next.js App Router stamps every page response with
+# `Vary: rsc, next-router-state-tree, next-router-prefetch, ...` and MERGES
+# (rather than replaces) anything the Next middleware sets — and Cloudflare
+# refuses to cache any response whose Vary lists more than Accept-Encoding.
+# Rewriting it here, at the ingress hop between Next and Cloudflare, is the
+# one reliable place.
+#
+# Correctness notes (why this is safe):
+# - Cloudflare never caches RSC payloads anyway: the Cache Rule bypasses
+#   requests with the `RSC: 1` header, and logged-in (bm_session) responses
+#   keep `private, no-cache` from the app.
+# - Browsers can't mix up HTML vs RSC for the same URL despite the collapsed
+#   Vary: anonymous pages send `max-age=0` with NO stale-while-revalidate, so
+#   browsers revalidate on every use (see the frontend repo's middleware.ts).
+# - This middleware must ONLY be attached to the frontend hosts. The API keeps
+#   `Vary: Origin` for CORS correctness — hence the frontend/api Ingress split
+#   in ingress.yaml.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: frontend-vary-normalize
+  namespace: bharatmock
+spec:
+  headers:
+    customResponseHeaders:
+      Vary: "Accept-Encoding"
