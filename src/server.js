@@ -1,4 +1,5 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -118,9 +119,59 @@ const API_VERSION = process.env.API_VERSION || 'v1';
 // authoritative client IP and is immune to how many proxy hops sit in front
 // (unlike req.ip, which depends on the exact `trust proxy` hop count). Falls
 // back to req.ip for direct / local access.
-const rateLimitKey = (req) => req.headers['cf-connecting-ip'] || req.ip;
+// Requests our own Next.js frontend makes to the API on behalf of visitors —
+// the /api/session -> /auth/profile session check plus every server-side
+// (SSR/ISR) page-data fetch — all originate from ONE machine (the frontend
+// pod). Cloudflare stamps cf-connecting-ip at the API edge with that pod's IP,
+// and req.ip is the same, so without special handling every visitor collapses
+// into a single rate-limit bucket that trips in seconds: /api/session returns
+// 429 for everyone and SSR fetches 429 -> notFound() -> 404 across the site.
+//
+// The frontend attaches INTERNAL_PROXY_SECRET on these server-to-server calls
+// (see frontend src/lib/server/internalApiHeaders.ts). When present and valid we
+// (a) never count the request against IP limits [skip, below] because it acts
+// for the whole user base rather than one abuser, and (b) if it forwards the
+// visitor's real IP, bucket by that instead of the collapsed frontend IP. End
+// users hitting the API directly from the browser are unaffected — those carry
+// their own cf-connecting-ip and remain rate limited normally.
+const INTERNAL_PROXY_SECRET = process.env.INTERNAL_PROXY_SECRET || '';
+const isTrustedInternalProxy = (req) =>
+  !!INTERNAL_PROXY_SECRET &&
+  req.headers['x-internal-proxy-secret'] === INTERNAL_PROXY_SECRET;
 
-const makeLimiter = ({ windowMs, max, message, prefix }) => {
+const rateLimitKey = (req) => {
+  if (isTrustedInternalProxy(req) && req.headers['x-real-client-ip']) {
+    return String(req.headers['x-real-client-ip']);
+  }
+  return req.headers['cf-connecting-ip'] || req.ip;
+};
+
+// Global-limiter key that survives Indian mobile scale. Most of our users are on
+// Jio/Airtel/Vi, whose CGNAT puts thousands of subscribers behind ONE public IP.
+// A purely per-IP content limit would therefore 429 huge blocks of legitimate,
+// logged-in users at 50k+ concurrency. So for the coarse /api/ limiter we bucket
+// an authenticated visitor by their own session token instead of their shared
+// IP: each real user gets an independent window regardless of CGNAT. The token
+// is only HASHED here (never verified/decoded) — cheap, runs before auth
+// middleware, and can't throw. Anonymous requests fall back to CF-Connecting-IP;
+// those are overwhelmingly cacheable GETs served from the Cloudflare edge, so
+// they rarely reach this limiter at all. Brute-force protection on credential
+// endpoints stays strictly per-IP (authLimiter) — that MUST stay IP-keyed.
+const sessionOrIpKey = (req) => {
+  if (isTrustedInternalProxy(req) && req.headers['x-real-client-ip']) {
+    return String(req.headers['x-real-client-ip']);
+  }
+  const auth = req.headers['authorization'] || '';
+  const bearer = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  const cookieMatch = /(?:^|;\s*)bm_session=([^;]+)/.exec(req.headers['cookie'] || '');
+  const token = bearer || (cookieMatch ? cookieMatch[1] : '');
+  if (token) {
+    return 'sess:' + crypto.createHash('sha256').update(token).digest('hex');
+  }
+  return req.headers['cf-connecting-ip'] || req.ip;
+};
+
+const makeLimiter = ({ windowMs, max, message, prefix, keyGenerator }) => {
   const options = {
     windowMs,
     max,
@@ -128,7 +179,12 @@ const makeLimiter = ({ windowMs, max, message, prefix }) => {
     standardHeaders: true,
     legacyHeaders: false,
     validate: { xForwardedForHeader: false },
-    keyGenerator: rateLimitKey,
+    keyGenerator: keyGenerator || rateLimitKey,
+    // Never rate-limit our own frontend's server-to-server calls: one frontend
+    // pod fans out requests for the entire user base, so counting them as a
+    // single IP is what took the site down (429 storm -> 404s). Guarded by a
+    // shared secret so end users cannot spoof the exemption.
+    skip: isTrustedInternalProxy,
     passOnStoreError: true,
   };
   if (redisCache.client) {
@@ -156,6 +212,7 @@ const globalLimiter = makeLimiter({
   max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 1000,
   message: { success: false, message: 'Too many requests from this IP, please try again later.' },
   prefix: 'rl:global:',
+  keyGenerator: sessionOrIpKey, // per-session for logged-in users (CGNAT-safe)
 });
 
 const authLimiter = makeLimiter({
@@ -178,7 +235,25 @@ app.get('/health', (req, res) => {
 });
 
 if (process.env.NODE_ENV === 'production') {
-  app.use(`/api/${API_VERSION}/auth`, authLimiter);
+  // Brute-force protection (30 req / 15 min) belongs ONLY on credential
+  // endpoints. It must NOT cover GET /profile — the session check the frontend
+  // runs on every page load via /api/session — nor /refresh or /logout. Mounting
+  // it on the whole /auth prefix is what turned a normal browsing session into a
+  // 429 storm and took the site down. Mount it per-endpoint instead.
+  const authPrefix = `/api/${API_VERSION}/auth`;
+  const bruteForceEndpoints = [
+    '/login',
+    '/register',
+    '/send-registration-otp',
+    '/verify-registration-otp',
+    '/forgot-password',
+    '/reset-password',
+    '/change-password', // also covers /change-password/send-otp (prefix match)
+    '/google/complete-registration',
+  ];
+  for (const endpoint of bruteForceEndpoints) {
+    app.use(`${authPrefix}${endpoint}`, authLimiter);
+  }
 }
 app.use(`/api/${API_VERSION}/auth`, authRoutes);
 app.use(`/api/${API_VERSION}/exams`, examRoutes);

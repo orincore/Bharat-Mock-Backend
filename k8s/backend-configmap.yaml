@@ -15,12 +15,16 @@ data:
   COOKIE_DOMAIN: ".bharatmock.com"
   SESSION_COOKIE_MAX_AGE_MS: "604800000"
   RATE_LIMIT_WINDOW_MS: "900000"
-  # 1000 req / 15 min per real client IP (~66/min). 100 was too low for a
-  # content site: each page load fires several XHRs (homepage, navigation,
-  # footer, taxonomy, exams...) and Indian mobile users often share a CGNAT
-  # IP, so legit browsing tripped 429s. Enforced across all pods via a shared
-  # Redis store (src/server.js) and keyed on CF-Connecting-IP.
-  RATE_LIMIT_MAX_REQUESTS: "1000"
+  # Coarse /api/ backstop. Logged-in users are now bucketed by their SESSION
+  # token, not their IP (src/server.js sessionOrIpKey), so this ceiling no longer
+  # has to absorb an entire CGNAT block of real users on one key — it applies
+  # per-user for authenticated traffic and per-IP only for anonymous requests
+  # (which are overwhelmingly Cloudflare-edge-cached GETs that rarely reach the
+  # origin). 2000/15min (~133/min) gives an active user generous headroom while
+  # still capping a single abuser. The frontend's own server-to-server calls are
+  # exempt entirely via INTERNAL_PROXY_SECRET. Enforced across all pods via a
+  # shared Redis store.
+  RATE_LIMIT_MAX_REQUESTS: "2000"
   MAX_FILE_SIZE: "5242880"
   ALLOWED_FILE_TYPES: "image/jpeg,image/png,image/webp,application/pdf"
   LOG_LEVEL: "info"
