@@ -51,11 +51,31 @@ function esc(value) {
 // Rich HTML fields (question/option/explanation/passage/instructions) come from
 // the CMS and are inserted as-is, exactly as the on-screen exam does. We only
 // strip <script>/<style> to avoid them leaking into the print document.
+//
+// We ALSO neutralise any inline font sizing baked into the stored HTML. Content
+// pasted from Word / Google Docs / other pages carries inline `font-size` (and
+// legacy <font size>) declarations. Those inline values override the print
+// stylesheet's per-class sizes (.answer-exp, .q-text, .passage-body, …), which
+// is why some explanations rendered smaller than their neighbours. Stripping the
+// inline sizes lets the PDF's own CSS govern the type scale so every explanation
+// (and question/passage) is uniform regardless of how it was authored.
+function stripInlineFontSize(html) {
+  return html
+    // Remove `font-size: …;` from any inline style attribute.
+    .replace(/font-size\s*:\s*[^;"']*;?/gi, '')
+    // Drop the legacy size attribute from <font> tags.
+    .replace(/(<font\b[^>]*?)\s+size\s*=\s*(["'][^"']*["']|[^\s>]+)/gi, '$1')
+    // Clean up any now-empty style attributes left behind.
+    .replace(/\s+style\s*=\s*(["'])\s*\1/gi, '');
+}
+
 function rich(html) {
   if (!html) return '';
-  return String(html)
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
+  return stripInlineFontSize(
+    String(html)
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '')
+  );
 }
 
 // ── Instructions (kept in sync with the frontend src/lib/examInstructions.ts) ──
@@ -213,6 +233,12 @@ function buildStyles() {
     .rich table { border-collapse: collapse; }
     .rich td, .rich th { border: 1px solid #d1d5db; padding: 3px 6px; }
     .rich p { margin: 0 0 4px; }
+    /* Pasted headings must inherit their container's size (like the attempt page
+       does) so an <h2> dropped into an explanation/question doesn't render at
+       Chromium's default large size and break the uniform type scale. */
+    .rich h1, .rich h2, .rich h3, .rich h4, .rich h5, .rich h6 {
+      font-size: inherit; font-weight: 600; margin: 0 0 4px;
+    }
   `;
 }
 
